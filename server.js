@@ -3,6 +3,26 @@ const fs = require("fs");
 const http = require("http");
 const path = require("path");
 
+function loadEnvFile() {
+  const envPath = path.join(__dirname, ".env");
+  if (!fs.existsSync(envPath)) return;
+  const rows = fs.readFileSync(envPath, "utf8").split(/\r?\n/);
+  rows.forEach((row) => {
+    const line = row.trim();
+    if (!line || line.startsWith("#")) return;
+    const equalsAt = line.indexOf("=");
+    if (equalsAt < 1) return;
+    const key = line.slice(0, equalsAt).trim();
+    let value = line.slice(equalsAt + 1).trim();
+    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+      value = value.slice(1, -1);
+    }
+    if (!process.env[key]) process.env[key] = value;
+  });
+}
+
+loadEnvFile();
+
 const PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.HOST || "0.0.0.0";
 const ROOT = __dirname;
@@ -13,8 +33,9 @@ const MARKET_FILE = path.join(DATA_DIR, "market.txt");
 const SETTINGS_FILE = path.join(DATA_DIR, "settings.json");
 const NEWS_FILE = path.join(DATA_DIR, "news.txt");
 const SESSION_TTL_MS = 1000 * 60 * 60 * 24;
-const ADMIN_USERNAME = "Admin";
-const ADMIN_PASSWORD = "Admin";
+const ADMIN_USERNAME = process.env.ADMIN_USERNAME || "Admin";
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "Admin";
+const DATABASE_URL = process.env.DATABASE_URL || "";
 const BASE_RIVALS = [];
 
 const DEFAULT_SETTINGS = {
@@ -68,6 +89,8 @@ const DEFAULT_SETTINGS = {
 
 const sessions = new Map();
 let previousNewsLeaders = { land: null, assets: null };
+let storage = null;
+let dbPool = null;
 
 const mimeTypes = {
   ".html": "text/html; charset=utf-8",
@@ -94,6 +117,90 @@ function ensureDataFiles() {
   if (!fs.existsSync(NEWS_FILE)) {
     fs.writeFileSync(NEWS_FILE, "[]", "utf8");
   }
+}
+
+function readFileStorageSnapshot() {
+  ensureDataFiles();
+  const users = fs.readFileSync(USERS_FILE, "utf8")
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .map((row) => JSON.parse(row));
+
+  let market = { land: {} };
+  let settings = DEFAULT_SETTINGS;
+  let news = [];
+
+  try {
+    market = JSON.parse(fs.readFileSync(MARKET_FILE, "utf8") || "{}");
+  } catch {
+    market = { land: {} };
+  }
+
+  try {
+    settings = JSON.parse(fs.readFileSync(SETTINGS_FILE, "utf8") || "{}");
+  } catch {
+    settings = DEFAULT_SETTINGS;
+  }
+
+  try {
+    const rows = JSON.parse(fs.readFileSync(NEWS_FILE, "utf8") || "[]");
+    news = Array.isArray(rows) ? rows : [];
+  } catch {
+    news = [];
+  }
+
+  return { users, market, settings, news };
+}
+
+async function initDatabaseStorage() {
+  if (!DATABASE_URL) return null;
+
+  const { Pool } = require("pg");
+  const pool = new Pool({ connectionString: DATABASE_URL });
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS app_state (
+      key text PRIMARY KEY,
+      value jsonb NOT NULL,
+      updated_at timestamptz NOT NULL DEFAULT now()
+    )
+  `);
+
+  const snapshot = readFileStorageSnapshot();
+  for (const [key, value] of Object.entries(snapshot)) {
+    await pool.query(
+      `INSERT INTO app_state (key, value)
+       VALUES ($1, $2::jsonb)
+       ON CONFLICT (key) DO NOTHING`,
+      [key, JSON.stringify(value)]
+    );
+  }
+
+  const rows = await pool.query("SELECT key, value FROM app_state");
+  const state = Object.fromEntries(rows.rows.map((row) => [row.key, row.value]));
+  dbPool = pool;
+  return {
+    users: Array.isArray(state.users) ? state.users : [],
+    market: state.market && typeof state.market === "object" ? state.market : { land: {} },
+    settings: state.settings && typeof state.settings === "object" ? state.settings : DEFAULT_SETTINGS,
+    news: Array.isArray(state.news) ? state.news : []
+  };
+}
+
+function persistState(key) {
+  if (!dbPool || !storage) return;
+  dbPool.query(
+    `INSERT INTO app_state (key, value, updated_at)
+     VALUES ($1, $2::jsonb, now())
+     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
+    [key, JSON.stringify(storage[key])]
+  ).catch((error) => {
+    console.error(`Failed to persist ${key}:`, error.message);
+  });
+}
+
+async function initStorage() {
+  storage = await initDatabaseStorage();
+  if (!storage) storage = readFileStorageSnapshot();
 }
 
 function numberIn(value, fallback, min = 0, max = 1_000_000_000) {
@@ -227,9 +334,8 @@ function sanitizeAssetPhotos(photos) {
 }
 
 function readSettings() {
-  ensureDataFiles();
   try {
-    return sanitizeSettings(JSON.parse(fs.readFileSync(SETTINGS_FILE, "utf8") || "{}"));
+    return sanitizeSettings(storage?.settings || DEFAULT_SETTINGS);
   } catch {
     return sanitizeSettings(DEFAULT_SETTINGS);
   }
@@ -237,7 +343,13 @@ function readSettings() {
 
 function writeSettings(settings) {
   const clean = sanitizeSettings(settings);
-  fs.writeFileSync(SETTINGS_FILE, JSON.stringify(clean, null, 2), "utf8");
+  if (storage) {
+    storage.settings = clean;
+    persistState("settings");
+  } else {
+    ensureDataFiles();
+    fs.writeFileSync(SETTINGS_FILE, JSON.stringify(clean, null, 2), "utf8");
+  }
   return clean;
 }
 
@@ -347,19 +459,21 @@ function sanitizeMachineryBatches(batches) {
 }
 
 function readUsers() {
-  ensureDataFiles();
-  const rows = fs.readFileSync(USERS_FILE, "utf8").split(/\r?\n/).filter(Boolean);
-  return rows.map((row) => JSON.parse(row));
+  return Array.isArray(storage?.users) ? storage.users : [];
 }
 
 function writeUsers(users) {
-  ensureDataFiles();
-  const content = users.map((user) => JSON.stringify(user)).join("\n");
-  fs.writeFileSync(USERS_FILE, content ? `${content}\n` : "", "utf8");
+  if (storage) {
+    storage.users = users;
+    persistState("users");
+  } else {
+    ensureDataFiles();
+    const content = users.map((user) => JSON.stringify(user)).join("\n");
+    fs.writeFileSync(USERS_FILE, content ? `${content}\n` : "", "utf8");
+  }
 }
 
 function ensureAdminUser() {
-  ensureDataFiles();
   const users = readUsers();
   let admin = users.find((user) => String(user.username || "").toLowerCase() === ADMIN_USERNAME.toLowerCase());
   if (!admin) {
@@ -384,9 +498,8 @@ function ensureAdminUser() {
 }
 
 function readMarket() {
-  ensureDataFiles();
   try {
-    const market = JSON.parse(fs.readFileSync(MARKET_FILE, "utf8") || "{}");
+    const market = storage?.market || { land: {} };
     return market && typeof market === "object" && market.land && typeof market.land === "object"
       ? { land: market.land, resetAt: typeof market.resetAt === "string" ? market.resetAt : null }
       : { land: {} };
@@ -396,14 +509,19 @@ function readMarket() {
 }
 
 function writeMarket(market) {
-  ensureDataFiles();
-  fs.writeFileSync(MARKET_FILE, JSON.stringify({ land: market.land || {}, resetAt: market.resetAt || null }, null, 2), "utf8");
+  const clean = { land: market.land || {}, resetAt: market.resetAt || null };
+  if (storage) {
+    storage.market = clean;
+    persistState("market");
+  } else {
+    ensureDataFiles();
+    fs.writeFileSync(MARKET_FILE, JSON.stringify(clean, null, 2), "utf8");
+  }
 }
 
 function readNewsEvents() {
-  ensureDataFiles();
   try {
-    const rows = JSON.parse(fs.readFileSync(NEWS_FILE, "utf8") || "[]");
+    const rows = storage?.news || [];
     return Array.isArray(rows)
       ? rows.slice(-80).map((item) => ({
         type: String(item.type || "event").slice(0, 40),
@@ -420,8 +538,14 @@ function readNewsEvents() {
 }
 
 function writeNewsEvents(rows) {
-  ensureDataFiles();
-  fs.writeFileSync(NEWS_FILE, JSON.stringify(rows.slice(-80), null, 2), "utf8");
+  const clean = rows.slice(-80);
+  if (storage) {
+    storage.news = clean;
+    persistState("news");
+  } else {
+    ensureDataFiles();
+    fs.writeFileSync(NEWS_FILE, JSON.stringify(clean, null, 2), "utf8");
+  }
 }
 
 function appendNewsEvent(row) {
@@ -1530,19 +1654,28 @@ async function handleApi(req, res) {
   }
 }
 
-ensureDataFiles();
-ensureAdminUser();
+async function startServer() {
+  ensureDataFiles();
+  await initStorage();
+  ensureAdminUser();
 
-http.createServer((req, res) => {
-  if (req.url.startsWith("/api/")) {
-    handleApi(req, res);
-    return;
-  }
+  http.createServer((req, res) => {
+    if (req.url.startsWith("/api/")) {
+      handleApi(req, res);
+      return;
+    }
 
-  serveStatic(req, res);
-}).listen(PORT, HOST, () => {
-  console.log(`AgroMap працює за адресою http://localhost:${PORT}`);
-  console.log(`Доступ з локальної мережі увімкнено на порту ${PORT}.`);
+    serveStatic(req, res);
+  }).listen(PORT, HOST, () => {
+    console.log(`AgroMap працює за адресою http://localhost:${PORT}`);
+    console.log(`Доступ з локальної мережі увімкнено на порту ${PORT}.`);
+    console.log(DATABASE_URL ? "Сховище гри: PostgreSQL." : "Сховище гри: локальні файли data.");
+  });
+}
+
+startServer().catch((error) => {
+  console.error("Не вдалося запустити сервер:", error);
+  process.exit(1);
 });
 
 
