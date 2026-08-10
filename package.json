@@ -1,0 +1,10 @@
+{
+  "name": "agro-coin-farm",
+  "version": "1.0.0",
+  "description": "Local browser agro game with login, registration, guest mode, and persistent farm state.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "license": "UNLICENSED"
+}

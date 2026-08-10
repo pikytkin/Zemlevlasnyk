@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="uk">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>AgroMap</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIINfQnLtnNSsK2suw0K5pEqxyfDzGZU4kk=" crossorigin="">
+    <link rel="stylesheet" href="/styles.css?v=20260809-mobile-news-tooltip">
+  </head>
+  <body>
+    <main class="app-shell">
+      <section class="splash" id="authScreen">
+        <div class="splash-map" aria-hidden="true">
+          <div class="map-card">
+            <div class="splash-leaflet-map" id="splashMap"></div>
+          </div>
+        </div>
+        <div class="auth-panel">
+          <p class="eyebrow">Економічна стратегія</p>
+          <h1>AgroMap</h1>
+          <p class="intro">Карта України як ринок землі: купуйте земельні ділянки, з'єднуйте території, розвивайте господарства й зростайте до агрохолдингу.</p>
+          <div class="auth-tabs" role="tablist" aria-label="Вибір режиму входу">
+            <button class="auth-tab is-active" type="button" data-auth-tab="login">Вхід</button>
+            <button class="auth-tab" type="button" data-auth-tab="register">Реєстрація</button>
+          </div>
+          <form class="auth-form" id="loginForm">
+            <label>Ім'я гравця <input name="username" autocomplete="username" required minlength="3" maxlength="24"></label>
+            <label>Пароль <input name="password" type="password" autocomplete="current-password" required minlength="4"></label>
+            <button class="primary-action" type="submit">Увійти на карту</button>
+          </form>
+          <form class="auth-form is-hidden" id="registerForm">
+            <label>Ім'я гравця <input name="username" autocomplete="username" required minlength="3" maxlength="24"></label>
+            <label>Пароль <input name="password" type="password" autocomplete="new-password" required minlength="4"></label>
+            <button class="primary-action" type="submit">Заснувати компанію</button>
+          </form>
+          <button class="guest-action" id="guestButton" type="button">Розвідка без реєстрації</button>
+          <p class="status-line" id="authStatus" role="status" aria-live="polite"></p>
+        </div>
+      </section>
+
+      <section class="game is-hidden" id="gameScreen">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow">AgroMap · день <span id="dayCount">1</span></p>
+            <h2 id="playerName">Карта володінь</h2>
+          </div>
+          <div class="top-actions">
+            <div class="wallet"><span>Баланс</span><strong id="coinCount">500 мон.</strong></div>
+            <button class="secondary-action" id="profileButton" type="button">Профіль</button>
+            <button class="secondary-action" id="helpButton" type="button">Довідка</button>
+            <button class="secondary-action" id="adminButton" type="button">Адмін</button>
+            <button class="secondary-action" id="incomeButton" type="button">Отримати дохід</button>
+          </div>
+        </header>
+
+        <div class="game-grid">
+          <aside class="control-panel is-hidden" id="cellInfoPanel">
+            <section>
+              <button class="panel-close" id="closeCellInfoButton" type="button" aria-label="Закрити детальну інформацію">×</button>
+              <p class="eyebrow">Обрана ділянка</p>
+              <h3 id="cellTitle">Оберіть ділянку</h3>
+              <dl class="cell-details" id="cellDetails"></dl>
+            </section>
+            <section>
+              <p class="eyebrow">Техніка</p>
+              <div class="metric-list">
+                <div><span>Земля</span><strong id="ownedMetric">0</strong></div>
+                <div><span>Найбільше господарство</span><strong id="largestClusterMetric">0</strong></div>
+                <div><span>Дохід за день</span><strong id="incomeMetric">0 мон.</strong></div>
+                <div><span>Техніка</span><strong id="assetMetric">0</strong></div>
+              </div>
+            </section>
+          </aside>
+
+          <section class="map-stage">
+            <div class="map-toolbar">
+              <div>
+                <p class="eyebrow">Інтерактивна карта України</p>
+                <h3>Масштабуйте карту та купуйте сусідні земельні ділянки</h3>
+              </div>
+              <div class="legend">
+                <span><i class="free"></i>вільно</span>
+                <span><i class="owned"></i>ваше</span>
+                <span><i class="rival"></i>інші гравці</span>
+              </div>
+            </div>
+            <div class="map-board" id="mapBoard" aria-label="Інтерактивна карта України"></div>
+            <div class="map-quick-actions">
+              <button class="secondary-action" id="clusterSelectButton" type="button">Виділити кластер</button>
+              <button class="secondary-action" id="newsButton" type="button">Новини</button>
+            </div>
+            <div class="selection-popup is-hidden" id="selectionPopup">
+              <button class="panel-close" id="closeSelectionPopup" type="button" aria-label="Закрити панель дій">×</button>
+              <p class="eyebrow">Вибір на карті</p>
+              <strong id="selectionSummary">Оберіть ділянку</strong>
+              <div class="map-mode-actions">
+                <button class="secondary-action" id="detailInfoButton" type="button">Детальна інформація</button>
+              </div>
+              <div class="action-stack">
+                <button class="primary-action" id="buyButton" type="button">Купити землю</button>
+                <button class="secondary-action" id="upgradeButton" type="button">Інвестиції в добрива</button>
+                <button class="secondary-action" id="buildingButton" type="button">Побудувати</button>
+                <button class="secondary-action" id="machineryButton" type="button">Купити техніку</button>
+                <button class="secondary-action danger-action" id="sellButton" type="button">Продати землю</button>
+              </div>
+            </div>
+            <button class="return-news-button is-hidden" id="returnToNewsButton" type="button">Повернутися до новин</button>
+          </section>
+
+          <aside class="intel-panel">
+            <section>
+              <p class="eyebrow">Етап розвитку</p>
+              <h3 id="stageTitle">Початок</h3>
+              <div class="stage-track"><span id="stageProgress"></span></div>
+              <p id="stageText" class="muted-text"></p>
+            </section>
+            <section><p class="eyebrow">Рейтинг</p><ol class="leaderboard" id="leaderboard"></ol></section>
+          </aside>
+        </div>
+        <p class="game-message" id="gameMessage" role="status" aria-live="polite"></p>
+
+        <div class="modal is-hidden" id="profileModal" role="dialog" aria-modal="true" aria-label="Профіль учасника">
+          <form class="modal-panel" id="profileForm">
+            <button class="modal-close" type="button" data-close-modal>×</button>
+            <p class="eyebrow">Профіль учасника</p>
+            <h3>Компанія на карті</h3>
+            <label>Назва компанії <input id="profileCompanyName" maxlength="40"></label>
+            <label>Колір землі <input id="profileColor" type="color" value="#35c982"></label>
+            <label>Емблема компанії <input id="profileLogo" type="file" accept="image/png,image/jpeg,image/webp,image/svg+xml"></label>
+            <div class="logo-preview" id="profileLogoPreview"></div>
+            <div class="profile-stats" id="profileStats"></div>
+            <button class="primary-action" type="submit">Зберегти профіль</button>
+          </form>
+        </div>
+
+        <div class="modal is-hidden" id="helpModal" role="dialog" aria-modal="true" aria-label="Довідка гри">
+          <section class="modal-panel help-panel">
+            <button class="modal-close" type="button" data-close-modal>×</button>
+            <p class="eyebrow">Довідка гри</p>
+            <h3>Суть AgroMap</h3>
+            <p>Купуйте земельні ділянки на карті України, збирайте сусідні землі в господарства, підвищуйте дохідність і змагайтеся у рейтингу.</p>
+            <h3>Інвестиції в добрива</h3>
+            <h3>Техніка та побудови</h3>
+            <p>Техніка і побудови купуються як окремі позиції. Техніка підсилює дохід земельних ділянок, а побудови самі приносять фіксований денний дохід. Кілька одиниць сумуються.</p>
+          </section>
+        </div>
+
+        <div class="modal is-hidden" id="adminModal" role="dialog" aria-modal="true" aria-label="Панель адміністратора">
+          <section class="modal-panel admin-panel">
+            <button class="modal-close" type="button" data-close-modal>×</button>
+            <p class="eyebrow">Адміністрування</p>
+            <h3>Управління грою</h3>
+            <div class="admin-tabs" role="tablist" aria-label="Розділи адмінки">
+              <button class="secondary-action is-active" type="button" data-admin-tab="overview">Огляд</button>
+              <button class="secondary-action" type="button" data-admin-tab="settings">Налаштування</button>
+              <button class="secondary-action" type="button" data-admin-tab="players">Гравці</button>
+            </div>
+            <section class="admin-tab-panel" data-admin-panel="overview">
+              <div class="admin-summary" id="adminSummary"></div>
+              <div class="admin-global-actions">
+                <button class="danger-action" id="adminResetLandButton" type="button">Обнулити всі землі</button>
+                <button class="danger-action" id="adminResetMoneyButton" type="button">Обнулити гроші</button>
+                <button class="danger-action" id="adminResetMachineryButton" type="button">Обнулити техніку</button>
+                <button class="danger-action" id="adminResetAssetsButton" type="button">Обнулити власність і активи</button>
+                <button class="danger-action" id="adminClearEventsButton" type="button">Очистити події</button>
+              </div>
+            </section>
+            <section class="admin-tab-panel is-hidden" data-admin-panel="settings">
+              <form class="admin-settings" id="adminSettingsForm">
+                <h4>Налаштування гри</h4>
+                <div class="admin-settings-grid" id="adminSettingsFields"></div>
+                <button class="primary-action" type="submit">Зберегти налаштування</button>
+              </form>
+            </section>
+            <section class="admin-tab-panel is-hidden" data-admin-panel="players">
+              <div class="admin-users" id="adminUsers"></div>
+              <div class="admin-player-stats" id="adminPlayerStats"></div>
+            </section>
+          </section>
+        </div>
+
+        <div class="modal is-hidden" id="assetModal" role="dialog" aria-modal="true" aria-label="Купівля">
+          <form class="modal-panel asset-panel" id="assetForm">
+            <button class="modal-close" type="button" data-close-modal>×</button>
+            <p class="eyebrow" id="assetModalEyebrow">Актив</p>
+            <h3 id="assetModalTitle">Купівля</h3>
+            <div class="asset-options" id="assetOptions"></div>
+            <label>Кількість <input id="assetQuantity" name="quantity" type="number" min="1" value="1"></label>
+            <div class="asset-total" id="assetTotal"></div>
+            <button class="primary-action" type="submit">Купити</button>
+          </form>
+        </div>
+
+        <div class="modal is-hidden" id="ownerModal" role="dialog" aria-modal="true" aria-label="Інформація про власника">
+          <section class="modal-panel owner-panel">
+            <button class="modal-close" type="button" data-close-modal>×</button>
+            <p class="eyebrow">Власник ділянки</p>
+            <div id="ownerInfo"></div>
+          </section>
+        </div>
+
+        <div class="modal is-hidden" id="newsModal" role="dialog" aria-modal="true" aria-label="Новини">
+          <section class="modal-panel news-panel">
+            <button class="modal-close" type="button" data-close-modal>×</button>
+            <p class="eyebrow">Новини</p>
+            <div class="news-list" id="newsList"></div>
+          </section>
+        </div>
+
+        <div class="modal is-hidden" id="imagePreviewModal" role="dialog" aria-modal="true" aria-label="Перегляд фото">
+          <section class="modal-panel image-preview-panel">
+            <button class="modal-close" type="button" data-close-image-preview>×</button>
+            <img id="imagePreviewTarget" alt="Перегляд фото">
+            <div class="image-preview-toolbar">
+              <button class="secondary-action" id="imagePreviewPrev" type="button">‹</button>
+              <span id="imagePreviewCounter">1 / 1</span>
+              <button class="secondary-action" id="imagePreviewNext" type="button">›</button>
+            </div>
+          </section>
+        </div>
+      </section>
+    </main>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+    <script src="/h3-js.umd.js"></script>
+    <script src="/app.js?v=20260809-stable-touch-tooltip"></script>
+  </body>
+</html>
