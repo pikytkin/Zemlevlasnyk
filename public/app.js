@@ -36,7 +36,7 @@ const rivalOwners = ["Інший гравець"];
 const PLAY_H3_RESOLUTION = 8;
 let MAX_VISIBLE_H3_CELLS = 4200;
 const SETTLEMENT_GRID_SIZE = 0.25;
-let DETAIL_ZOOM_MIN = 11;
+let DETAIL_ZOOM_MIN = 12;
 let CLAIM_BATCH_SIZE = 1000;
 let SELL_REFUND_RATE = 0.62;
 let LAND_LEVELS = [
@@ -360,7 +360,7 @@ function applyGameSettings(settings) {
   const economy = gameSettings?.economy || {};
   const upgrades = gameSettings?.upgrades || {};
   MAX_VISIBLE_H3_CELLS = Number.isFinite(economy.maxVisibleCells) ? Math.max(600, Math.min(9000, economy.maxVisibleCells)) : MAX_VISIBLE_H3_CELLS;
-  DETAIL_ZOOM_MIN = Number.isFinite(economy.detailZoomMin) ? Math.max(11, economy.detailZoomMin) : DETAIL_ZOOM_MIN;
+  DETAIL_ZOOM_MIN = Number.isFinite(economy.detailZoomMin) ? Math.max(12, economy.detailZoomMin) : DETAIL_ZOOM_MIN;
   CLAIM_BATCH_SIZE = Number.isFinite(economy.claimBatchSize) ? economy.claimBatchSize : CLAIM_BATCH_SIZE;
   SELL_REFUND_RATE = Number.isFinite(economy.sellRefundPercent) ? economy.sellRefundPercent / 100 : SELL_REFUND_RATE;
   LAND_LEVELS = Array.isArray(upgrades.landLevels) && upgrades.landLevels.length ? upgrades.landLevels : LAND_LEVELS;
