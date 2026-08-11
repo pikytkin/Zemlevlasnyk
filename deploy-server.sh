@@ -24,6 +24,10 @@ pm2 restart "$APP_NAME" --update-env
 pm2 save
 
 echo "Checking Nginx..."
+NGINX_SITE="/etc/nginx/sites-available/zemlevlasnyk.com"
+if [ -f "$NGINX_SITE" ] && ! grep -q "client_max_body_size" "$NGINX_SITE"; then
+  sed -i "/server_name zemlevlasnyk.com/a\\    client_max_body_size 25m;" "$NGINX_SITE"
+fi
 nginx -t
 systemctl reload nginx
 

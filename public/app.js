@@ -60,7 +60,8 @@ const gameScreen = document.querySelector("#gameScreen");
 const authStatus = document.querySelector("#authStatus");
 const loginForm = document.querySelector("#loginForm");
 const registerForm = document.querySelector("#registerForm");
-const guestButton = document.querySelector("#guestButton");
+const recoverForm = document.querySelector("#recoverForm");
+const resetForm = document.querySelector("#resetForm");
 const playerName = document.querySelector("#playerName");
 const coinCount = document.querySelector("#coinCount");
 const incomeButton = document.querySelector("#incomeButton");
@@ -80,13 +81,15 @@ const returnToNewsButton = document.querySelector("#returnToNewsButton");
 const cellTitle = document.querySelector("#cellTitle");
 const cellDetails = document.querySelector("#cellDetails");
 const buyButton = document.querySelector("#buyButton");
+const contactOwnerButton = document.querySelector("#contactOwnerButton");
 const upgradeButton = document.querySelector("#upgradeButton");
 const buildingButton = document.querySelector("#buildingButton");
 const machineryButton = document.querySelector("#machineryButton");
 const sellButton = document.querySelector("#sellButton");
 const profileButton = document.querySelector("#profileButton");
 const helpButton = document.querySelector("#helpButton");
-const adminButton = document.querySelector("#adminButton");
+const messagesButton = document.querySelector("#messagesButton");
+const messageBadge = document.querySelector("#messageBadge");
 const profileModal = document.querySelector("#profileModal");
 const helpModal = document.querySelector("#helpModal");
 const adminModal = document.querySelector("#adminModal");
@@ -104,6 +107,12 @@ const adminClearEventsButton = document.querySelector("#adminClearEventsButton")
 const adminSettingsForm = document.querySelector("#adminSettingsForm");
 const adminSettingsFields = document.querySelector("#adminSettingsFields");
 const adminPlayerStats = document.querySelector("#adminPlayerStats");
+const adminStats = document.querySelector("#adminStats");
+const messagesModal = document.querySelector("#messagesModal");
+const chatList = document.querySelector("#chatList");
+const chatMessages = document.querySelector("#chatMessages");
+const messageForm = document.querySelector("#messageForm");
+const messageText = document.querySelector("#messageText");
 const assetModal = document.querySelector("#assetModal");
 const assetForm = document.querySelector("#assetForm");
 const assetModalEyebrow = document.querySelector("#assetModalEyebrow");
@@ -153,6 +162,10 @@ let marketCellCount = 0;
 let marketSignature = "";
 let leaderboardRows = [];
 let leaderboardTimer = null;
+let activeChatUserId = null;
+let chats = [];
+let unreadMessages = 0;
+let messagesTimer = null;
 let newsRows = [];
 let newsTimer = null;
 let visibleCells = [];
@@ -239,7 +252,10 @@ async function requestJson(url, options = {}) {
     credentials: "same-origin",
     ...options
   });
-  const payload = await response.json();
+  const contentType = response.headers.get("content-type") || "";
+  const payload = contentType.includes("application/json")
+    ? await response.json()
+    : { error: response.status === 413 ? "Дані завеликі для сервера. Зменште фото або збільшіть ліміт Nginx." : `Сервер повернув не JSON (${response.status}).` };
   if (!response.ok) throw new Error(payload.error || "Помилка сервера.");
   return payload;
 }
@@ -263,7 +279,7 @@ function normalizeState(nextState) {
   };
 
   if (!normalized.companyName && player) {
-    normalized.companyName = player.isGuest ? "Гостьова розвідка" : `${player.username} Agro`;
+    normalized.companyName = player.isGuest ? "Гостьова розвідка" : `${player.username} Земля`;
   }
   normalized.events = normalized.events
     .filter((event) => event && typeof event.text === "string")
@@ -411,23 +427,15 @@ function startGame(nextPlayer, nextState) {
   player = nextPlayer;
   state = normalizeState(nextState);
 
-  if (player.isGuest) {
-    const guestState = localStorage.getItem("agromap_guest_state");
-    if (guestState) {
-      try {
-        state = normalizeState(JSON.parse(guestState));
-      } catch {
-        state = normalizeState(nextState);
-      }
-    }
-  }
-
   authScreen.classList.add("is-hidden");
   gameScreen.classList.remove("is-hidden");
   renderPlayerHeader();
   loadGameSettings().then(() => initMap());
   render();
-  showGameMessage(player.isGuest ? "Гостьовий прогрес зберігається лише в цьому браузері." : "Карту володінь завантажено.");
+  showGameMessage("Карту володінь завантажено.");
+  refreshMessageSummary();
+  clearInterval(messagesTimer);
+  messagesTimer = setInterval(refreshMessageSummary, 10000);
   if (window.location.pathname === "/admin") {
     openAdminPanel();
   }
@@ -440,10 +448,6 @@ function queueSave() {
 
 async function saveState() {
   if (!player) return;
-  if (player.isGuest) {
-    localStorage.setItem("agromap_guest_state", JSON.stringify(state));
-    return;
-  }
 
   try {
     await requestJson("/api/save", {
@@ -695,11 +699,7 @@ function reconcileLocalLandWithMarket() {
   });
 
   if (!changed) return;
-  if (player.isGuest) {
-    localStorage.setItem("agromap_guest_state", JSON.stringify(state));
-  } else {
-    queueSave();
-  }
+  queueSave();
 }
 
 function buildSettlementGrid(places) {
@@ -2679,11 +2679,13 @@ function renderSelectedCell() {
     cellTitle.textContent = "Оберіть ділянку";
     cellDetails.innerHTML = "";
     setActionButton(buyButton, "Купити землю", "Оберіть вільну ділянку на карті");
+    setActionButton(contactOwnerButton, "Зв'язатися з власником", "Доступно для зайнятої чужої ділянки");
     setActionButton(upgradeButton, "Інвестиції в добрива", "Підвищує рівень добрив і дохід землі");
     setActionButton(buildingButton, "Побудувати", "Потрібно виділити 3 ваші ділянки");
     setActionButton(machineryButton, "Купити техніку", "Підсилює продуктивність ділянок");
     setActionButton(sellButton, "Продати землю", "Повертає частину вартості системі");
     buyButton.disabled = true;
+    if (contactOwnerButton) contactOwnerButton.disabled = true;
     upgradeButton.disabled = true;
     buildingButton.disabled = true;
     machineryButton.disabled = true;
@@ -2711,12 +2713,14 @@ function renderSelectedCell() {
     ].map(([key, value]) => `<div><dt>${key}</dt><dd>${value}</dd></div>`).join("");
 
     setActionButton(buyButton, freeCells.length ? `Купити землю - ${money(totalPrice)}` : "Купити землю", "Нова земля дає базовий денний дохід");
+    setActionButton(contactOwnerButton, "Зв'язатися з власником", "Оберіть одну зайняту чужу ділянку");
     setActionButton(upgradeButton, summary.upgradeCost ? `Добрива - ${money(summary.upgradeCost)}` : "Інвестиції в добрива", fertilizerLevelsNote());
     const builtCount = ownedSelectedCells().filter((cell) => state.land[cell.id]?.building || state.land[cell.id]?.buildingId).length;
     setActionButton(buildingButton, builtCount ? "Знести побудову" : "Побудувати", builtCount ? `Вибрано комірок з побудовою: ${builtCount}` : `Доступно без побудов: ${summary.buildableCount}; мінімум ${minBuildingCells()}`);
     setActionButton(machineryButton, "Купити техніку", "Кожна одиниця додає свій % до доходу");
     setActionButton(sellButton, summary.sellTotal ? `Продати - ${money(summary.sellTotal)}` : "Продати землю", "Повертає частину вартості системі");
     buyButton.disabled = !freeCells.length;
+    if (contactOwnerButton) contactOwnerButton.disabled = true;
     upgradeButton.disabled = !summary.canUpgrade;
     buildingButton.disabled = !(summary.canBuild || builtCount);
     machineryButton.disabled = !summary.canBuyMachinery;
@@ -2772,11 +2776,13 @@ function renderSelectedCell() {
 
   cellDetails.innerHTML = rows.map(([key, value]) => `<div><dt>${key}</dt><dd>${value}</dd></div>`).join("");
   setActionButton(buyButton, owner === "free" ? `Купити землю - ${money(cell.price)}` : "Купити землю", "Нова земля дає базовий денний дохід");
+  setActionButton(contactOwnerButton, "Зв'язатися з власником", "Написати власнику цієї ділянки");
   setActionButton(upgradeButton, owned && !owned.building && !owned.buildingId && owned.level < maxLandLevel() ? `Добрива - ${money(nextUpgradeCost(owned))}` : "Інвестиції в добрива", fertilizerLevelsNote());
   setActionButton(buildingButton, owned?.building || owned?.buildingId ? "Знести побудову" : "Побудувати", owned?.building || owned?.buildingId ? "Після знесення можна побудувати іншу" : `Потрібно мін. ${minBuildingCells()} ділянок без побудов`);
   setActionButton(machineryButton, "Купити техніку", "Кожна одиниця додає свій % до доходу");
   setActionButton(sellButton, owned ? `Продати - ${money(sellValue(cell, owned))}` : "Продати землю", "Повертає частину вартості системі");
   buyButton.disabled = owner !== "free";
+  if (contactOwnerButton) contactOwnerButton.disabled = owner !== "rival" || !marketState?.land?.[selectedCellId]?.ownerId;
   upgradeButton.disabled = !owned || owned.building || owned.buildingId || owned.level >= maxLandLevel();
   buildingButton.disabled = !owned || (!(owned.building || owned.buildingId) && buildableSelectedCells().length < minBuildingCells());
   machineryButton.disabled = !owned;
@@ -2830,7 +2836,7 @@ function renderLeaderboard() {
     .slice(0, 12);
 
   leaderboard.innerHTML = rows.map((row, index) => `
-    <li class="${row.id === player?.id || row.name === playerNameForList ? "is-player" : ""}">
+    <li class="${row.id === player?.id || row.name === playerNameForList ? "is-player" : ""}" data-leader-player="${escapeHtml(row.id || "")}">
       <span>${index + 1}. ${row.name}</span>
       <strong>${row.landCount || 0} зем. · ${money(row.cash || row.score || 0)}</strong>
     </li>
@@ -2920,7 +2926,7 @@ function render() {
 }
 
 function renderPlayerHeader() {
-  const name = state.companyName || (player?.isGuest ? "Гостьова розвідка" : `${player?.username || "Гравець"} Agro`);
+  const name = state.companyName || (player?.isGuest ? "Гостьова розвідка" : `${player?.username || "Гравець"} Земля`);
   playerName.innerHTML = `${state.logo ? `<img class="company-logo" src="${state.logo}" alt="">` : ""}<span>${escapeHtml(name)}</span>`;
 }
 
@@ -2951,7 +2957,7 @@ function renderProfileForm() {
   profileLogoPreview.innerHTML = state.logo ? `<img src="${state.logo}" alt="Емблема компанії">` : "<span>Емблему не завантажено</span>";
   profileStats.innerHTML = [
     ["Гравець", player?.username || "Гість"],
-    ["Компанія", state.companyName || `${player?.username || "Гравець"} Agro`],
+    ["Компанія", state.companyName || `${player?.username || "Гравець"} Земля`],
     ["Етап", currentStage.title],
     ["Баланс", money(state.coins)],
     ["День гри", state.currentDay],
@@ -2977,13 +2983,17 @@ async function showOwnerInfo(ownerId) {
   openModal(ownerModal);
   if (ownerId === player?.id) {
     renderOwnerInfo({
+      id: player?.id,
       username: player?.username || "Гість",
-      companyName: state.companyName || (player?.isGuest ? "Гостьова розвідка" : `${player?.username || "Гравець"} Agro`),
+      companyName: state.companyName || (player?.isGuest ? "Гостьова розвідка" : `${player?.username || "Гравець"} Земля`),
       logo: state.logo || "",
       color: state.color || "#35c982",
       landCount: Object.keys(state.land || {}).length,
       cash: state.coins,
       score: assetsValue() + state.coins,
+      income: totalDailyIncome(),
+      machineryCount: inventoryCount("machinery"),
+      buildingCount: inventoryCount("elevators"),
       rank: leaderboardRankForPlayer(player?.id)
     });
     return;
@@ -3012,9 +3022,13 @@ function renderOwnerInfo(info) {
         ["Місце в рейтингу", info.rank ? `#${info.rank}` : "поза рейтингом"],
         ["Земельні ділянки", info.landCount || 0],
         ["Баланс", money(info.cash || 0)],
-        ["Орієнтовна вартість активів", money(info.score || 0)]
+        ["Орієнтовна вартість активів", money(info.score || 0)],
+        ["Техніка", info.machineryCount || 0],
+        ["Побудови", info.buildingCount || 0],
+        ["Дохід за день", `${money(info.income || 0)} / день`]
       ].map(([key, value]) => `<div><span>${key}</span><strong>${value}</strong></div>`).join("")}
     </div>
+    ${info.id && info.id !== player?.id ? `<button class="primary-action" type="button" data-contact-player="${escapeHtml(info.id)}">Зв'язатися з гравцем</button>` : ""}
   `;
 }
 
@@ -3022,6 +3036,99 @@ function leaderboardRankForPlayer(id) {
   const rows = [...leaderboardRows].sort((a, b) => (b.landCount || 0) - (a.landCount || 0) || (b.cash || 0) - (a.cash || 0) || (b.score || 0) - (a.score || 0));
   const index = rows.findIndex((row) => row.id === id);
   return index >= 0 ? index + 1 : null;
+}
+
+async function refreshMessageSummary() {
+  if (!player || player.isGuest) return;
+  try {
+    const payload = await requestJson("/api/messages/summary");
+    unreadMessages = Number(payload.unread) || 0;
+    chats = Array.isArray(payload.chats) ? payload.chats : [];
+    renderMessageBadge();
+    if (!messagesModal?.classList.contains("is-hidden")) renderChatList();
+  } catch {
+    unreadMessages = 0;
+    renderMessageBadge();
+  }
+}
+
+function renderMessageBadge() {
+  if (!messageBadge) return;
+  messageBadge.textContent = unreadMessages > 99 ? "99+" : String(unreadMessages);
+  messageBadge.classList.toggle("is-hidden", unreadMessages <= 0);
+}
+
+async function openMessagesPanel() {
+  openModal(messagesModal);
+  if (chatList) chatList.innerHTML = "<p>Завантажуємо чати...</p>";
+  if (chatMessages) chatMessages.innerHTML = "<p class=\"muted-text\">Оберіть чат або напишіть власнику ділянки.</p>";
+  await refreshMessageSummary();
+  renderChatList();
+}
+
+function renderChatList() {
+  if (!chatList) return;
+  chatList.innerHTML = chats.length
+    ? chats.map((chat) => `
+      <button class="chat-list-item ${chat.userId === activeChatUserId ? "is-active" : ""}" type="button" data-chat-user="${escapeHtml(chat.userId)}">
+        <strong>${escapeHtml(chat.companyName || chat.username || "Гравець")}</strong>
+        <span>${escapeHtml(chat.lastText || "Немає повідомлень")}</span>
+        ${chat.unread ? `<em>${chat.unread}</em>` : ""}
+      </button>
+    `).join("")
+    : "<p class=\"muted-text\">Чатів ще немає.</p>";
+}
+
+async function openChat(userId) {
+  if (!userId || userId === player?.id) return;
+  activeChatUserId = userId;
+  openModal(messagesModal);
+  renderChatList();
+  await loadChatMessages(userId);
+  await refreshMessageSummary();
+}
+
+async function loadChatMessages(userId = activeChatUserId) {
+  if (!userId || !chatMessages) return;
+  chatMessages.innerHTML = "<p>Завантажуємо повідомлення...</p>";
+  try {
+    const payload = await requestJson(`/api/messages/thread?userId=${encodeURIComponent(userId)}`);
+    const rows = Array.isArray(payload.messages) ? payload.messages : [];
+    const partner = payload.partner || {};
+    chatMessages.innerHTML = `
+      <div class="chat-thread-head">
+        <strong>${escapeHtml(partner.companyName || partner.username || "Гравець")}</strong>
+      </div>
+      <div class="chat-message-list">
+        ${rows.length ? rows.map((message) => `
+          <div class="chat-message ${message.fromId === player?.id ? "is-own" : ""}">
+            <p>${escapeHtml(message.text || "")}</p>
+            <time>${formatNewsTime(message.createdAt)}</time>
+          </div>
+        `).join("") : "<p class=\"muted-text\">Почніть діалог першим повідомленням.</p>"}
+      </div>
+    `;
+    chatMessages.scrollTop = chatMessages.scrollHeight;
+  } catch (error) {
+    chatMessages.innerHTML = `<p>${escapeHtml(error.message)}</p>`;
+  }
+}
+
+async function sendChatMessage(event) {
+  event.preventDefault();
+  if (!activeChatUserId || !messageText?.value.trim()) return;
+  const text = messageText.value.trim();
+  messageText.value = "";
+  try {
+    await requestJson("/api/messages/send", {
+      method: "POST",
+      body: JSON.stringify({ toUserId: activeChatUserId, text })
+    });
+    await loadChatMessages(activeChatUserId);
+    await refreshMessageSummary();
+  } catch (error) {
+    showGameMessage(error.message);
+  }
 }
 
 function inventoryCount(kind) {
@@ -3077,6 +3184,7 @@ async function openAdminPanel() {
     applyGameSettings(payload.settings || gameSettings);
     renderAdminSettings(gameSettings);
     renderAdminSummary(payload.summary || {}, payload.market || { land: {} });
+    renderAdminStats(payload.summary || {});
     renderAdminUsers(payload.users || []);
   } catch (error) {
     adminSummary.innerHTML = "";
@@ -3344,12 +3452,23 @@ function renderAdminSummary(summary, market) {
   const occupiedLand = Number.isFinite(summary.occupiedLand) ? summary.occupiedLand : Object.keys(market.land || {}).length;
   const totalLand = totalPlayableLandCount();
   const freeLand = Number.isFinite(totalLand) ? Math.max(0, totalLand - occupiedLand) : null;
+  renderAdminStats(summary);
   adminSummary.innerHTML = [
     ["Учасників", Number.isFinite(summary.users) ? summary.users : 0],
     ["Адмінів", Number.isFinite(summary.admins) ? summary.admins : 0],
     ["Зайнято на карті", occupiedLand],
     ["Вільно на карті України", freeLand == null ? "рахується після карти" : freeLand],
     ["Грошей у грі", money(summary.totalCash || 0)]
+  ].map(([key, value]) => `<div><span>${key}</span><strong>${value}</strong></div>`).join("");
+}
+
+function renderAdminStats(summary) {
+  if (!adminStats) return;
+  adminStats.innerHTML = [
+    ["Онлайн зараз", Number.isFinite(summary.onlineUsers) ? summary.onlineUsers : 0],
+    ["Усього зареєстровано", Number.isFinite(summary.users) ? summary.users : 0],
+    ["Зареєстровано сьогодні", Number.isFinite(summary.registeredToday) ? summary.registeredToday : 0],
+    ["Зареєстровано за 30 днів", Number.isFinite(summary.registeredLast30Days) ? summary.registeredLast30Days : 0]
   ].map(([key, value]) => `<div><span>${key}</span><strong>${value}</strong></div>`).join("");
 }
 
@@ -3815,9 +3934,20 @@ document.querySelectorAll("[data-auth-tab]").forEach((tab) => {
     document.querySelectorAll("[data-auth-tab]").forEach((item) => item.classList.toggle("is-active", item === tab));
     loginForm.classList.toggle("is-hidden", mode !== "login");
     registerForm.classList.toggle("is-hidden", mode !== "register");
+    recoverForm?.classList.toggle("is-hidden", mode !== "recover");
+    resetForm?.classList.add("is-hidden");
     showAuthMessage("");
   });
 });
+
+if (new URLSearchParams(window.location.search).has("reset")) {
+  document.querySelectorAll("[data-auth-tab]").forEach((item) => item.classList.remove("is-active"));
+  loginForm?.classList.add("is-hidden");
+  registerForm?.classList.add("is-hidden");
+  recoverForm?.classList.add("is-hidden");
+  resetForm?.classList.remove("is-hidden");
+  showAuthMessage("Введіть новий пароль для акаунта.");
+}
 
 loginForm.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -3847,17 +3977,45 @@ registerForm.addEventListener("submit", async (event) => {
   }
 });
 
-guestButton.addEventListener("click", async () => {
-  showAuthMessage("Відкриваємо карту...");
+recoverForm?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  showAuthMessage("Готуємо відновлення...");
   try {
-    const payload = await requestJson("/api/guest", { method: "POST", body: "{}" });
-    startGame(payload.player, payload.farm);
+    const payload = await requestJson("/api/password-reset/request", {
+      method: "POST",
+      body: JSON.stringify(Object.fromEntries(new FormData(recoverForm)))
+    });
+    showAuthMessage(payload.message || "Якщо email існує, інструкція для відновлення буде надіслана.");
+  } catch (error) {
+    showAuthMessage(error.message);
+  }
+});
+
+resetForm?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const token = new URLSearchParams(window.location.search).get("reset");
+  if (!token) {
+    showAuthMessage("Посилання відновлення не містить токен.");
+    return;
+  }
+  try {
+    const payload = await requestJson("/api/password-reset/confirm", {
+      method: "POST",
+      body: JSON.stringify({ token, ...Object.fromEntries(new FormData(resetForm)) })
+    });
+    showAuthMessage(payload.message || "Пароль змінено. Увійдіть з новим паролем.");
+    resetForm.classList.add("is-hidden");
+    loginForm.classList.remove("is-hidden");
   } catch (error) {
     showAuthMessage(error.message);
   }
 });
 
 buyButton.addEventListener("click", buySelectedCell);
+contactOwnerButton?.addEventListener("click", () => {
+  const ownerId = marketState?.land?.[selectedCellId]?.ownerId;
+  if (ownerId) openChat(ownerId);
+});
 upgradeButton.addEventListener("click", upgradeSelectedCell);
 buildingButton.addEventListener("click", buildOnSelectedCell);
 machineryButton.addEventListener("click", buyMachinery);
@@ -3877,12 +4035,25 @@ cellDetails.addEventListener("click", (event) => {
   const ownerButton = event.target.closest("[data-owner-id]");
   if (ownerButton) showOwnerInfo(ownerButton.dataset.ownerId);
 });
+leaderboard?.addEventListener("click", (event) => {
+  const row = event.target.closest("[data-leader-player]");
+  if (row?.dataset.leaderPlayer) showOwnerInfo(row.dataset.leaderPlayer);
+});
+ownerInfo?.addEventListener("click", (event) => {
+  const contact = event.target.closest("[data-contact-player]");
+  if (contact?.dataset.contactPlayer) openChat(contact.dataset.contactPlayer);
+});
 profileButton.addEventListener("click", () => {
   renderProfileForm();
   openModal(profileModal);
 });
 helpButton.addEventListener("click", () => openModal(helpModal));
-adminButton.addEventListener("click", openAdminPanel);
+messagesButton?.addEventListener("click", openMessagesPanel);
+chatList?.addEventListener("click", (event) => {
+  const item = event.target.closest("[data-chat-user]");
+  if (item?.dataset.chatUser) openChat(item.dataset.chatUser);
+});
+messageForm?.addEventListener("submit", sendChatMessage);
 newsList?.addEventListener("click", (event) => {
   const item = event.target.closest("[data-news-cell]");
   if (item?.dataset.newsCell) focusNewsTarget(item.dataset.newsCell);

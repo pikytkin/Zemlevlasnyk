@@ -3,9 +3,9 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>AgroMap1</title>
+    <title>Землевласник</title>
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIINfQnLtnNSsK2suw0K5pEqxyfDzGZU4kk=" crossorigin="">
-    <link rel="stylesheet" href="/styles.css?v=20260809-mobile-news-tooltip">
+    <link rel="stylesheet" href="/styles.css?v=20260811-zemlevlasnyk">
   </head>
   <body>
     <main class="app-shell">
@@ -16,24 +16,33 @@
           </div>
         </div>
         <div class="auth-panel">
-          <p class="eyebrow">Економічна стратегія1</p>
-          <h1>AgroMap</h1>
-          <p class="intro">Карта України як ринок землі: купуйте земельні ділянки, з'єднуйте території, розвивайте господарства й зростайте до агрохолдингу.</p>
+          <p class="eyebrow">Економічна стратегія</p>
+          <h1>Землевласник</h1>
+          <p class="intro">Ваша земля — ваш актив. Купуйте земельні ділянки, розвивайте господарство, будуйте активи й змагайтеся за лідерство на карті України.</p>
           <div class="auth-tabs" role="tablist" aria-label="Вибір режиму входу">
             <button class="auth-tab is-active" type="button" data-auth-tab="login">Вхід</button>
             <button class="auth-tab" type="button" data-auth-tab="register">Реєстрація</button>
+            <button class="auth-tab" type="button" data-auth-tab="recover">Відновлення</button>
           </div>
           <form class="auth-form" id="loginForm">
-            <label>Ім'я гравця <input name="username" autocomplete="username" required minlength="3" maxlength="24"></label>
+            <label>Ім'я або email <input name="username" autocomplete="username" required minlength="3" maxlength="80"></label>
             <label>Пароль <input name="password" type="password" autocomplete="current-password" required minlength="4"></label>
             <button class="primary-action" type="submit">Увійти на карту</button>
           </form>
           <form class="auth-form is-hidden" id="registerForm">
             <label>Ім'я гравця <input name="username" autocomplete="username" required minlength="3" maxlength="24"></label>
-            <label>Пароль <input name="password" type="password" autocomplete="new-password" required minlength="4"></label>
-            <button class="primary-action" type="submit">Заснувати компанію</button>
+            <label>Електронна пошта <input name="email" type="email" autocomplete="email" required maxlength="120"></label>
+            <label>Пароль <input name="password" type="password" autocomplete="new-password" required minlength="6"></label>
+            <button class="primary-action" type="submit">Створити господарство</button>
           </form>
-          <button class="guest-action" id="guestButton" type="button">Розвідка без реєстрації</button>
+          <form class="auth-form is-hidden" id="recoverForm">
+            <label>Email акаунта <input name="email" type="email" autocomplete="email" required maxlength="120"></label>
+            <button class="primary-action" type="submit">Отримати посилання</button>
+          </form>
+          <form class="auth-form is-hidden" id="resetForm">
+            <label>Новий пароль <input name="password" type="password" autocomplete="new-password" required minlength="6"></label>
+            <button class="primary-action" type="submit">Змінити пароль</button>
+          </form>
           <p class="status-line" id="authStatus" role="status" aria-live="polite"></p>
         </div>
       </section>
@@ -41,14 +50,14 @@
       <section class="game is-hidden" id="gameScreen">
         <header class="topbar">
           <div>
-            <p class="eyebrow">AgroMap · день <span id="dayCount">1</span></p>
+            <p class="eyebrow">Землевласник · день <span id="dayCount">1</span></p>
             <h2 id="playerName">Карта володінь</h2>
           </div>
           <div class="top-actions">
             <div class="wallet"><span>Баланс</span><strong id="coinCount">500 мон.</strong></div>
             <button class="secondary-action" id="profileButton" type="button">Профіль</button>
             <button class="secondary-action" id="helpButton" type="button">Довідка</button>
-            <button class="secondary-action" id="adminButton" type="button">Адмін</button>
+            <button class="secondary-action message-action" id="messagesButton" type="button">Повідомлення <span class="message-badge is-hidden" id="messageBadge">0</span></button>
             <button class="secondary-action" id="incomeButton" type="button">Отримати дохід</button>
           </div>
         </header>
@@ -62,12 +71,12 @@
               <dl class="cell-details" id="cellDetails"></dl>
             </section>
             <section>
-              <p class="eyebrow">Техніка</p>
+              <p class="eyebrow">Господарство</p>
               <div class="metric-list">
                 <div><span>Земля</span><strong id="ownedMetric">0</strong></div>
                 <div><span>Найбільше господарство</span><strong id="largestClusterMetric">0</strong></div>
                 <div><span>Дохід за день</span><strong id="incomeMetric">0 мон.</strong></div>
-                <div><span>Техніка</span><strong id="assetMetric">0</strong></div>
+                <div><span>Активи</span><strong id="assetMetric">0</strong></div>
               </div>
             </section>
           </aside>
@@ -76,7 +85,7 @@
             <div class="map-toolbar">
               <div>
                 <p class="eyebrow">Інтерактивна карта України</p>
-                <h3>Масштабуйте карту та купуйте сусідні земельні ділянки</h3>
+                <h3>Масштабуйте карту та купуйте земельні ділянки</h3>
               </div>
               <div class="legend">
                 <span><i class="free"></i>вільно</span>
@@ -98,6 +107,7 @@
               </div>
               <div class="action-stack">
                 <button class="primary-action" id="buyButton" type="button">Купити землю</button>
+                <button class="secondary-action" id="contactOwnerButton" type="button">Зв'язатися з власником</button>
                 <button class="secondary-action" id="upgradeButton" type="button">Інвестиції в добрива</button>
                 <button class="secondary-action" id="buildingButton" type="button">Побудувати</button>
                 <button class="secondary-action" id="machineryButton" type="button">Купити техніку</button>
@@ -137,11 +147,10 @@
           <section class="modal-panel help-panel">
             <button class="modal-close" type="button" data-close-modal>×</button>
             <p class="eyebrow">Довідка гри</p>
-            <h3>Суть AgroMap</h3>
-            <p>Купуйте земельні ділянки на карті України, збирайте сусідні землі в господарства, підвищуйте дохідність і змагайтеся у рейтингу.</p>
-            <h3>Інвестиції в добрива</h3>
-            <h3>Техніка та побудови</h3>
-            <p>Техніка і побудови купуються як окремі позиції. Техніка підсилює дохід земельних ділянок, а побудови самі приносять фіксований денний дохід. Кілька одиниць сумуються.</p>
+            <h3>Суть гри</h3>
+            <p>“Землевласник” — економічна стратегія про землю як актив. Купуйте ділянки, об'єднуйте території, інвестуйте в добрива, техніку та побудови.</p>
+            <h3>Ваша земля — ваш актив</h3>
+            <p>Кожна ділянка може давати дохід, підвищувати цінність сусідніх земель і ставати частиною більшого господарства.</p>
           </section>
         </div>
 
@@ -152,6 +161,7 @@
             <h3>Управління грою</h3>
             <div class="admin-tabs" role="tablist" aria-label="Розділи адмінки">
               <button class="secondary-action is-active" type="button" data-admin-tab="overview">Огляд</button>
+              <button class="secondary-action" type="button" data-admin-tab="stats">Статистика</button>
               <button class="secondary-action" type="button" data-admin-tab="settings">Налаштування</button>
               <button class="secondary-action" type="button" data-admin-tab="players">Гравці</button>
             </div>
@@ -165,6 +175,9 @@
                 <button class="danger-action" id="adminClearEventsButton" type="button">Очистити події</button>
               </div>
             </section>
+            <section class="admin-tab-panel is-hidden" data-admin-panel="stats">
+              <div class="admin-summary" id="adminStats"></div>
+            </section>
             <section class="admin-tab-panel is-hidden" data-admin-panel="settings">
               <form class="admin-settings" id="adminSettingsForm">
                 <h4>Налаштування гри</h4>
@@ -176,6 +189,24 @@
               <div class="admin-users" id="adminUsers"></div>
               <div class="admin-player-stats" id="adminPlayerStats"></div>
             </section>
+          </section>
+        </div>
+
+        <div class="modal is-hidden" id="messagesModal" role="dialog" aria-modal="true" aria-label="Повідомлення">
+          <section class="modal-panel messages-panel">
+            <button class="modal-close" type="button" data-close-modal>×</button>
+            <p class="eyebrow">Повідомлення</p>
+            <h3>Чати з учасниками</h3>
+            <div class="messages-layout">
+              <div class="chat-list" id="chatList"></div>
+              <div class="chat-thread">
+                <div class="chatMessages" id="chatMessages"></div>
+                <form id="messageForm" class="message-form">
+                  <input id="messageText" name="text" maxlength="1000" placeholder="Напишіть повідомлення..." autocomplete="off">
+                  <button class="primary-action" type="submit">Надіслати</button>
+                </form>
+              </div>
+            </div>
           </section>
         </div>
 
@@ -222,6 +253,6 @@
     </main>
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
     <script src="/h3-js.umd.js"></script>
-    <script src="/app.js?v=20260809-stable-touch-tooltip"></script>
+    <script src="/app.js?v=20260811-zemlevlasnyk"></script>
   </body>
 </html>

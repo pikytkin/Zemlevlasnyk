@@ -36,6 +36,7 @@ const SESSION_TTL_MS = 1000 * 60 * 60 * 24;
 const ADMIN_USERNAME = process.env.ADMIN_USERNAME || "Admin";
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "Admin";
 const DATABASE_URL = process.env.DATABASE_URL || "";
+const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || "https://zemlevlasnyk.com";
 const BASE_RIVALS = [];
 
 const DEFAULT_SETTINGS = {
@@ -149,7 +150,7 @@ function readFileStorageSnapshot() {
     news = [];
   }
 
-  return { users, market, settings, news };
+  return { users, market, settings, news, messages: [], passwordResets: [] };
 }
 
 async function initDatabaseStorage() {
@@ -182,7 +183,9 @@ async function initDatabaseStorage() {
     users: Array.isArray(state.users) ? state.users : [],
     market: state.market && typeof state.market === "object" ? state.market : { land: {} },
     settings: state.settings && typeof state.settings === "object" ? state.settings : DEFAULT_SETTINGS,
-    news: Array.isArray(state.news) ? state.news : []
+    news: Array.isArray(state.news) ? state.news : [],
+    messages: Array.isArray(state.messages) ? state.messages : [],
+    passwordResets: Array.isArray(state.passwordResets) ? state.passwordResets : []
   };
 }
 
@@ -482,7 +485,7 @@ function ensureAdminUser() {
       username: ADMIN_USERNAME,
       passwordHash: hashPassword(ADMIN_PASSWORD),
       isAdmin: true,
-      farm: { ...defaultFarmState(), companyName: "Адміністрація Agro" },
+      farm: { ...defaultFarmState(), companyName: "Адміністрація Землевласника" },
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString()
     };
@@ -555,6 +558,97 @@ function appendNewsEvent(row) {
   }]);
 }
 
+function normalizeEmail(email) {
+  return String(email || "").trim().toLowerCase();
+}
+
+function isValidEmail(email) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizeEmail(email));
+}
+
+function readMessages() {
+  return Array.isArray(storage?.messages) ? storage.messages : [];
+}
+
+function writeMessages(messages) {
+  if (!storage) return;
+  storage.messages = messages.slice(-5000);
+  persistState("messages");
+}
+
+function readPasswordResets() {
+  return Array.isArray(storage?.passwordResets) ? storage.passwordResets : [];
+}
+
+function writePasswordResets(rows) {
+  if (!storage) return;
+  storage.passwordResets = rows.slice(-500);
+  persistState("passwordResets");
+}
+
+async function sendPasswordResetEmail(email, resetUrl) {
+  if (!process.env.SMTP_HOST || !process.env.SMTP_USER || !process.env.SMTP_PASS) {
+    console.log(`Password reset for ${email}: ${resetUrl}`);
+    return false;
+  }
+  const nodemailer = require("nodemailer");
+  const transport = nodemailer.createTransport({
+    host: process.env.SMTP_HOST,
+    port: Number(process.env.SMTP_PORT || 587),
+    secure: String(process.env.SMTP_SECURE || "false").toLowerCase() === "true",
+    auth: {
+      user: process.env.SMTP_USER,
+      pass: process.env.SMTP_PASS
+    }
+  });
+  await transport.sendMail({
+    from: process.env.SMTP_FROM || process.env.SMTP_USER,
+    to: email,
+    subject: "Відновлення пароля Землевласник",
+    text: `Щоб змінити пароль, відкрийте посилання: ${resetUrl}\n\nПосилання дійсне 1 годину.`,
+    html: `<p>Щоб змінити пароль у грі <strong>Землевласник</strong>, відкрийте посилання:</p><p><a href="${resetUrl}">${resetUrl}</a></p><p>Посилання дійсне 1 годину.</p>`
+  });
+  return true;
+}
+
+function userCompanyName(user) {
+  const farm = sanitizeFarmState(user?.farm);
+  return farm.companyName || `${user?.username || "Гравець"} Земля`;
+}
+
+function publicPlayerDetails(user, rank = null) {
+  const farm = sanitizeFarmState(user.farm);
+  const settings = readSettings();
+  const machineryMap = activeMachineryMap(farm.inventory, farm.currentDay);
+  const buildingInventory = Object.values(farm.land || {}).reduce((map, cell) => {
+    const id = cell.building || cell.buildingId;
+    if (id) map[id] = (map[id] || 0) + 1;
+    return map;
+  }, {});
+  return {
+    id: user.id,
+    username: user.username,
+    companyName: farm.companyName || `${user.username} Земля`,
+    logo: farm.logo || "",
+    color: farm.color || "#35c982",
+    landCount: Object.keys(farm.land || {}).length,
+    cash: farm.coins,
+    score: farmScore(farm),
+    income: Object.values(farm.land || {}).reduce((sum, cell) => {
+      if (cell.building || cell.buildingId) {
+        return isFirstCellInBuildingGroup(cell.id, cell, farm.land) ? sum + buildingDailyIncomeForCell(cell, settings) : sum;
+      }
+      const base = rangedSettingValue(settings.economy.baseIncomeMin, settings.economy.baseIncomeSpread, cell.id, 8);
+      return sum + Math.round(base * fertilizerMultiplier(cell.level || 1, settings) * inventoryIncomeMultiplier(farm.inventory, settings, farm.currentDay));
+    }, 0),
+    machineryCount: Object.values(machineryMap || {}).reduce((sum, qty) => sum + (Number(qty) || 0), 0),
+    buildingCount: Object.values(buildingInventory || {}).reduce((sum, qty) => sum + (Number(qty) || 0), 0),
+    machinery: machineryMap,
+    buildings: buildingInventory,
+    rank
+  };
+}
+
 function marketEntryForCell(farm, ownerId, ownerName, cell, settings = readSettings()) {
   const item = buildingItemById(cell?.building || cell?.buildingId, settings);
   const buildingEmoji = item ? sanitizeMapEmoji(item.mapEmoji || item.icon || "🏗") : null;
@@ -596,7 +690,7 @@ function refreshRegisteredMarketEntries(users = readUsers()) {
   });
   users.forEach((user) => {
     const farm = sanitizeFarmState(user.farm);
-    const ownerName = farm.companyName || `${user.username} Agro`;
+    const ownerName = farm.companyName || `${user.username} Земля`;
     Object.entries(farm.land || {}).forEach(([id, cell]) => {
       if (!/^[0-9a-f]+$/i.test(id)) return;
       market.land[id] = marketEntryForCell(farm, user.id, ownerName, cell, settings);
@@ -690,7 +784,7 @@ function leaderboardRows() {
     const farm = sanitizeFarmState(user.farm);
     return {
       id: user.id,
-      name: farm.companyName || `${user.username} Agro`,
+      name: farm.companyName || `${user.username} Земля`,
       landCount: Object.keys(farm.land || {}).length,
       cash: farm.coins,
       score: farmScore(farm)
@@ -719,7 +813,7 @@ function publicUserRow(user) {
   return {
     id: user.id,
     username: user.username,
-    companyName: farm.companyName || `${user.username} Agro`,
+    companyName: farm.companyName || `${user.username} Земля`,
     coins: farm.coins,
     currentDay: farm.currentDay,
     landCount,
@@ -752,7 +846,7 @@ function regionFromCell(cell) {
 }
 
 function companyNameForUser(user, farm) {
-  return farm.companyName || `${user.username} Agro`;
+  return farm.companyName || `${user.username} Земля`;
 }
 
 function formatMoney(value) {
@@ -905,6 +999,13 @@ function rangedSettingValue(baseValue, spreadValue, id, fallback) {
 }
 
 function adminPayload(users = readUsers(), market = readMarket()) {
+  const now = Date.now();
+  const dayStart = new Date();
+  dayStart.setUTCHours(0, 0, 0, 0);
+  const monthAgo = now - 1000 * 60 * 60 * 24 * 30;
+  const onlineIds = new Set([...sessions.values()]
+    .filter((session) => !session.isGuest && session.expiresAt > now && now - (session.lastSeenAt || 0) < 1000 * 60 * 5)
+    .map((session) => session.userId));
   return {
     users: users.map(publicUserRow),
     market,
@@ -912,7 +1013,10 @@ function adminPayload(users = readUsers(), market = readMarket()) {
       users: users.length,
       admins: users.filter((user) => user.isAdmin).length,
       occupiedLand: Object.keys(market.land || {}).length,
-      totalCash: users.reduce((sum, user) => sum + sanitizeFarmState(user.farm).coins, 0)
+      totalCash: users.reduce((sum, user) => sum + sanitizeFarmState(user.farm).coins, 0),
+      onlineUsers: onlineIds.size,
+      registeredToday: users.filter((user) => new Date(user.createdAt || 0).getTime() >= dayStart.getTime()).length,
+      registeredLast30Days: users.filter((user) => new Date(user.createdAt || 0).getTime() >= monthAgo).length
     }
   };
 }
@@ -938,6 +1042,7 @@ function createSession(userId, isGuest = false) {
   sessions.set(token, {
     userId,
     isGuest,
+    lastSeenAt: Date.now(),
     expiresAt: Date.now() + SESSION_TTL_MS
   });
   return token;
@@ -956,6 +1061,7 @@ function getSession(req) {
   }
 
   session.expiresAt = Date.now() + SESSION_TTL_MS;
+  session.lastSeenAt = Date.now();
   return session;
 }
 
@@ -972,7 +1078,7 @@ function readBody(req) {
     let body = "";
     req.on("data", (chunk) => {
       body += chunk;
-      if (body.length > 8_000_000) {
+      if (body.length > 25_000_000) {
         reject(new Error("Request body is too large."));
         req.destroy();
       }
@@ -1050,22 +1156,109 @@ async function handleApi(req, res) {
         return;
       }
       const row = rows[index];
-      sendJson(res, 200, {
-        id: row.user.id,
-        username: row.user.username,
-        companyName: row.farm.companyName || `${row.user.username} Agro`,
-        logo: row.farm.logo || "",
-        color: row.farm.color || "#35c982",
-        landCount: row.landCount,
-        cash: row.cash,
-        score: row.score,
-        rank: index + 1
-      });
+      sendJson(res, 200, publicPlayerDetails(row.user, index + 1));
       return;
     }
 
     if (req.method === "GET" && req.url === "/api/settings") {
       sendJson(res, 200, readSettings());
+      return;
+    }
+
+    if (req.method === "GET" && req.url === "/api/messages/summary") {
+      const session = getSession(req);
+      if (!session || session.isGuest) {
+        sendJson(res, 401, { error: "Спочатку увійдіть у гру." });
+        return;
+      }
+      const users = readUsers();
+      const messages = readMessages();
+      const partners = new Map();
+      messages
+        .filter((message) => message.fromId === session.userId || message.toId === session.userId)
+        .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
+        .forEach((message) => {
+          const userId = message.fromId === session.userId ? message.toId : message.fromId;
+          if (!partners.has(userId)) {
+            const partner = users.find((user) => user.id === userId);
+            partners.set(userId, {
+              userId,
+              username: partner?.username || "Гравець",
+              companyName: partner ? userCompanyName(partner) : "Гравець",
+              lastText: message.text,
+              lastAt: message.createdAt,
+              unread: 0
+            });
+          }
+          if (message.toId === session.userId && !message.readAt) {
+            partners.get(userId).unread += 1;
+          }
+        });
+      const unread = messages.filter((message) => message.toId === session.userId && !message.readAt).length;
+      sendJson(res, 200, { unread, chats: [...partners.values()] });
+      return;
+    }
+
+    if (req.method === "GET" && req.url.startsWith("/api/messages/thread")) {
+      const session = getSession(req);
+      if (!session || session.isGuest) {
+        sendJson(res, 401, { error: "Спочатку увійдіть у гру." });
+        return;
+      }
+      const url = new URL(req.url, `http://${req.headers.host}`);
+      const partnerId = url.searchParams.get("userId");
+      const users = readUsers();
+      const partner = users.find((user) => user.id === partnerId);
+      if (!partner) {
+        sendJson(res, 404, { error: "Гравця не знайдено." });
+        return;
+      }
+      const messages = readMessages();
+      let changed = false;
+      const rows = messages
+        .filter((message) => (message.fromId === session.userId && message.toId === partnerId) || (message.fromId === partnerId && message.toId === session.userId))
+        .sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt))
+        .slice(-100);
+      messages.forEach((message) => {
+        if (message.fromId === partnerId && message.toId === session.userId && !message.readAt) {
+          message.readAt = new Date().toISOString();
+          changed = true;
+        }
+      });
+      if (changed) writeMessages(messages);
+      sendJson(res, 200, { partner: publicPlayerDetails(partner), messages: rows });
+      return;
+    }
+
+    if (req.method === "POST" && req.url === "/api/messages/send") {
+      const session = getSession(req);
+      if (!session || session.isGuest) {
+        sendJson(res, 401, { error: "Спочатку увійдіть у гру." });
+        return;
+      }
+      const body = await readBody(req);
+      const toUserId = String(body.toUserId || "");
+      const text = String(body.text || "").trim().slice(0, 1000);
+      const users = readUsers();
+      if (!text) {
+        sendJson(res, 400, { error: "Повідомлення не може бути порожнім." });
+        return;
+      }
+      if (toUserId === session.userId || !users.some((user) => user.id === toUserId)) {
+        sendJson(res, 404, { error: "Отримувача не знайдено." });
+        return;
+      }
+      const messages = readMessages();
+      messages.push({
+        id: crypto.randomUUID(),
+        fromId: session.userId,
+        toId: toUserId,
+        text,
+        createdAt: new Date().toISOString(),
+        readAt: null
+      });
+      writeMessages(messages);
+      sendJson(res, 201, { ok: true });
       return;
     }
 
@@ -1205,7 +1398,7 @@ async function handleApi(req, res) {
       user.farm = farm;
       user.updatedAt = new Date().toISOString();
       writeUsers(users);
-      mergeFarmIntoMarket(farm, user.id, farm.companyName || `${user.username} Agro`);
+      mergeFarmIntoMarket(farm, user.id, farm.companyName || `${user.username} Земля`);
       sendJson(res, 200, { ok: true, farm, market: readMarket() });
       return;
     }
@@ -1504,7 +1697,7 @@ async function handleApi(req, res) {
         if (owner.ownerId === user.id) delete market.land[id];
       });
       writeMarket(market);
-      mergeFarmIntoMarket(farm, user.id, farm.companyName || `${user.username} Agro`);
+      mergeFarmIntoMarket(farm, user.id, farm.companyName || `${user.username} Земля`);
       sendJson(res, 200, {
         ok: true,
         ...adminPayload(users, readMarket()),
@@ -1516,6 +1709,7 @@ async function handleApi(req, res) {
     if (req.method === "POST" && req.url === "/api/register") {
       const body = await readBody(req);
       const username = normalizeUsername(body.username);
+      const email = normalizeEmail(body.email);
       const password = String(body.password || "");
 
       if (username.length < 3 || username.length > 24) {
@@ -1523,8 +1717,13 @@ async function handleApi(req, res) {
         return;
       }
 
-      if (password.length < 4) {
-        sendJson(res, 400, { error: "Пароль має містити щонайменше 4 символи." });
+      if (!isValidEmail(email)) {
+        sendJson(res, 400, { error: "Вкажіть коректну електронну пошту." });
+        return;
+      }
+
+      if (password.length < 6) {
+        sendJson(res, 400, { error: "Пароль має містити щонайменше 6 символів." });
         return;
       }
 
@@ -1534,10 +1733,15 @@ async function handleApi(req, res) {
         sendJson(res, 409, { error: "Такий гравець уже зареєстрований." });
         return;
       }
+      if (users.some((user) => normalizeEmail(user.email) === email)) {
+        sendJson(res, 409, { error: "Цей email уже використовується." });
+        return;
+      }
 
       const user = {
         id: crypto.randomUUID(),
         username,
+        email,
         passwordHash: hashPassword(password),
         farm: defaultFarmState(),
         createdAt: new Date().toISOString(),
@@ -1558,9 +1762,10 @@ async function handleApi(req, res) {
     if (req.method === "POST" && req.url === "/api/login") {
       const body = await readBody(req);
       const username = normalizeUsername(body.username);
+      const login = normalizeEmail(body.username);
       const password = String(body.password || "");
       const users = readUsers();
-      const user = users.find((item) => item.username.toLowerCase() === username.toLowerCase());
+      const user = users.find((item) => item.username.toLowerCase() === username.toLowerCase() || normalizeEmail(item.email) === login);
 
       if (!user || !verifyPassword(password, user.passwordHash)) {
         sendJson(res, 401, { error: "Неправильне ім'я гравця або пароль." });
@@ -1575,13 +1780,49 @@ async function handleApi(req, res) {
       return;
     }
 
-    if (req.method === "POST" && req.url === "/api/guest") {
-      const guestId = `guest-${crypto.randomUUID()}`;
-      const token = createSession(guestId, true);
-      sendJson(res, 200, {
-        player: { id: guestId, username: "Гість", isGuest: true },
-        farm: defaultFarmState()
-      }, { "set-cookie": `agro_session=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=86400` });
+    if (req.method === "POST" && req.url === "/api/password-reset/request") {
+      const body = await readBody(req);
+      const email = normalizeEmail(body.email);
+      const users = readUsers();
+      const user = users.find((item) => normalizeEmail(item.email) === email);
+      if (user) {
+        const token = crypto.randomBytes(32).toString("hex");
+        const resetUrl = `${PUBLIC_BASE_URL.replace(/\/$/, "")}/?reset=${token}`;
+        const expiresAt = new Date(Date.now() + 1000 * 60 * 60).toISOString();
+        const resets = readPasswordResets().filter((row) => row.userId !== user.id && new Date(row.expiresAt || 0).getTime() > Date.now());
+        resets.push({ token, userId: user.id, expiresAt, createdAt: new Date().toISOString() });
+        writePasswordResets(resets);
+        await sendPasswordResetEmail(email, resetUrl);
+      }
+      sendJson(res, 200, { ok: true, message: "Якщо email існує, інструкція для відновлення буде надіслана." });
+      return;
+    }
+
+    if (req.method === "POST" && req.url === "/api/password-reset/confirm") {
+      const body = await readBody(req);
+      const token = String(body.token || "");
+      const password = String(body.password || "");
+      if (password.length < 6) {
+        sendJson(res, 400, { error: "Пароль має містити щонайменше 6 символів." });
+        return;
+      }
+      const resets = readPasswordResets();
+      const row = resets.find((item) => item.token === token && new Date(item.expiresAt || 0).getTime() > Date.now());
+      if (!row) {
+        sendJson(res, 400, { error: "Посилання відновлення недійсне або прострочене." });
+        return;
+      }
+      const users = readUsers();
+      const user = users.find((item) => item.id === row.userId);
+      if (!user) {
+        sendJson(res, 404, { error: "Користувача не знайдено." });
+        return;
+      }
+      user.passwordHash = hashPassword(password);
+      user.updatedAt = new Date().toISOString();
+      writeUsers(users);
+      writePasswordResets(resets.filter((item) => item.token !== token && item.userId !== user.id));
+      sendJson(res, 200, { ok: true, message: "Пароль змінено. Увійдіть з новим паролем." });
       return;
     }
 
@@ -1643,7 +1884,7 @@ async function handleApi(req, res) {
       user.farm = farm;
       user.updatedAt = new Date().toISOString();
       writeUsers(users);
-      mergeFarmIntoMarket(farm, user.id, farm.companyName || `${user.username} Agro`);
+      mergeFarmIntoMarket(farm, user.id, farm.companyName || `${user.username} Земля`);
       sendJson(res, 200, { ok: true, farm });
       return;
     }
@@ -1667,7 +1908,7 @@ async function startServer() {
 
     serveStatic(req, res);
   }).listen(PORT, HOST, () => {
-    console.log(`AgroMap працює за адресою http://localhost:${PORT}`);
+    console.log(`Землевласник працює за адресою http://localhost:${PORT}`);
     console.log(`Доступ з локальної мережі увімкнено на порту ${PORT}.`);
     console.log(DATABASE_URL ? "Сховище гри: PostgreSQL." : "Сховище гри: локальні файли data.");
   });

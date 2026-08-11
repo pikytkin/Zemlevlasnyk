@@ -1326,7 +1326,7 @@ dd {
 
 .admin-tabs {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 8px;
 }
 
@@ -1438,7 +1438,7 @@ dd {
   display: grid;
   grid-template-columns: 70px repeat(3, minmax(120px, 1fr)) auto auto;
   gap: 10px;
-  align-items: end;
+  align-items: start;
   padding: 10px;
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -1491,6 +1491,8 @@ dd {
   gap: 8px;
   align-items: center;
   min-height: 54px;
+  max-height: 148px;
+  overflow: auto;
   padding: 8px;
   border: 1px dashed var(--line);
   border-radius: 8px;
@@ -1513,7 +1515,8 @@ dd {
 .asset-photo-button img {
   width: 100%;
   height: 100%;
-  object-fit: cover;
+  object-fit: contain;
+  background: rgba(255, 255, 255, 0.88);
 }
 
 .admin-user {
@@ -1524,6 +1527,142 @@ dd {
   padding: 12px;
   border: 1px solid var(--line);
   border-radius: 8px;
+}
+
+.message-action {
+  position: relative;
+}
+
+.message-badge {
+  position: absolute;
+  right: -6px;
+  top: -7px;
+  min-width: 20px;
+  height: 20px;
+  display: grid;
+  place-items: center;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--red);
+  color: #fff;
+  font-size: 0.7rem;
+  font-weight: 900;
+}
+
+.messages-panel {
+  width: min(980px, 96vw);
+}
+
+.messages-layout {
+  display: grid;
+  grid-template-columns: 290px minmax(0, 1fr);
+  gap: 12px;
+  min-height: 460px;
+}
+
+.chat-list,
+.chatMessages {
+  min-height: 0;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.chat-list {
+  display: grid;
+  align-content: start;
+  gap: 6px;
+  padding: 8px;
+}
+
+.chat-list-item {
+  position: relative;
+  display: grid;
+  gap: 3px;
+  width: 100%;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text);
+  text-align: left;
+}
+
+.chat-list-item.is-active {
+  border-color: var(--line-bright);
+  background: rgba(53, 201, 130, 0.12);
+}
+
+.chat-list-item span {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 0.82rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-list-item em {
+  position: absolute;
+  right: 8px;
+  top: 8px;
+  min-width: 20px;
+  border-radius: 999px;
+  background: var(--green);
+  color: #082015;
+  font-size: 0.7rem;
+  font-style: normal;
+  font-weight: 900;
+  text-align: center;
+}
+
+.chat-thread {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  gap: 10px;
+}
+
+.chatMessages {
+  padding: 12px;
+}
+
+.chat-thread-head {
+  margin-bottom: 10px;
+  color: var(--green-2);
+}
+
+.chat-message-list {
+  display: grid;
+  gap: 8px;
+}
+
+.chat-message {
+  width: min(78%, 520px);
+  padding: 9px 11px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.chat-message.is-own {
+  justify-self: end;
+  border-color: rgba(53, 201, 130, 0.35);
+  background: rgba(53, 201, 130, 0.14);
+}
+
+.chat-message p {
+  margin-bottom: 4px;
+}
+
+.chat-message time {
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.message-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
 }
 
 .admin-user-title {
@@ -1784,6 +1923,30 @@ input:focus-visible {
   .splash-map {
     min-height: 46vh;
     padding: 18px;
+  }
+
+  .admin-tabs {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .messages-layout {
+    grid-template-columns: 1fr;
+    min-height: 0;
+  }
+
+  .chat-list {
+    max-height: 190px;
+  }
+
+  .settings-card,
+  .compact-list .settings-card,
+  .settings-card.compact-card,
+  .settings-card.stage-card {
+    grid-template-columns: 1fr;
+  }
+
+  .settings-card .wide-field {
+    grid-column: 1 / -1;
   }
 
   .auth-panel {
