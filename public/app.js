@@ -195,6 +195,7 @@ let gridRenderJob = 0;
 let gridRenderFrame = null;
 let isMapMoving = false;
 let gridTooDenseNotifiedAt = 0;
+let gridSkippedForDensity = false;
 let detailedMapMarkerCount = 0;
 let landClusterCacheKey = "";
 let landClusterCacheMap = null;
@@ -1007,6 +1008,13 @@ async function updateGrid() {
   }
   visibleCells = gridCellsInView();
   if (renderJob !== gridRenderJob || isOverviewZoom()) return;
+  if (gridSkippedForDensity) {
+    visibleCells = [];
+    renderOverviewGridLayer();
+    updateSettlementLabelVisibility();
+    renderSelectedCell();
+    return;
+  }
   if (!visibleCells.length) {
     updateSettlementLabelVisibility();
     renderSelectedCell();
@@ -1380,6 +1388,7 @@ function cellFromLatLng(lat, lng) {
 }
 
 function gridCellsInView(bounds = map.getBounds().pad(0.04), limit = gridCellLimitForZoom()) {
+  gridSkippedForDensity = false;
   const corners = [
     latLngToWorldMeters(bounds.getSouth(), bounds.getWest()),
     latLngToWorldMeters(bounds.getSouth(), bounds.getEast()),
@@ -1393,14 +1402,23 @@ function gridCellsInView(bounds = map.getBounds().pad(0.04), limit = gridCellLim
   const maxQ = Math.ceil(Math.max(...qValues)) + 3;
   const minR = Math.floor(Math.min(...rValues)) - 3;
   const maxR = Math.ceil(Math.max(...rValues)) + 3;
+  const candidateCount = Math.max(0, maxQ - minQ + 1) * Math.max(0, maxR - minR + 1);
+  if (candidateCount > Math.max(limit * 4, 14000)) {
+    gridSkippedForDensity = true;
+    notifyGridTooDense();
+    return [];
+  }
   const cells = [];
   for (let q = minQ; q <= maxQ; q += 1) {
     for (let r = minR; r <= maxR; r += 1) {
+      const center = worldFromAxial(q, r);
+      const { lat, lng } = worldMetersToLatLng(center.x, center.y);
+      if (!pointInBounds(lat, lng, bounds)) continue;
+      if (!pointInUkraine([lng, lat])) continue;
       const cell = makeVisibleCell(hexId(q, r));
-      if (!pointInBounds(cell.lat, cell.lng, bounds)) continue;
-      if (!pointInUkraine([cell.lng, cell.lat])) continue;
       cells.push(cell);
       if (cells.length > limit) {
+        gridSkippedForDensity = true;
         notifyGridTooDense();
         return [];
       }
