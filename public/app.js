@@ -34,6 +34,7 @@ const fallbackUkrainePolygon = [[[
 
 const rivalOwners = ["Інший гравець"];
 const PLAY_H3_RESOLUTION = 8;
+const DECK_LEAFLET_ZOOM_OFFSET = -1;
 let MAX_VISIBLE_H3_CELLS = 9000;
 const SETTLEMENT_GRID_SIZE = 0.25;
 let DETAIL_ZOOM_MIN = 12;
@@ -836,15 +837,22 @@ function h3ResolutionForZoom() {
 }
 
 function initDeckOverlay() {
-  if (!globalThis.deck?.Deck || !globalThis.deck?.H3HexagonLayer) return;
+  if (!globalThis.deck?.Deck || !globalThis.deck?.H3HexagonLayer) {
+    showGameMessage("GPU-шар карти не завантажився. Перевірте підключення до deck.gl.");
+    return;
+  }
   deckOverlay = new deck.Deck({
     parent: mapBoard,
     controller: false,
     useDevicePixels: Math.min(1.5, window.devicePixelRatio || 1),
-    style: { position: "absolute", inset: "0", pointerEvents: "none", zIndex: 440 },
+    style: { position: "absolute", inset: "0", pointerEvents: "none", zIndex: 640 },
     views: [new deck.MapView({ repeat: false })],
     viewState: deckViewState(),
-    layers: []
+    layers: [],
+    onError: (error) => {
+      console.error(error);
+      showGameMessage("GPU-шар H3 не зміг відобразити комірки.");
+    }
   });
 }
 
@@ -854,7 +862,7 @@ function deckViewState() {
   return {
     longitude: center.lng,
     latitude: center.lat,
-    zoom: map.getZoom(),
+    zoom: map.getZoom() + DECK_LEAFLET_ZOOM_OFFSET,
     pitch: 0,
     bearing: 0
   };
@@ -887,14 +895,20 @@ function updateDeckH3Layer(cells) {
         pickable: false,
         filled: true,
         stroked: true,
+        wireframe: false,
         highPrecision: false,
         extruded: false,
+        opacity: 1,
+        parameters: { depthTest: false },
         getHexagon: (item) => item.id,
         getFillColor: (item) => item.color.fill,
         getLineColor: (item) => item.color.line,
         getLineWidth: (item) => item.selected ? 3 : 1,
         lineWidthUnits: "pixels",
+        lineWidthMinPixels: 1,
+        lineWidthMaxPixels: 3,
         coverage: 0.995,
+        centerHexagon: selectedCellId || data[Math.floor(data.length / 2)]?.id || null,
         updateTriggers: {
           getFillColor: [marketSignature, selectedCellId, selectedCellIds.size, state.color],
           getLineColor: [marketSignature, selectedCellId, selectedCellIds.size, state.color],
@@ -921,8 +935,8 @@ function deckCellColor(cell) {
     };
   }
   return {
-    fill: selected ? [255, 176, 0, 115] : [255, 255, 255, 14],
-    line: selected ? [255, 176, 0, 255] : [17, 17, 17, 210]
+    fill: selected ? [255, 176, 0, 130] : [255, 255, 255, 42],
+    line: selected ? [255, 176, 0, 255] : [17, 17, 17, 235]
   };
 }
 
@@ -971,7 +985,6 @@ async function updateH3Grid() {
 
   updateSettlementLabelVisibility();
   updateDeckH3Layer(visibleCells);
-  renderLeafletFallbackH3Layer(visibleCells);
   renderDetailedCellsChunked(visibleCells, renderJob);
 }
 
@@ -1005,43 +1018,6 @@ function renderDetailedCellsChunked(cells, renderJob) {
   }
 
   h3RenderFrame = requestAnimationFrame(renderChunk);
-}
-
-function renderFreeCellGrid(cells) {
-  const freeBoundaries = [];
-  cells.forEach((cell) => {
-    const selected = selectedCellIds.has(cell.id) || cell.id === selectedCellId;
-    if (selected || getOwner(cell.id) !== "free") return;
-    freeBoundaries.push([...cell.boundary, cell.boundary[0]]);
-  });
-  if (!freeBoundaries.length) return;
-  L.polyline(freeBoundaries, {
-    pane: "h3Pane",
-    renderer: h3Renderer,
-    interactive: false,
-    className: "h3-free-grid",
-    color: "#111111",
-    weight: isLowPowerDevice() ? 0.75 : 0.9,
-    opacity: 0.82,
-    smoothFactor: 0,
-    lineCap: "butt",
-    lineJoin: "miter"
-  }).addTo(h3Layer);
-}
-
-function renderLeafletFallbackH3Layer(cells) {
-  const detailedCells = cells.map((cell) => makeCell(cell.id));
-  renderFreeCellGrid(detailedCells);
-  detailedCells.forEach((cell) => {
-    const owner = getOwner(cell.id);
-    const selected = selectedCellIds.has(cell.id) || cell.id === selectedCellId;
-    if (owner === "free" && !selected) return;
-    L.polygon(cell.boundary, {
-      ...cellStyle(cell, owner),
-      interactive: false,
-      weight: selected ? 2.2 : 1
-    }).addTo(h3Layer);
-  });
 }
 
 function addDetailedCellLayer(cell) {
