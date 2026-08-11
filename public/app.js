@@ -189,6 +189,7 @@ let h3UpdateTimer = null;
 let h3RenderJob = 0;
 let h3RenderFrame = null;
 let isMapMoving = false;
+let gridTooDenseNotifiedAt = 0;
 let landClusterCacheKey = "";
 let landClusterCacheMap = null;
 let landClusterCacheClusters = null;
@@ -844,12 +845,19 @@ function updateH3Grid() {
   }
 
   visibleCells = h3Lib() ? h3CellsInView() : fallbackCellsInView();
+  if (!visibleCells.length) {
+    updateSettlementLabelVisibility();
+    renderSelectedCell();
+    return;
+  }
+
   if (visibleCells.length && !visibleCells.some((cell) => cell.id === selectedCellId)) {
     selectedCellId = visibleCells[0].id;
     selectedCellIds = new Set([selectedCellId]);
   }
 
   updateSettlementLabelVisibility();
+  renderFreeCellGrid(visibleCells);
   renderDetailedCellsChunked(visibleCells, renderJob);
 }
 
@@ -884,9 +892,33 @@ function renderDetailedCellsChunked(cells, renderJob) {
   h3RenderFrame = requestAnimationFrame(renderChunk);
 }
 
+function renderFreeCellGrid(cells) {
+  const freeBoundaries = [];
+  cells.forEach((cell) => {
+    const selected = selectedCellIds.has(cell.id) || cell.id === selectedCellId;
+    if (selected || getOwner(cell.id) !== "free") return;
+    freeBoundaries.push([...cell.boundary, cell.boundary[0]]);
+  });
+  if (!freeBoundaries.length) return;
+  L.polyline(freeBoundaries, {
+    pane: "h3Pane",
+    renderer: h3Renderer,
+    interactive: false,
+    className: "h3-free-grid",
+    color: "#111111",
+    weight: isLowPowerDevice() ? 0.75 : 0.9,
+    opacity: 0.82,
+    smoothFactor: 0,
+    lineCap: "butt",
+    lineJoin: "miter"
+  }).addTo(h3Layer);
+}
+
 function addDetailedCellLayer(cell) {
   if (!cell.id.startsWith("fallback-")) cell.price = priceForCellId(cell.id);
   const owner = getOwner(cell.id);
+  const selected = selectedCellIds.has(cell.id) || cell.id === selectedCellId;
+  if (owner === "free" && !selected) return;
   const layer = L.polygon(cell.boundary, cellStyle(cell, owner));
   if (shouldBindCellTooltips()) {
     layer.bindTooltip(cellTooltip(cell, owner), {
@@ -1181,16 +1213,24 @@ function refreshVisibleCellLayers(cellIds = null) {
   }
 
   const ids = cellIds ? new Set(cellIds) : null;
+  let needsGridRedraw = false;
   visibleCells.forEach((cell) => {
     if (ids && !ids.has(cell.id)) return;
     const layer = cellLayerById.get(cell.id);
-    if (!layer) return;
+    if (!layer) {
+      needsGridRedraw = true;
+      return;
+    }
     const owner = getOwner(cell.id);
     layer.setStyle(cellStyle(cell, owner));
     if (!isTouchDevice() && layer.getTooltip()) {
       layer.setTooltipContent(cellTooltip(cell, owner));
     }
   });
+  if (needsGridRedraw) {
+    scheduleH3GridUpdate();
+    return;
+  }
   renderSelectedCell();
 }
 
@@ -1295,7 +1335,7 @@ function selectionCandidateCells() {
   const h3api = h3Lib();
   if (!h3api) return [];
   const bounds = map.getBounds().pad(0.02);
-  return h3CellsForBounds(bounds, h3ResolutionForZoom()).map((id) => makeCell(id));
+  return (h3CellsForBounds(bounds, h3ResolutionForZoom()) || []).map((id) => makeCell(id));
 }
 
 function selectCellAtMapPoint(event) {
@@ -1338,7 +1378,12 @@ function h3CellsInView() {
   const bounds = map.getBounds().pad(0.04);
 
   try {
-    return h3CellsForBounds(bounds, resolution).map((id) => makeCell(id));
+    const ids = h3CellsForBounds(bounds, resolution);
+    if (!ids) {
+      notifyGridTooDense();
+      return [];
+    }
+    return ids.map((id) => makeCell(id));
   } catch {
     return h3CellsBySampling(bounds, resolution);
   }
@@ -1354,12 +1399,20 @@ function h3CellsForBounds(bounds, resolution) {
     [bounds.getSouth(), bounds.getWest()]
   ]];
   const maxCells = h3CellLimitForZoom();
-  return h3api.polygonToCells(viewportPolygon, resolution, false)
+  const ids = h3api.polygonToCells(viewportPolygon, resolution, false)
     .filter((id) => {
       const [cellLat, cellLng] = h3api.cellToLatLng(id);
       return pointInBounds(cellLat, cellLng, bounds) && pointInUkraine([cellLng, cellLat]);
-    })
-    .slice(0, maxCells);
+    });
+  if (ids.length > maxCells) return null;
+  return ids;
+}
+
+function notifyGridTooDense() {
+  const now = Date.now();
+  if (now - gridTooDenseNotifiedAt < 4500) return;
+  gridTooDenseNotifiedAt = now;
+  showGameMessage("Занадто багато ділянок для цього масштабу. Наблизьте карту, щоб сітка була повною і швидкою.");
 }
 
 function ukrainePlayableCellIds() {
