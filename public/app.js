@@ -34,7 +34,7 @@ const fallbackUkrainePolygon = [[[
 
 const rivalOwners = ["Інший гравець"];
 const PLAY_H3_RESOLUTION = 8;
-let MAX_VISIBLE_H3_CELLS = 4200;
+let MAX_VISIBLE_H3_CELLS = 9000;
 const SETTLEMENT_GRID_SIZE = 0.25;
 let DETAIL_ZOOM_MIN = 12;
 let CLAIM_BATCH_SIZE = 1000;
@@ -868,7 +868,7 @@ function syncDeckViewState() {
 function updateDeckH3Layer(cells) {
   if (!deckOverlay || isOverviewZoom()) {
     if (deckOverlay) deckOverlay.setProps({ layers: [] });
-    return;
+    return false;
   }
 
   const data = cells.map((cell) => ({
@@ -903,6 +903,7 @@ function updateDeckH3Layer(cells) {
       })
     ]
   });
+  return true;
 }
 
 function deckCellColor(cell) {
@@ -969,7 +970,7 @@ async function updateH3Grid() {
   }
 
   updateSettlementLabelVisibility();
-  updateDeckH3Layer(visibleCells);
+  if (!updateDeckH3Layer(visibleCells)) renderLeafletFallbackH3Layer(visibleCells);
   renderDetailedCellsChunked(visibleCells, renderJob);
 }
 
@@ -1025,6 +1026,21 @@ function renderFreeCellGrid(cells) {
     lineCap: "butt",
     lineJoin: "miter"
   }).addTo(h3Layer);
+}
+
+function renderLeafletFallbackH3Layer(cells) {
+  const detailedCells = cells.map((cell) => makeCell(cell.id));
+  renderFreeCellGrid(detailedCells);
+  detailedCells.forEach((cell) => {
+    const owner = getOwner(cell.id);
+    const selected = selectedCellIds.has(cell.id) || cell.id === selectedCellId;
+    if (owner === "free" && !selected) return;
+    L.polygon(cell.boundary, {
+      ...cellStyle(cell, owner),
+      interactive: false,
+      weight: selected ? 2.2 : 1
+    }).addTo(h3Layer);
+  });
 }
 
 function addDetailedCellLayer(cell) {
@@ -1308,7 +1324,10 @@ function refreshVisibleCellLayers(cellIds = null) {
     return;
   }
 
-  updateDeckH3Layer(visibleCells);
+  if (!updateDeckH3Layer(visibleCells)) {
+    scheduleH3GridUpdate();
+    return;
+  }
   renderSelectedCell();
 }
 
@@ -1576,9 +1595,9 @@ function playableCoveragePolygons() {
 function h3CellLimitForZoom() {
   const zoom = map?.getZoom?.() || DETAIL_ZOOM_MIN;
   const lowPower = isLowPowerDevice();
-  const zoomLimit = zoom >= DETAIL_ZOOM_MIN + 2
-    ? (lowPower ? 1800 : 4200)
-    : (lowPower ? 850 : 2400);
+  const zoomLimit = zoom >= 13
+    ? (lowPower ? 4200 : 9000)
+    : (lowPower ? 2500 : 7000);
   return Math.min(MAX_VISIBLE_H3_CELLS, zoomLimit);
 }
 
