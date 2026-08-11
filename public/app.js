@@ -837,7 +837,7 @@ function h3ResolutionForZoom() {
 }
 
 function initDeckOverlay() {
-  if (!globalThis.deck?.Deck || !globalThis.deck?.H3HexagonLayer) {
+  if (!globalThis.deck?.Deck || !globalThis.deck?.PolygonLayer) {
     showGameMessage("GPU-шар карти не завантажився. Перевірте підключення до deck.gl.");
     return;
   }
@@ -851,7 +851,7 @@ function initDeckOverlay() {
     layers: [],
     onError: (error) => {
       console.error(error);
-      showGameMessage("GPU-шар H3 не зміг відобразити комірки.");
+      showGameMessage("GPU-шар землі не зміг відобразити комірки.");
     }
   });
 }
@@ -881,34 +881,31 @@ function updateDeckH3Layer(cells) {
 
   const data = cells.map((cell) => ({
     id: cell.id,
+    polygon: cell.polygon,
     owner: getOwner(cell.id),
     selected: selectedCellIds.has(cell.id) || cell.id === selectedCellId,
     color: deckCellColor(cell)
-  }));
+  })).filter((cell) => Array.isArray(cell.polygon) && cell.polygon.length >= 6);
 
   deckOverlay.setProps({
     viewState: deckViewState(),
     layers: [
-      new deck.H3HexagonLayer({
-        id: "zemlevlasnyk-h3-cells",
+      new deck.PolygonLayer({
+        id: "zemlevlasnyk-land-cells",
         data,
         pickable: false,
         filled: true,
         stroked: true,
-        wireframe: false,
-        highPrecision: false,
         extruded: false,
         opacity: 1,
         parameters: { depthTest: false },
-        getHexagon: (item) => item.id,
+        getPolygon: (item) => item.polygon,
         getFillColor: (item) => item.color.fill,
         getLineColor: (item) => item.color.line,
         getLineWidth: (item) => item.selected ? 3 : 1,
         lineWidthUnits: "pixels",
         lineWidthMinPixels: 1,
         lineWidthMaxPixels: 3,
-        coverage: 0.995,
-        centerHexagon: selectedCellId || data[Math.floor(data.length / 2)]?.id || null,
         updateTriggers: {
           getFillColor: [marketSignature, selectedCellId, selectedCellIds.size, state.color],
           getLineColor: [marketSignature, selectedCellId, selectedCellIds.size, state.color],
@@ -1455,7 +1452,7 @@ async function h3CellsInView() {
       notifyGridTooDense();
       return [];
     }
-    return result.ids.map((id) => makeVisibleCell(id));
+    return result.ids.map((id, index) => makeVisibleCell(id, result.polygons?.[index]));
   } catch {
     return h3CellsForBounds(bounds, resolution).map((id) => makeVisibleCell(id));
   }
@@ -1520,7 +1517,11 @@ function ensureH3Worker() {
       if (!pending) return;
       h3WorkerPending.delete(message.requestId);
       if (message.error) pending.reject(new Error(message.error));
-      else pending.resolve({ ids: Array.isArray(message.ids) ? message.ids : [], tooDense: Boolean(message.tooDense) });
+      else pending.resolve({
+        ids: Array.isArray(message.ids) ? message.ids : [],
+        polygons: Array.isArray(message.polygons) ? message.polygons : [],
+        tooDense: Boolean(message.tooDense)
+      });
     };
     h3Worker.onerror = (error) => {
       h3WorkerPending.forEach((pending) => pending.reject(error));
@@ -1640,14 +1641,15 @@ function fallbackCellsInView() {
   return cells;
 }
 
-function makeVisibleCell(id) {
+function makeVisibleCell(id, polygon = null) {
   const h3api = h3Lib();
   const [lat, lng] = h3api.cellToLatLng(id);
   return {
     id,
     h3: id,
     lat,
-    lng
+    lng,
+    polygon: polygon || h3api.cellToBoundary(id).map(([cellLat, cellLng]) => [cellLng, cellLat])
   };
 }
 
