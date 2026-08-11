@@ -597,6 +597,10 @@ dd {
   background: #f7f8f4;
 }
 
+.map-board .deck-tooltip {
+  display: none;
+}
+
 .selection-popup {
   position: absolute;
   left: 0;

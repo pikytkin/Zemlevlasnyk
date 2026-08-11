@@ -151,6 +151,10 @@ let boundaryLayer = null;
 let maskLayer = null;
 let h3Layer = null;
 let h3Renderer = null;
+let deckOverlay = null;
+let h3Worker = null;
+let h3WorkerRequestId = 0;
+let h3WorkerPending = new Map();
 let labelLayer = null;
 let ukrainePolygons = fallbackUkrainePolygon;
 let ukraineCellCache = new Map();
@@ -546,6 +550,7 @@ async function initMap() {
   h3Layer = L.layerGroup([], { pane: "h3Pane" }).addTo(map);
   labelLayer = L.layerGroup([], { pane: "labelPane" }).addTo(map);
   drawSettlementLabels();
+  initDeckOverlay();
 
   map.on("zoomstart", () => {
     isMapMoving = true;
@@ -556,8 +561,10 @@ async function initMap() {
   });
   map.on("zoomend moveend", () => {
     isMapMoving = false;
+    syncDeckViewState();
     scheduleH3GridUpdate();
   });
+  map.on("move zoom resize", syncDeckViewState);
   map.on("click", selectCellAtMapPoint);
   setupShiftSelection();
   setTimeout(() => {
@@ -828,13 +835,117 @@ function h3ResolutionForZoom() {
   return PLAY_H3_RESOLUTION;
 }
 
-function updateH3Grid() {
+function initDeckOverlay() {
+  if (!globalThis.deck?.Deck || !globalThis.deck?.H3HexagonLayer) return;
+  deckOverlay = new deck.Deck({
+    parent: mapBoard,
+    controller: false,
+    useDevicePixels: Math.min(1.5, window.devicePixelRatio || 1),
+    style: { position: "absolute", inset: "0", pointerEvents: "none", zIndex: 440 },
+    views: [new deck.MapView({ repeat: false })],
+    viewState: deckViewState(),
+    layers: []
+  });
+}
+
+function deckViewState() {
+  if (!map) return { longitude: 31.25, latitude: 49.02, zoom: 6, pitch: 0, bearing: 0 };
+  const center = map.getCenter();
+  return {
+    longitude: center.lng,
+    latitude: center.lat,
+    zoom: map.getZoom(),
+    pitch: 0,
+    bearing: 0
+  };
+}
+
+function syncDeckViewState() {
+  if (!deckOverlay) return;
+  deckOverlay.setProps({ viewState: deckViewState() });
+}
+
+function updateDeckH3Layer(cells) {
+  if (!deckOverlay || isOverviewZoom()) {
+    if (deckOverlay) deckOverlay.setProps({ layers: [] });
+    return;
+  }
+
+  const data = cells.map((cell) => ({
+    id: cell.id,
+    owner: getOwner(cell.id),
+    selected: selectedCellIds.has(cell.id) || cell.id === selectedCellId,
+    color: deckCellColor(cell)
+  }));
+
+  deckOverlay.setProps({
+    viewState: deckViewState(),
+    layers: [
+      new deck.H3HexagonLayer({
+        id: "zemlevlasnyk-h3-cells",
+        data,
+        pickable: false,
+        filled: true,
+        stroked: true,
+        highPrecision: false,
+        extruded: false,
+        getHexagon: (item) => item.id,
+        getFillColor: (item) => item.color.fill,
+        getLineColor: (item) => item.color.line,
+        getLineWidth: (item) => item.selected ? 3 : 1,
+        lineWidthUnits: "pixels",
+        coverage: 0.995,
+        updateTriggers: {
+          getFillColor: [marketSignature, selectedCellId, selectedCellIds.size, state.color],
+          getLineColor: [marketSignature, selectedCellId, selectedCellIds.size, state.color],
+          getLineWidth: [selectedCellId, selectedCellIds.size]
+        }
+      })
+    ]
+  });
+}
+
+function deckCellColor(cell) {
+  const selected = selectedCellIds.has(cell.id) || cell.id === selectedCellId;
+  const owner = getOwner(cell.id);
+  if (owner === "player") return {
+    fill: selected ? hexToRgba(state.color, 210) : hexToRgba(state.color, 145),
+    line: selected ? [255, 176, 0, 255] : [45, 124, 77, 220]
+  };
+  if (owner === "rival") {
+    const marketOwner = marketState?.land?.[cell.id];
+    return {
+      fill: hexToRgba(marketOwner?.ownerColor || "#ef7669", selected ? 190 : 125),
+      line: selected ? [255, 176, 0, 255] : [122, 56, 47, 220]
+    };
+  }
+  return {
+    fill: selected ? [255, 176, 0, 115] : [255, 255, 255, 14],
+    line: selected ? [255, 176, 0, 255] : [17, 17, 17, 210]
+  };
+}
+
+function hexToRgba(hex, alpha) {
+  const normalized = String(hex || "").replace("#", "");
+  const value = normalized.length === 3
+    ? normalized.split("").map((part) => part + part).join("")
+    : normalized.padEnd(6, "0").slice(0, 6);
+  return [
+    parseInt(value.slice(0, 2), 16) || 0,
+    parseInt(value.slice(2, 4), 16) || 0,
+    parseInt(value.slice(4, 6), 16) || 0,
+    alpha
+  ];
+}
+
+async function updateH3Grid() {
   if (!map || !h3Layer) return;
   cancelPendingH3Render();
   h3RenderJob += 1;
   const renderJob = h3RenderJob;
   h3Layer.clearLayers();
   cellLayerById = new Map();
+  updateDeckH3Layer([]);
 
   if (isOverviewZoom()) {
     visibleCells = [];
@@ -844,7 +955,8 @@ function updateH3Grid() {
     return;
   }
 
-  visibleCells = h3Lib() ? h3CellsInView() : fallbackCellsInView();
+  visibleCells = h3Lib() ? await h3CellsInView() : fallbackCellsInView();
+  if (renderJob !== h3RenderJob || isOverviewZoom()) return;
   if (!visibleCells.length) {
     updateSettlementLabelVisibility();
     renderSelectedCell();
@@ -857,7 +969,7 @@ function updateH3Grid() {
   }
 
   updateSettlementLabelVisibility();
-  renderFreeCellGrid(visibleCells);
+  updateDeckH3Layer(visibleCells);
   renderDetailedCellsChunked(visibleCells, renderJob);
 }
 
@@ -867,6 +979,7 @@ function clearH3LayerForZoom() {
   h3RenderJob += 1;
   h3Layer.clearLayers();
   cellLayerById = new Map();
+  updateDeckH3Layer([]);
 }
 
 function renderDetailedCellsChunked(cells, renderJob) {
@@ -915,24 +1028,7 @@ function renderFreeCellGrid(cells) {
 }
 
 function addDetailedCellLayer(cell) {
-  if (!cell.id.startsWith("fallback-")) cell.price = priceForCellId(cell.id);
   const owner = getOwner(cell.id);
-  const selected = selectedCellIds.has(cell.id) || cell.id === selectedCellId;
-  if (owner === "free" && !selected) return;
-  const layer = L.polygon(cell.boundary, cellStyle(cell, owner));
-  if (shouldBindCellTooltips()) {
-    layer.bindTooltip(cellTooltip(cell, owner), {
-      sticky: true,
-      direction: "top",
-      className: "cell-tooltip"
-    });
-  }
-  layer.on("click", (event) => {
-    L.DomEvent.stop(event);
-    selectCell(cell.id, event.originalEvent);
-    showTouchTooltip(cell, owner, event.latlng);
-  }).addTo(h3Layer);
-  cellLayerById.set(cell.id, layer);
   addBuildingEmojiLayer(cell, owner);
   addLandEmojiLayer(cell, owner);
 }
@@ -1212,25 +1308,7 @@ function refreshVisibleCellLayers(cellIds = null) {
     return;
   }
 
-  const ids = cellIds ? new Set(cellIds) : null;
-  let needsGridRedraw = false;
-  visibleCells.forEach((cell) => {
-    if (ids && !ids.has(cell.id)) return;
-    const layer = cellLayerById.get(cell.id);
-    if (!layer) {
-      needsGridRedraw = true;
-      return;
-    }
-    const owner = getOwner(cell.id);
-    layer.setStyle(cellStyle(cell, owner));
-    if (!isTouchDevice() && layer.getTooltip()) {
-      layer.setTooltipContent(cellTooltip(cell, owner));
-    }
-  });
-  if (needsGridRedraw) {
-    scheduleH3GridUpdate();
-    return;
-  }
+  updateDeckH3Layer(visibleCells);
   renderSelectedCell();
 }
 
@@ -1335,7 +1413,7 @@ function selectionCandidateCells() {
   const h3api = h3Lib();
   if (!h3api) return [];
   const bounds = map.getBounds().pad(0.02);
-  return (h3CellsForBounds(bounds, h3ResolutionForZoom()) || []).map((id) => makeCell(id));
+  return (h3CellsForBounds(bounds, h3ResolutionForZoom()) || []).map((id) => makeVisibleCell(id));
 }
 
 function selectCellAtMapPoint(event) {
@@ -1373,19 +1451,19 @@ function selectCellAtMapPoint(event) {
   }
 }
 
-function h3CellsInView() {
+async function h3CellsInView() {
   const resolution = h3ResolutionForZoom();
   const bounds = map.getBounds().pad(0.04);
 
   try {
-    const ids = h3CellsForBounds(bounds, resolution);
-    if (!ids) {
+    const result = await requestH3Ids(bounds, resolution, h3CellLimitForZoom());
+    if (result.tooDense) {
       notifyGridTooDense();
       return [];
     }
-    return ids.map((id) => makeCell(id));
+    return result.ids.map((id) => makeVisibleCell(id));
   } catch {
-    return h3CellsBySampling(bounds, resolution);
+    return h3CellsForBounds(bounds, resolution).map((id) => makeVisibleCell(id));
   }
 }
 
@@ -1404,8 +1482,60 @@ function h3CellsForBounds(bounds, resolution) {
       const [cellLat, cellLng] = h3api.cellToLatLng(id);
       return pointInBounds(cellLat, cellLng, bounds) && pointInUkraine([cellLng, cellLat]);
     });
-  if (ids.length > maxCells) return null;
+  if (ids.length > maxCells) {
+    notifyGridTooDense();
+    return [];
+  }
   return ids;
+}
+
+function requestH3Ids(bounds, resolution, limit) {
+  const worker = ensureH3Worker();
+  if (!worker) return Promise.resolve({ ids: h3CellsForBounds(bounds, resolution), tooDense: false });
+  const requestId = h3WorkerRequestId += 1;
+  const payload = {
+    requestId,
+    type: "cells",
+    resolution,
+    limit,
+    bounds: {
+      south: bounds.getSouth(),
+      west: bounds.getWest(),
+      north: bounds.getNorth(),
+      east: bounds.getEast()
+    }
+  };
+  return new Promise((resolve, reject) => {
+    h3WorkerPending.set(requestId, { resolve, reject });
+    worker.postMessage(payload);
+    window.setTimeout(() => {
+      if (!h3WorkerPending.has(requestId)) return;
+      h3WorkerPending.delete(requestId);
+      reject(new Error("H3 worker timeout"));
+    }, 3500);
+  });
+}
+
+function ensureH3Worker() {
+  if (h3Worker || typeof Worker === "undefined") return h3Worker;
+  try {
+    h3Worker = new Worker("/h3-worker.js");
+    h3Worker.onmessage = (event) => {
+      const message = event.data || {};
+      const pending = h3WorkerPending.get(message.requestId);
+      if (!pending) return;
+      h3WorkerPending.delete(message.requestId);
+      if (message.error) pending.reject(new Error(message.error));
+      else pending.resolve({ ids: Array.isArray(message.ids) ? message.ids : [], tooDense: Boolean(message.tooDense) });
+    };
+    h3Worker.onerror = (error) => {
+      h3WorkerPending.forEach((pending) => pending.reject(error));
+      h3WorkerPending.clear();
+    };
+  } catch {
+    h3Worker = null;
+  }
+  return h3Worker;
 }
 
 function notifyGridTooDense() {
@@ -1472,7 +1602,7 @@ function h3CellsBySampling(bounds, resolution) {
     if (cellsInView.size >= h3CellLimitForZoom()) break;
   }
 
-  return [...cellsInView].slice(0, h3CellLimitForZoom()).map((id) => makeCell(id));
+  return [...cellsInView].slice(0, h3CellLimitForZoom()).map((id) => makeVisibleCell(id));
 }
 
 function h3SamplingStepForResolution(resolution) {
@@ -1514,6 +1644,17 @@ function fallbackCellsInView() {
   }
 
   return cells;
+}
+
+function makeVisibleCell(id) {
+  const h3api = h3Lib();
+  const [lat, lng] = h3api.cellToLatLng(id);
+  return {
+    id,
+    h3: id,
+    lat,
+    lng
+  };
 }
 
 function makeCell(id) {
@@ -1668,7 +1809,8 @@ function pointInPolygon(point, polygon) {
 }
 
 function getCell(id) {
-  const cell = visibleCells.find((item) => item.id === id) || makeCell(id);
+  const visibleCell = visibleCells.find((item) => item.id === id);
+  const cell = visibleCell?.region ? visibleCell : makeCell(id);
   if (cell && !cell.id.startsWith("fallback-")) cell.price = priceForCellId(cell.id);
   return cell;
 }
