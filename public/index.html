@@ -22,12 +22,12 @@
           <div class="auth-tabs" role="tablist" aria-label="Вибір режиму входу">
             <button class="auth-tab is-active" type="button" data-auth-tab="login">Вхід</button>
             <button class="auth-tab" type="button" data-auth-tab="register">Реєстрація</button>
-            <button class="auth-tab" type="button" data-auth-tab="recover">Відновлення</button>
           </div>
           <form class="auth-form" id="loginForm">
             <label>Ім'я або email <input name="username" autocomplete="username" required minlength="3" maxlength="80"></label>
             <label>Пароль <input name="password" type="password" autocomplete="current-password" required minlength="4"></label>
             <button class="primary-action" type="submit">Увійти на карту</button>
+            <button class="auth-link" id="forgotPasswordLink" type="button">Забули пароль?</button>
           </form>
           <form class="auth-form is-hidden" id="registerForm">
             <label>Ім'я гравця <input name="username" autocomplete="username" required minlength="3" maxlength="24"></label>

@@ -613,7 +613,10 @@ async function sendPasswordResetEmail(email, resetUrl) {
 
 function userCompanyName(user) {
   const farm = sanitizeFarmState(user?.farm);
-  return farm.companyName || `${user?.username || "Гравець"} Земля`;
+  const name = String(farm.companyName || "").trim();
+  if (!name) return user?.username || "Гравець";
+  if (user?.username && (name === `${user.username} Земля` || name === `${user.username} Agro`)) return user.username;
+  return name;
 }
 
 function publicPlayerDetails(user, rank = null) {
@@ -628,7 +631,7 @@ function publicPlayerDetails(user, rank = null) {
   return {
     id: user.id,
     username: user.username,
-    companyName: farm.companyName || `${user.username} Земля`,
+    companyName: userCompanyName(user),
     logo: farm.logo || "",
     color: farm.color || "#35c982",
     landCount: Object.keys(farm.land || {}).length,
@@ -690,7 +693,7 @@ function refreshRegisteredMarketEntries(users = readUsers()) {
   });
   users.forEach((user) => {
     const farm = sanitizeFarmState(user.farm);
-    const ownerName = farm.companyName || `${user.username} Земля`;
+    const ownerName = userCompanyName(user);
     Object.entries(farm.land || {}).forEach(([id, cell]) => {
       if (!/^[0-9a-f]+$/i.test(id)) return;
       market.land[id] = marketEntryForCell(farm, user.id, ownerName, cell, settings);
@@ -784,7 +787,7 @@ function leaderboardRows() {
     const farm = sanitizeFarmState(user.farm);
     return {
       id: user.id,
-      name: farm.companyName || `${user.username} Земля`,
+      name: userCompanyName(user),
       landCount: Object.keys(farm.land || {}).length,
       cash: farm.coins,
       score: farmScore(farm)
@@ -813,7 +816,7 @@ function publicUserRow(user) {
   return {
     id: user.id,
     username: user.username,
-    companyName: farm.companyName || `${user.username} Земля`,
+    companyName: userCompanyName(user),
     coins: farm.coins,
     currentDay: farm.currentDay,
     landCount,
@@ -846,7 +849,7 @@ function regionFromCell(cell) {
 }
 
 function companyNameForUser(user, farm) {
-  return farm.companyName || `${user.username} Земля`;
+  return userCompanyName(user);
 }
 
 function formatMoney(value) {
@@ -1398,7 +1401,7 @@ async function handleApi(req, res) {
       user.farm = farm;
       user.updatedAt = new Date().toISOString();
       writeUsers(users);
-      mergeFarmIntoMarket(farm, user.id, farm.companyName || `${user.username} Земля`);
+      mergeFarmIntoMarket(farm, user.id, userCompanyName(user));
       sendJson(res, 200, { ok: true, farm, market: readMarket() });
       return;
     }
@@ -1697,7 +1700,7 @@ async function handleApi(req, res) {
         if (owner.ownerId === user.id) delete market.land[id];
       });
       writeMarket(market);
-      mergeFarmIntoMarket(farm, user.id, farm.companyName || `${user.username} Земля`);
+      mergeFarmIntoMarket(farm, user.id, userCompanyName(user));
       sendJson(res, 200, {
         ok: true,
         ...adminPayload(users, readMarket()),
@@ -1884,7 +1887,7 @@ async function handleApi(req, res) {
       user.farm = farm;
       user.updatedAt = new Date().toISOString();
       writeUsers(users);
-      mergeFarmIntoMarket(farm, user.id, farm.companyName || `${user.username} Земля`);
+      mergeFarmIntoMarket(farm, user.id, userCompanyName(user));
       sendJson(res, 200, { ok: true, farm });
       return;
     }

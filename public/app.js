@@ -62,6 +62,7 @@ const loginForm = document.querySelector("#loginForm");
 const registerForm = document.querySelector("#registerForm");
 const recoverForm = document.querySelector("#recoverForm");
 const resetForm = document.querySelector("#resetForm");
+const forgotPasswordLink = document.querySelector("#forgotPasswordLink");
 const playerName = document.querySelector("#playerName");
 const coinCount = document.querySelector("#coinCount");
 const incomeButton = document.querySelector("#incomeButton");
@@ -278,9 +279,8 @@ function normalizeState(nextState) {
     ledger: Array.isArray(nextState && nextState.ledger) ? nextState.ledger.slice(-1000) : []
   };
 
-  if (!normalized.companyName && player) {
-    normalized.companyName = player.isGuest ? "Гостьова розвідка" : `${player.username} Земля`;
-  }
+  if (!normalized.companyName) normalized.companyName = "";
+  if (player?.username && normalized.companyName === `${player.username} Земля`) normalized.companyName = player.username;
   normalized.events = normalized.events
     .filter((event) => event && typeof event.text === "string")
     .map((event) => ({ ...event, text: landLabel(event.text) }));
@@ -2926,12 +2926,21 @@ function render() {
 }
 
 function renderPlayerHeader() {
-  const name = state.companyName || (player?.isGuest ? "Гостьова розвідка" : `${player?.username || "Гравець"} Земля`);
+  const name = state.companyName || player?.username || "Гравець";
   playerName.innerHTML = `${state.logo ? `<img class="company-logo" src="${state.logo}" alt="">` : ""}<span>${escapeHtml(name)}</span>`;
 }
 
 function openModal(modal) {
   modal?.classList.remove("is-hidden");
+}
+
+function closeModal(modal) {
+  modal?.classList.add("is-hidden");
+  if (modal === imagePreviewModal && imagePreviewTarget) {
+    imagePreviewTarget.removeAttribute("src");
+    imagePreviewPhotos = [];
+    imagePreviewIndex = 0;
+  }
 }
 
 function closeModals() {
@@ -2957,7 +2966,7 @@ function renderProfileForm() {
   profileLogoPreview.innerHTML = state.logo ? `<img src="${state.logo}" alt="Емблема компанії">` : "<span>Емблему не завантажено</span>";
   profileStats.innerHTML = [
     ["Гравець", player?.username || "Гість"],
-    ["Компанія", state.companyName || `${player?.username || "Гравець"} Земля`],
+    ["Компанія", state.companyName || player?.username || "Гравець"],
     ["Етап", currentStage.title],
     ["Баланс", money(state.coins)],
     ["День гри", state.currentDay],
@@ -2985,7 +2994,7 @@ async function showOwnerInfo(ownerId) {
     renderOwnerInfo({
       id: player?.id,
       username: player?.username || "Гість",
-      companyName: state.companyName || (player?.isGuest ? "Гостьова розвідка" : `${player?.username || "Гравець"} Земля`),
+      companyName: state.companyName || player?.username || "Гравець",
       logo: state.logo || "",
       color: state.color || "#35c982",
       landCount: Object.keys(state.land || {}).length,
@@ -3082,6 +3091,7 @@ function renderChatList() {
 async function openChat(userId) {
   if (!userId || userId === player?.id) return;
   activeChatUserId = userId;
+  closeModal(ownerModal);
   openModal(messagesModal);
   renderChatList();
   await loadChatMessages(userId);
@@ -3934,10 +3944,19 @@ document.querySelectorAll("[data-auth-tab]").forEach((tab) => {
     document.querySelectorAll("[data-auth-tab]").forEach((item) => item.classList.toggle("is-active", item === tab));
     loginForm.classList.toggle("is-hidden", mode !== "login");
     registerForm.classList.toggle("is-hidden", mode !== "register");
-    recoverForm?.classList.toggle("is-hidden", mode !== "recover");
+    recoverForm?.classList.add("is-hidden");
     resetForm?.classList.add("is-hidden");
     showAuthMessage("");
   });
+});
+
+forgotPasswordLink?.addEventListener("click", () => {
+  document.querySelectorAll("[data-auth-tab]").forEach((item) => item.classList.remove("is-active"));
+  loginForm?.classList.add("is-hidden");
+  registerForm?.classList.add("is-hidden");
+  resetForm?.classList.add("is-hidden");
+  recoverForm?.classList.remove("is-hidden");
+  showAuthMessage("");
 });
 
 if (new URLSearchParams(window.location.search).has("reset")) {
@@ -4113,16 +4132,14 @@ document.addEventListener("keydown", (event) => {
   if (event.key === "ArrowLeft") stepImagePreview(-1);
   if (event.key === "ArrowRight") stepImagePreview(1);
 });
-document.querySelectorAll("[data-close-modal]").forEach((button) => button.addEventListener("click", closeModals));
+document.querySelectorAll("[data-close-modal]").forEach((button) => {
+  button.addEventListener("click", () => closeModal(button.closest(".modal")));
+});
 document.querySelectorAll("[data-close-image-preview]").forEach((button) => button.addEventListener("click", closeImagePreview));
 document.querySelectorAll(".modal").forEach((modal) => {
   modal.addEventListener("click", (event) => {
     if (event.target !== modal) return;
-    if (modal === imagePreviewModal) {
-      closeImagePreview();
-      return;
-    }
-    closeModals();
+    closeModal(modal);
   });
 });
 document.addEventListener("click", (event) => {
