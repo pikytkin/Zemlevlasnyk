@@ -59,11 +59,7 @@ function cellsForBounds(bounds, resolution, limit) {
     });
 
   if (ids.length > safeLimit) return { ids: [], tooDense: true };
-  return {
-    ids,
-    polygons: ids.map((id) => h3.cellToBoundary(id).map(([lat, lng]) => [lng, lat])),
-    tooDense: false
-  };
+  return { ids, tooDense: false };
 }
 
 function estimatedViewportCells(bounds, resolution) {
