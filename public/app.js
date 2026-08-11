@@ -34,9 +34,9 @@ const fallbackUkrainePolygon = [[[
 
 const rivalOwners = ["Інший гравець"];
 const PLAY_H3_RESOLUTION = 8;
-let MAX_VISIBLE_H3_CELLS = 120000;
+let MAX_VISIBLE_H3_CELLS = 4200;
 const SETTLEMENT_GRID_SIZE = 0.25;
-let DETAIL_ZOOM_MIN = 10;
+let DETAIL_ZOOM_MIN = 11;
 let CLAIM_BATCH_SIZE = 1000;
 let SELL_REFUND_RATE = 0.62;
 let LAND_LEVELS = [
@@ -354,8 +354,8 @@ function applyGameSettings(settings) {
   gameSettings = settings || gameSettings;
   const economy = gameSettings?.economy || {};
   const upgrades = gameSettings?.upgrades || {};
-  MAX_VISIBLE_H3_CELLS = Number.isFinite(economy.maxVisibleCells) ? Math.max(120000, economy.maxVisibleCells) : MAX_VISIBLE_H3_CELLS;
-  DETAIL_ZOOM_MIN = Number.isFinite(economy.detailZoomMin) ? economy.detailZoomMin : DETAIL_ZOOM_MIN;
+  MAX_VISIBLE_H3_CELLS = Number.isFinite(economy.maxVisibleCells) ? Math.max(600, Math.min(9000, economy.maxVisibleCells)) : MAX_VISIBLE_H3_CELLS;
+  DETAIL_ZOOM_MIN = Number.isFinite(economy.detailZoomMin) ? Math.max(11, economy.detailZoomMin) : DETAIL_ZOOM_MIN;
   CLAIM_BATCH_SIZE = Number.isFinite(economy.claimBatchSize) ? economy.claimBatchSize : CLAIM_BATCH_SIZE;
   SELL_REFUND_RATE = Number.isFinite(economy.sellRefundPercent) ? economy.sellRefundPercent / 100 : SELL_REFUND_RATE;
   LAND_LEVELS = Array.isArray(upgrades.landLevels) && upgrades.landLevels.length ? upgrades.landLevels : LAND_LEVELS;
@@ -862,7 +862,7 @@ function clearH3LayerForZoom() {
 }
 
 function renderDetailedCellsChunked(cells, renderJob) {
-  const chunkSize = map.getZoom() <= DETAIL_ZOOM_MIN ? 2600 : 1800;
+  const chunkSize = isLowPowerDevice() ? 180 : 420;
   let index = 0;
 
   function renderChunk() {
@@ -888,7 +888,7 @@ function addDetailedCellLayer(cell) {
   if (!cell.id.startsWith("fallback-")) cell.price = priceForCellId(cell.id);
   const owner = getOwner(cell.id);
   const layer = L.polygon(cell.boundary, cellStyle(cell, owner));
-  if (!isTouchDevice()) {
+  if (shouldBindCellTooltips()) {
     layer.bindTooltip(cellTooltip(cell, owner), {
       sticky: true,
       direction: "top",
@@ -932,6 +932,16 @@ function showTouchTooltip(cell, owner, latlng) {
 
 function isTouchDevice() {
   return navigator.maxTouchPoints > 0 || window.matchMedia("(pointer: coarse)").matches;
+}
+
+function isLowPowerDevice() {
+  return isTouchDevice()
+    || window.innerWidth < 900
+    || (navigator.hardwareConcurrency && navigator.hardwareConcurrency <= 4);
+}
+
+function shouldBindCellTooltips() {
+  return !isTouchDevice() && visibleCells.length <= 1400;
 }
 
 function addBuildingEmojiLayer(cell, owner) {
@@ -1151,7 +1161,7 @@ function scheduleH3GridUpdate() {
   h3UpdateTimer = setTimeout(() => {
     h3UpdateTimer = null;
     updateH3Grid();
-  }, 120);
+  }, isLowPowerDevice() ? 260 : 180);
 }
 
 function cancelPendingH3Render() {
@@ -1285,12 +1295,7 @@ function selectionCandidateCells() {
   const h3api = h3Lib();
   if (!h3api) return [];
   const bounds = map.getBounds().pad(0.02);
-  return ukrainePlayableCellIds()
-    .filter((id) => {
-      const [lat, lng] = h3api.cellToLatLng(id);
-      return pointInBounds(lat, lng, bounds);
-    })
-    .map((id) => makeCell(id));
+  return h3CellsForBounds(bounds, h3ResolutionForZoom()).map((id) => makeCell(id));
 }
 
 function selectCellAtMapPoint(event) {
@@ -1329,23 +1334,32 @@ function selectCellAtMapPoint(event) {
 }
 
 function h3CellsInView() {
-  const h3api = h3Lib();
   const resolution = h3ResolutionForZoom();
-  const bounds = map.getBounds().pad(0.12);
+  const bounds = map.getBounds().pad(0.04);
 
   try {
-    const maxCells = h3CellLimitForZoom();
-    const cells = ukrainePlayableCellIds()
-      .filter((id) => {
-        const [cellLat, cellLng] = h3api.cellToLatLng(id);
-        return pointInBounds(cellLat, cellLng, bounds);
-      })
-      .slice(0, maxCells);
-
-    return cells.map((id) => makeCell(id));
+    return h3CellsForBounds(bounds, resolution).map((id) => makeCell(id));
   } catch {
     return h3CellsBySampling(bounds, resolution);
   }
+}
+
+function h3CellsForBounds(bounds, resolution) {
+  const h3api = h3Lib();
+  const viewportPolygon = [[
+    [bounds.getSouth(), bounds.getWest()],
+    [bounds.getSouth(), bounds.getEast()],
+    [bounds.getNorth(), bounds.getEast()],
+    [bounds.getNorth(), bounds.getWest()],
+    [bounds.getSouth(), bounds.getWest()]
+  ]];
+  const maxCells = h3CellLimitForZoom();
+  return h3api.polygonToCells(viewportPolygon, resolution, false)
+    .filter((id) => {
+      const [cellLat, cellLng] = h3api.cellToLatLng(id);
+      return pointInBounds(cellLat, cellLng, bounds) && pointInUkraine([cellLng, cellLat]);
+    })
+    .slice(0, maxCells);
 }
 
 function ukrainePlayableCellIds() {
@@ -1377,7 +1391,12 @@ function playableCoveragePolygons() {
 }
 
 function h3CellLimitForZoom() {
-  return MAX_VISIBLE_H3_CELLS;
+  const zoom = map?.getZoom?.() || DETAIL_ZOOM_MIN;
+  const lowPower = isLowPowerDevice();
+  const zoomLimit = zoom >= DETAIL_ZOOM_MIN + 2
+    ? (lowPower ? 1800 : 4200)
+    : (lowPower ? 850 : 2400);
+  return Math.min(MAX_VISIBLE_H3_CELLS, zoomLimit);
 }
 
 function h3CellsBySampling(bounds, resolution) {
@@ -1463,8 +1482,20 @@ function makeCell(id) {
     income,
     boundary: h3api.cellToBoundary(id).map(([cellLat, cellLng]) => [cellLat, cellLng])
   };
-  cellCache.set(id, cell);
+  rememberCell(id, cell);
   return cell;
+}
+
+function rememberCell(id, cell) {
+  if (cellCache.size > 25000) {
+    let removed = 0;
+    for (const key of cellCache.keys()) {
+      cellCache.delete(key);
+      removed += 1;
+      if (removed >= 5000) break;
+    }
+  }
+  cellCache.set(id, cell);
 }
 
 function priceForCellId(id) {
@@ -3615,10 +3646,15 @@ function renderAdminStats(summary, users = []) {
 }
 
 function totalPlayableLandCount() {
+  const h3api = h3Lib();
+  if (!h3api) return null;
   try {
-    return h3Lib() ? ukrainePlayableCellIds().length : null;
+    const avgCellAreaKm2 = typeof h3api.getHexagonAreaAvg === "function"
+      ? h3api.getHexagonAreaAvg(PLAY_H3_RESOLUTION, "km2")
+      : 0.737327598;
+    return Math.round(603700 / avgCellAreaKm2);
   } catch {
-    return null;
+    return Math.round(603700 / 0.737327598);
   }
 }
 
