@@ -195,6 +195,7 @@ let h3RenderJob = 0;
 let h3RenderFrame = null;
 let isMapMoving = false;
 let gridTooDenseNotifiedAt = 0;
+let detailedMapMarkerCount = 0;
 let landClusterCacheKey = "";
 let landClusterCacheMap = null;
 let landClusterCacheClusters = null;
@@ -960,6 +961,7 @@ async function updateH3Grid() {
   const renderJob = h3RenderJob;
   h3Layer.clearLayers();
   cellLayerById = new Map();
+  detailedMapMarkerCount = 0;
   updateDeckH3Layer([]);
 
   if (isOverviewZoom()) {
@@ -994,6 +996,7 @@ function clearH3LayerForZoom() {
   h3RenderJob += 1;
   h3Layer.clearLayers();
   cellLayerById = new Map();
+  detailedMapMarkerCount = 0;
   updateDeckH3Layer([]);
 }
 
@@ -1023,7 +1026,6 @@ function renderDetailedCellsChunked(cells, renderJob) {
 function addDetailedCellLayer(cell) {
   const owner = getOwner(cell.id);
   addBuildingEmojiLayer(cell, owner);
-  addLandEmojiLayer(cell, owner);
 }
 
 function showTouchTooltip(cell, owner, latlng) {
@@ -1067,6 +1069,7 @@ function shouldBindCellTooltips() {
 
 function addBuildingEmojiLayer(cell, owner) {
   if (owner !== "player" && owner !== "rival") return;
+  if (!canAddDetailedMapMarker()) return;
   const emoji = owner === "player"
     ? buildingMapEmojiForCell(state.land[cell.id])
     : marketState?.land?.[cell.id]?.buildingMapEmoji;
@@ -1083,24 +1086,12 @@ function addBuildingEmojiLayer(cell, owner) {
       iconAnchor: [14, 14]
     })
   }).addTo(h3Layer);
+  detailedMapMarkerCount += 1;
 }
 
-function addLandEmojiLayer(cell, owner) {
-  if (owner !== "player" && owner !== "rival") return;
-  const owned = owner === "player" ? state.land[cell.id] : marketState?.land?.[cell.id];
-  if (!owned || owned.building || owned.buildingId || owned.buildingMapEmoji) return;
-  const center = cellCenterLatLng(cell);
-  if (!center) return;
-  L.marker(center, {
-    pane: "labelPane",
-    interactive: false,
-    icon: L.divIcon({
-      className: `land-cell-icon ${owner === "rival" ? "is-rival" : ""}`,
-      html: escapeHtml(owner === "rival" ? owned.cellEmoji || "🌾" : "🌾"),
-      iconSize: [24, 24],
-      iconAnchor: [12, 12]
-    })
-  }).addTo(h3Layer);
+function canAddDetailedMapMarker() {
+  const limit = isLowPowerDevice() ? 80 : 180;
+  return detailedMapMarkerCount < limit;
 }
 
 function cellCenterLatLng(cell) {
