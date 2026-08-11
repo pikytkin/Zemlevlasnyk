@@ -14,6 +14,8 @@
   --blue: #5fb4f2;
   --red: #dc695e;
   --soil: #6d5035;
+  --weight-ui: 700;
+  --weight-strong: 700;
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 
@@ -133,7 +135,7 @@ button:disabled {
   background: rgba(7, 18, 15, 0.72);
   color: var(--text);
   font-size: 0.76rem;
-  font-weight: 850;
+  font-weight: var(--weight-ui);
 }
 
 .label-kyiv { left: 47%; top: 32%; }
@@ -213,7 +215,7 @@ button:disabled {
   margin: 0 0 7px;
   color: var(--green-2);
   font-size: 0.72rem;
-  font-weight: 850;
+  font-weight: var(--weight-ui);
   letter-spacing: 0.08em;
   text-transform: uppercase;
 }
@@ -286,7 +288,7 @@ h3 {
   border: 1px solid var(--line);
   padding: 10px 14px;
   color: var(--text);
-  font-weight: 850;
+  font-weight: var(--weight-ui);
 }
 
 .auth-tab:hover:not(:disabled),
@@ -339,7 +341,7 @@ button.is-pressed:not(:disabled) {
   background: transparent;
   color: var(--green-2);
   font-size: 0.88rem;
-  font-weight: 800;
+  font-weight: var(--weight-ui);
   text-decoration: underline;
   text-underline-offset: 3px;
 }
@@ -353,7 +355,7 @@ label {
   gap: 7px;
   color: var(--muted);
   font-size: 0.94rem;
-  font-weight: 760;
+  font-weight: var(--weight-ui);
 }
 
 input {
@@ -376,7 +378,7 @@ input {
   border-radius: 8px;
   background: rgba(220, 105, 94, 0.14);
   color: var(--text);
-  font-weight: 850;
+  font-weight: var(--weight-ui);
 }
 
 .guest-action {
@@ -389,7 +391,7 @@ input {
   min-height: 24px;
   margin: 12px 0 0;
   color: var(--amber);
-  font-weight: 760;
+  font-weight: var(--weight-ui);
 }
 
 .game {
@@ -507,7 +509,7 @@ dt,
 dd {
   margin: 0;
   text-align: right;
-  font-weight: 850;
+  font-weight: var(--weight-ui);
 }
 
 .action-stack {
@@ -527,7 +529,7 @@ dd {
   max-width: 100%;
   color: rgba(230, 241, 226, 0.68);
   font-size: 0.68rem;
-  font-weight: 760;
+  font-weight: var(--weight-ui);
   white-space: normal;
 }
 
@@ -681,7 +683,7 @@ dd {
   border-radius: 8px;
   background: rgba(23, 71, 112, 0.94);
   color: var(--text);
-  font-weight: 900;
+  font-weight: var(--weight-ui);
   box-shadow: 0 12px 32px rgba(0, 0, 0, 0.34);
   cursor: pointer;
 }
@@ -910,7 +912,7 @@ dd {
   border-color: rgba(24, 35, 29, 0.2);
   background: rgba(255, 255, 255, 0.94);
   color: #18231d;
-  font-weight: 900;
+  font-weight: var(--weight-ui);
 }
 
 .leaflet-control-attribution {
@@ -924,7 +926,7 @@ dd {
   background: rgba(255, 255, 255, 0.95);
   color: #18231d;
   box-shadow: 0 12px 32px rgba(0, 0, 0, 0.18);
-  font-weight: 800;
+  font-weight: var(--weight-ui);
 }
 
 .leaflet-tooltip.cell-tooltip {
@@ -949,21 +951,21 @@ dd {
   margin-bottom: 5px;
   color: #07120f;
   font-size: 0.95rem;
-  font-weight: 950;
+  font-weight: var(--weight-strong);
 }
 
 .cell-tooltip span {
   margin-bottom: 7px;
   color: #365346;
   font-size: 0.82rem;
-  font-weight: 850;
+  font-weight: var(--weight-ui);
 }
 
 .cell-tooltip em {
   color: #1c3328;
   font-size: 0.82rem;
   font-style: normal;
-  font-weight: 800;
+  font-weight: var(--weight-ui);
 }
 
 .h3-cell {
@@ -1009,7 +1011,7 @@ dd {
   height: auto !important;
   color: #202820;
   font-size: 0.78rem;
-  font-weight: 900;
+  font-weight: var(--weight-ui);
   text-align: center;
   text-shadow:
     -1px -1px 0 rgba(255, 255, 255, 0.92),
@@ -1023,7 +1025,7 @@ dd {
 .settlement-z10,
 .settlement-z11 {
   font-size: 0.68rem;
-  font-weight: 800;
+  font-weight: var(--weight-ui);
   color: #344a3c;
 }
 
@@ -1315,7 +1317,7 @@ dd {
   background: transparent;
   color: var(--text);
   font: inherit;
-  font-weight: 900;
+  font-weight: var(--weight-ui);
   text-align: right;
   cursor: pointer;
 }
@@ -1351,7 +1353,7 @@ dd {
   background: rgba(255, 255, 255, 0.06);
   overflow: hidden;
   font-size: 2rem;
-  font-weight: 900;
+  font-weight: var(--weight-ui);
 }
 
 .owner-logo img {
@@ -1614,7 +1616,7 @@ dd {
   background: var(--red);
   color: #fff;
   font-size: 0.7rem;
-  font-weight: 900;
+  font-weight: var(--weight-ui);
 }
 
 .messages-panel {
@@ -1680,7 +1682,7 @@ dd {
   color: #082015;
   font-size: 0.7rem;
   font-style: normal;
-  font-weight: 900;
+  font-weight: var(--weight-ui);
   text-align: center;
 }
 
@@ -1901,7 +1903,7 @@ dd {
 
 .image-preview-toolbar span {
   color: var(--text);
-  font-weight: 850;
+  font-weight: var(--weight-ui);
   text-align: center;
 }
 
