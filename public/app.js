@@ -34,9 +34,10 @@ const fallbackUkrainePolygon = [[[
 
 const rivalOwners = ["Інший гравець"];
 const REGULAR_HEX_RADIUS_METERS = 1700;
+const DETAIL_ZOOM_LEVEL_COUNT = 3;
 let MAX_VISIBLE_GRID_CELLS = 9000;
 const SETTLEMENT_GRID_SIZE = 0.25;
-let DETAIL_ZOOM_MIN = 12;
+let DETAIL_ZOOM_MIN = 11;
 let CLAIM_BATCH_SIZE = 1000;
 let SELL_REFUND_RATE = 0.62;
 let LAND_LEVELS = [
@@ -347,7 +348,7 @@ function applyGameSettings(settings) {
   const economy = gameSettings?.economy || {};
   const upgrades = gameSettings?.upgrades || {};
   MAX_VISIBLE_GRID_CELLS = Number.isFinite(economy.maxVisibleCells) ? Math.max(600, Math.min(9000, economy.maxVisibleCells)) : MAX_VISIBLE_GRID_CELLS;
-  DETAIL_ZOOM_MIN = Number.isFinite(economy.detailZoomMin) ? Math.max(12, economy.detailZoomMin) : DETAIL_ZOOM_MIN;
+  DETAIL_ZOOM_MIN = Number.isFinite(economy.detailZoomMin) ? Math.max(4, economy.detailZoomMin) : DETAIL_ZOOM_MIN;
   CLAIM_BATCH_SIZE = Number.isFinite(economy.claimBatchSize) ? economy.claimBatchSize : CLAIM_BATCH_SIZE;
   SELL_REFUND_RATE = Number.isFinite(economy.sellRefundPercent) ? economy.sellRefundPercent / 100 : SELL_REFUND_RATE;
   LAND_LEVELS = Array.isArray(upgrades.landLevels) && upgrades.landLevels.length ? upgrades.landLevels : LAND_LEVELS;
@@ -487,7 +488,7 @@ async function initMap() {
 
   map = L.map(mapBoard, {
     zoomControl: true,
-    minZoom: 6,
+    minZoom: 4,
     maxZoom: 13,
     zoomSnap: 1,
     zoomDelta: 1,
@@ -912,8 +913,10 @@ function renderGridGpuLayer() {
     return;
   }
   const rect = mapBoard.getBoundingClientRect();
-  const vertices = [];
-  visibleCells.forEach((cell) => appendCellVertices(vertices, cell, rect.width, rect.height));
+  const strokeVertices = [];
+  const fillVertices = [];
+  visibleCells.forEach((cell) => appendCellVertices(strokeVertices, fillVertices, cell, rect.width, rect.height));
+  const vertices = strokeVertices.concat(fillVertices);
   gridGl.viewport(0, 0, gridCanvas.width, gridCanvas.height);
   gridGl.clearColor(0, 0, 0, 0);
   gridGl.clear(gridGl.COLOR_BUFFER_BIT);
@@ -933,7 +936,7 @@ function renderGridGpuLayer() {
   gridGl.drawArrays(gridGl.TRIANGLES, 0, vertices.length / 6);
 }
 
-function appendCellVertices(vertices, cell, width, height) {
+function appendCellVertices(strokeVertices, fillVertices, cell, width, height) {
   const boundary = cell.boundary && cell.boundary.length ? cell.boundary : getCell(cell.id).boundary;
   if (!boundary || !boundary.length) return;
   const centerPoint = map.latLngToContainerPoint([cell.lat, cell.lng]);
@@ -941,21 +944,17 @@ function appendCellVertices(vertices, cell, width, height) {
   const fill = gridCellColor(cell.id);
   const stroke = gridCellStrokeColor(cell.id);
   const selected = selectedCellIds.has(cell.id) || cell.id === selectedCellId;
-  const edgeScale = selected ? 0.92 : 0.965;
-  const outlineScale = selected ? 1 : 0.985;
+  const edgeScale = selected ? 0.86 : 0.955;
   const points = boundary.map(([lat, lng]) => map.latLngToContainerPoint([lat, lng]));
+  for (let index = 0; index < 6; index += 1) {
+    const strokeA = screenToClip(points[index].x, points[index].y, width, height);
+    const strokeB = screenToClip(points[(index + 1) % 6].x, points[(index + 1) % 6].y, width, height);
+    strokeVertices.push(center.x, center.y, ...stroke, strokeA.x, strokeA.y, ...stroke, strokeB.x, strokeB.y, ...stroke);
+  }
   for (let index = 0; index < 6; index += 1) {
     const a = scaledClipPoint(points[index], centerPoint, edgeScale, width, height);
     const b = scaledClipPoint(points[(index + 1) % 6], centerPoint, edgeScale, width, height);
-    vertices.push(center.x, center.y, ...fill, a.x, a.y, ...fill, b.x, b.y, ...fill);
-  }
-  for (let index = 0; index < 6; index += 1) {
-    const outerA = scaledClipPoint(points[index], centerPoint, outlineScale, width, height);
-    const outerB = scaledClipPoint(points[(index + 1) % 6], centerPoint, outlineScale, width, height);
-    const innerA = scaledClipPoint(points[index], centerPoint, selected ? 0.86 : 0.94, width, height);
-    const innerB = scaledClipPoint(points[(index + 1) % 6], centerPoint, selected ? 0.86 : 0.94, width, height);
-    vertices.push(outerA.x, outerA.y, ...stroke, outerB.x, outerB.y, ...stroke, innerB.x, innerB.y, ...stroke);
-    vertices.push(outerA.x, outerA.y, ...stroke, innerB.x, innerB.y, ...stroke, innerA.x, innerA.y, ...stroke);
+    fillVertices.push(center.x, center.y, ...fill, a.x, a.y, ...fill, b.x, b.y, ...fill);
   }
 }
 
@@ -1085,7 +1084,13 @@ function updateSettlementLabelVisibility() {
 }
 
 function isOverviewZoom() {
-  return map.getZoom() < DETAIL_ZOOM_MIN;
+  return map.getZoom() < detailZoomStart();
+}
+
+function detailZoomStart() {
+  const maxZoom = map?.getMaxZoom?.() || 13;
+  const minForThreeLevels = Math.max(4, maxZoom - DETAIL_ZOOM_LEVEL_COUNT + 1);
+  return Math.min(DETAIL_ZOOM_MIN, minForThreeLevels);
 }
 
 function overviewClusterKey(cell, precision = 0.45) {
@@ -1113,13 +1118,18 @@ function addAggregateCells(ids, kind) {
     const cell = getCell(id);
     if (!cell || !pointInBounds(cell.lat, cell.lng, bounds)) return;
     const key = overviewClusterKey(cell, precision);
-    if (!groups.has(key)) groups.set(key, { lat: cell.lat, lng: cell.lng, count: 0 });
-    groups.get(key).count += 1;
+    if (!groups.has(key)) groups.set(key, { latSum: 0, lngSum: 0, count: 0 });
+    const group = groups.get(key);
+    group.latSum += cell.lat;
+    group.lngSum += cell.lng;
+    group.count += 1;
   });
   [...groups.values()].slice(0, isLowPowerDevice() ? 100 : 180).forEach((group) => {
-    L.circleMarker([group.lat, group.lng], aggregateCellStyle(kind, group.count))
+    const lat = group.latSum / group.count;
+    const lng = group.lngSum / group.count;
+    L.polygon(aggregateHexBoundary(lat, lng, group.count), aggregateCellStyle(kind, group.count))
       .on("click", () => {
-        map.setView([group.lat, group.lng], DETAIL_ZOOM_MIN);
+        map.setView([lat, lng], detailZoomStart());
         showGameMessage("Наблизьте карту, щоб обирати окремі земельні ділянки.");
       })
       .addTo(gridMarkerLayer);
@@ -1127,13 +1137,22 @@ function addAggregateCells(ids, kind) {
 }
 
 function aggregateCellStyle(kind, count = 1) {
-  const radius = Math.min(18, 4 + Math.sqrt(count) * 1.8);
   const styles = {
-    rival: { color: "#7a382f", fillColor: "#ef7669", fillOpacity: 0.2, weight: 1 },
-    owned: { color: "#1b6f43", fillColor: state.color, fillOpacity: 0.34, weight: 1 },
-    selected: { color: "#ffb000", fillColor: "#ffb000", fillOpacity: 0.4, weight: 1.4 }
+    rival: { color: "#7a382f", fillColor: "#ef7669", fillOpacity: 0.22, weight: 1.4 },
+    owned: { color: "#1b6f43", fillColor: state.color, fillOpacity: 0.36, weight: 1.5 },
+    selected: { color: "#ffb000", fillColor: "#ffdf43", fillOpacity: 0.44, weight: 2.2 }
   };
-  return { pane: "gridMarkerPane", renderer: gridMarkerRenderer, radius, className: "grid-aggregate " + kind, ...styles[kind] };
+  return { pane: "gridMarkerPane", renderer: gridMarkerRenderer, className: "grid-aggregate " + kind, ...styles[kind] };
+}
+
+function aggregateHexBoundary(lat, lng, count = 1) {
+  const radius = Math.min(32, 10 + Math.sqrt(count) * 2.2);
+  const center = map.latLngToContainerPoint([lat, lng]);
+  return Array.from({ length: 6 }, (_, index) => {
+    const angle = Math.PI / 6 + index * Math.PI / 3;
+    const point = L.point(center.x + radius * Math.cos(angle), center.y + radius * Math.sin(angle));
+    return map.containerPointToLatLng(point);
+  });
 }
 
 function scheduleGridUpdate() {
@@ -1268,7 +1287,7 @@ function selectCellAtMapPoint(event) {
   if (!event?.latlng || !pointInUkraine([event.latlng.lng, event.latlng.lat])) return;
 
   if (isOverviewZoom() && !event.originalEvent?.shiftKey && !clusterSelectionMode) {
-    map.setView(event.latlng, DETAIL_ZOOM_MIN);
+    map.setView(event.latlng, detailZoomStart());
     showGameMessage("Наблизьте карту, щоб обирати окремі земельні ділянки.");
     return;
   }
@@ -2894,7 +2913,7 @@ function focusNewsTarget(cellId) {
   returnToNewsButton?.classList.remove("is-hidden");
   mapStage?.scrollIntoView({ behavior: "smooth", block: "center" });
   const cell = getCell(normalized);
-  map.setView([cell.lat, cell.lng], DETAIL_ZOOM_MIN);
+  map.setView([cell.lat, cell.lng], detailZoomStart());
   window.setTimeout(() => {
     selectCell(cell.id);
   }, 220);
