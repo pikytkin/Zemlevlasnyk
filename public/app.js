@@ -532,16 +532,23 @@ async function initMap() {
 
   map.on("zoomstart", () => {
     isMapMoving = true;
+    setGridCanvasVisible(false);
     clearGridLayerForZoom();
   });
   map.on("movestart", () => {
     isMapMoving = true;
+    setGridCanvasVisible(false);
+    if (gridMarkerLayer) gridMarkerLayer.clearLayers();
   });
   map.on("zoomend moveend", () => {
     isMapMoving = false;
+    setGridCanvasVisible(true);
     scheduleGridUpdate();
   });
-  map.on("move zoom resize", syncGridGpuCanvas);
+  map.on("resize", () => {
+    syncGridGpuCanvas();
+    scheduleGridUpdate();
+  });
   map.on("click", selectCellAtMapPoint);
   setupShiftSelection();
   setTimeout(() => {
@@ -881,6 +888,11 @@ function syncGridGpuCanvas() {
   renderGridGpuLayer();
 }
 
+function setGridCanvasVisible(visible) {
+  if (!gridCanvas) return;
+  gridCanvas.style.visibility = visible ? "visible" : "hidden";
+}
+
 function updateGridGpuLayer(cells = visibleCells) {
   visibleCells = Array.isArray(cells) ? cells : visibleCells;
   renderGridGpuLayer();
@@ -895,7 +907,7 @@ function clearGridGpuLayer() {
 }
 
 function renderGridGpuLayer() {
-  if (!gridGl || !gridProgram || !gridBuffer || !map || isOverviewZoom()) {
+  if (!gridGl || !gridProgram || !gridBuffer || !map || isOverviewZoom() || isMapMoving) {
     clearGridGpuLayer();
     return;
   }
@@ -1007,7 +1019,7 @@ async function updateGrid() {
   }
   updateSettlementLabelVisibility();
   updateGridGpuLayer(visibleCells);
-  renderDetailedCellsChunked(visibleCells, renderJob);
+  renderSelectedCell();
 }
 
 function clearGridLayerForZoom() {
@@ -1018,27 +1030,6 @@ function clearGridLayerForZoom() {
   cellLayerById = new Map();
   detailedMapMarkerCount = 0;
   clearGridGpuLayer();
-}
-
-function renderDetailedCellsChunked(cells, renderJob) {
-  const chunkSize = isLowPowerDevice() ? 180 : 420;
-  let index = 0;
-  function renderChunk() {
-    gridRenderFrame = null;
-    if (renderJob !== gridRenderJob || isOverviewZoom()) return;
-    const end = Math.min(index + chunkSize, cells.length);
-    for (; index < end; index += 1) addDetailedCellLayer(cells[index]);
-    if (index < cells.length) {
-      gridRenderFrame = requestAnimationFrame(renderChunk);
-      return;
-    }
-    renderSelectedCell();
-  }
-  gridRenderFrame = requestAnimationFrame(renderChunk);
-}
-
-function addDetailedCellLayer(cell) {
-  addBuildingEmojiLayer(cell, getOwner(cell.id));
 }
 
 function showTouchTooltip(cell, owner, latlng) {
@@ -1076,37 +1067,6 @@ function isLowPowerDevice() {
     || (navigator.hardwareConcurrency && navigator.hardwareConcurrency <= 4);
 }
 
-function shouldBindCellTooltips() {
-  return !isTouchDevice() && visibleCells.length <= 1400;
-}
-
-function addBuildingEmojiLayer(cell, owner) {
-  if (owner !== "player" && owner !== "rival") return;
-  if (!canAddDetailedMapMarker()) return;
-  const emoji = owner === "player"
-    ? buildingMapEmojiForCell(state.land[cell.id])
-    : marketState?.land?.[cell.id]?.buildingMapEmoji;
-  if (!emoji) return;
-  const center = cellCenterLatLng(cell);
-  if (!center) return;
-  L.marker(center, {
-    pane: "labelPane",
-    interactive: false,
-    icon: L.divIcon({
-      className: `building-cell-icon ${owner === "rival" ? "is-rival" : ""}`,
-      html: escapeHtml(emoji),
-      iconSize: [28, 28],
-      iconAnchor: [14, 14]
-    })
-  }).addTo(gridMarkerLayer);
-  detailedMapMarkerCount += 1;
-}
-
-function canAddDetailedMapMarker() {
-  const limit = isLowPowerDevice() ? 80 : 180;
-  return detailedMapMarkerCount < limit;
-}
-
 function cellCenterLatLng(cell) {
   if (Number.isFinite(cell.lat) && Number.isFinite(cell.lng)) return [cell.lat, cell.lng];
   if (!Array.isArray(cell.boundary) || !cell.boundary.length) return null;
@@ -1138,52 +1098,10 @@ function renderOverviewGridLayer() {
     .map(([id]) => id)
     .filter(isRegularHexId);
   const ownedIds = Object.keys(state.land || {}).filter((id) => isRegularHexId(id) && getOwner(id) === "player");
-  const buildingIds = ownedIds.filter((id) => state.land[id]?.building || state.land[id]?.buildingId);
-  const landOnlyIds = ownedIds.filter((id) => !state.land[id]?.building && !state.land[id]?.buildingId);
-  const rivalBuildingIds = rivalIds.filter((id) => marketState?.land?.[id]?.building || marketState?.land?.[id]?.buildingId || marketState?.land?.[id]?.buildingMapEmoji);
-  const rivalBuildingSet = new Set(rivalBuildingIds);
-  const rivalLandOnlyIds = rivalIds.filter((id) => !rivalBuildingSet.has(id));
   const selectedIds = (selectedCellIds.size ? [...selectedCellIds] : selectedCellId ? [selectedCellId] : []).filter(isRegularHexId);
   addAggregateCells(rivalIds, "rival");
   addAggregateCells(ownedIds, "owned");
   addAggregateCells(selectedIds, "selected");
-  addOverviewLandMarkers(landOnlyIds);
-  addOverviewBuildingMarkers(buildingIds);
-  addOverviewLandMarkers(rivalLandOnlyIds, true);
-  addOverviewBuildingMarkers(rivalBuildingIds, true);
-}
-
-function addOverviewLandMarkers(ids, isRival = false) {
-  addOverviewEmojiMarkers(ids, (id) => isRival ? marketState?.land?.[id]?.cellEmoji || "??" : "??", "land-cell-icon overview-land-icon " + (isRival ? "is-rival" : ""));
-}
-
-function addOverviewBuildingMarkers(ids, isRival = false) {
-  addOverviewEmojiMarkers(ids, (id) => isRival ? marketState?.land?.[id]?.buildingMapEmoji : buildingMapEmojiForCell(state.land[id]), "building-cell-icon overview-building-icon " + (isRival ? "is-rival" : ""));
-}
-
-function addOverviewEmojiMarkers(ids, emojiForId, className) {
-  const bounds = map.getBounds().pad(0.08);
-  const renderedGroups = new Set();
-  const precision = map.getZoom() <= 6 ? 0.85 : 0.42;
-  const limit = isLowPowerDevice() ? 80 : 150;
-  let rendered = 0;
-  ids.some((id) => {
-    if (!isRegularHexId(id)) return false;
-    const cell = getCell(id);
-    if (!cell || !pointInBounds(cell.lat, cell.lng, bounds)) return false;
-    const key = overviewClusterKey(cell, precision);
-    if (renderedGroups.has(key)) return false;
-    const emoji = emojiForId(id);
-    if (!emoji) return false;
-    renderedGroups.add(key);
-    L.marker([cell.lat, cell.lng], {
-      pane: "labelPane",
-      interactive: false,
-      icon: L.divIcon({ className, html: escapeHtml(emoji), iconSize: [28, 28], iconAnchor: [14, 14] })
-    }).addTo(gridMarkerLayer);
-    rendered += 1;
-    return rendered >= limit;
-  });
 }
 
 function addAggregateCells(ids, kind) {
