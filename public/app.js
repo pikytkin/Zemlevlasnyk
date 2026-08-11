@@ -33,9 +33,8 @@ const fallbackUkrainePolygon = [[[
 ]]];
 
 const rivalOwners = ["Інший гравець"];
-const PLAY_H3_RESOLUTION = 8;
-const DECK_LEAFLET_ZOOM_OFFSET = -1;
-let MAX_VISIBLE_H3_CELLS = 9000;
+const REGULAR_HEX_RADIUS_METERS = 1700;
+let MAX_VISIBLE_GRID_CELLS = 9000;
 const SETTLEMENT_GRID_SIZE = 0.25;
 let DETAIL_ZOOM_MIN = 12;
 let CLAIM_BATCH_SIZE = 1000;
@@ -150,12 +149,12 @@ let saveTimer = null;
 let map = null;
 let boundaryLayer = null;
 let maskLayer = null;
-let h3Layer = null;
-let h3Renderer = null;
-let deckOverlay = null;
-let h3Worker = null;
-let h3WorkerRequestId = 0;
-let h3WorkerPending = new Map();
+let gridMarkerLayer = null;
+let gridMarkerRenderer = null;
+let gridCanvas = null;
+let gridGl = null;
+let gridProgram = null;
+let gridBuffer = null;
 let labelLayer = null;
 let ukrainePolygons = fallbackUkrainePolygon;
 let ukraineCellCache = new Map();
@@ -190,22 +189,15 @@ let cellInfoOpen = false;
 let newsReturnState = null;
 let touchTooltip = null;
 let touchTooltipTimer = null;
-let h3UpdateTimer = null;
-let h3RenderJob = 0;
-let h3RenderFrame = null;
+let gridUpdateTimer = null;
+let gridRenderJob = 0;
+let gridRenderFrame = null;
 let isMapMoving = false;
 let gridTooDenseNotifiedAt = 0;
 let detailedMapMarkerCount = 0;
 let landClusterCacheKey = "";
 let landClusterCacheMap = null;
 let landClusterCacheClusters = null;
-
-function h3Lib() {
-  if (typeof globalThis !== "undefined" && globalThis.h3) return globalThis.h3;
-  if (typeof window !== "undefined" && window.h3) return window.h3;
-  if (typeof h3 !== "undefined") return h3;
-  return null;
-}
 
 function defaultGameState() {
   return {
@@ -239,14 +231,7 @@ function showGameMessage(message) {
 }
 
 function landLabel(value) {
-  return String(value || "")
-    .replaceAll("H3-комірок", "земельних ділянок")
-    .replaceAll("H3-комірки", "земельні ділянки")
-    .replaceAll("H3-комірку", "земельну ділянку")
-    .replaceAll("H3-ділянок", "земельних ділянок")
-    .replaceAll("H3-ділянки", "земельні ділянки")
-    .replaceAll("H3-ділянку", "земельну ділянку")
-    .replaceAll("H3", "зем.");
+  return String(value || "");
 }
 
 function replaceGameTerms(root = document.body) {
@@ -361,7 +346,7 @@ function applyGameSettings(settings) {
   gameSettings = settings || gameSettings;
   const economy = gameSettings?.economy || {};
   const upgrades = gameSettings?.upgrades || {};
-  MAX_VISIBLE_H3_CELLS = Number.isFinite(economy.maxVisibleCells) ? Math.max(600, Math.min(9000, economy.maxVisibleCells)) : MAX_VISIBLE_H3_CELLS;
+  MAX_VISIBLE_GRID_CELLS = Number.isFinite(economy.maxVisibleCells) ? Math.max(600, Math.min(9000, economy.maxVisibleCells)) : MAX_VISIBLE_GRID_CELLS;
   DETAIL_ZOOM_MIN = Number.isFinite(economy.detailZoomMin) ? Math.max(12, economy.detailZoomMin) : DETAIL_ZOOM_MIN;
   CLAIM_BATCH_SIZE = Number.isFinite(economy.claimBatchSize) ? economy.claimBatchSize : CLAIM_BATCH_SIZE;
   SELL_REFUND_RATE = Number.isFinite(economy.sellRefundPercent) ? economy.sellRefundPercent / 100 : SELL_REFUND_RATE;
@@ -399,9 +384,6 @@ async function loadGameSettings() {
 }
 
 function migrateLandToPlayResolution(nextState) {
-  const h3api = h3Lib();
-  if (!h3api) return nextState;
-
   const migratedLand = {};
   Object.entries(nextState.land || {}).forEach(([id, ownership]) => {
     const normalizedId = normalizePlayableCellId(id);
@@ -426,13 +408,7 @@ function migrateLandToPlayResolution(nextState) {
 }
 
 function normalizePlayableCellId(id) {
-  const h3api = h3Lib();
-  if (!h3api || !id || id.startsWith("fallback-") || !h3api.isValidCell(id)) return id;
-
-  const resolution = h3api.getResolution(id);
-  if (resolution === PLAY_H3_RESOLUTION) return id;
-  if (resolution > PLAY_H3_RESOLUTION) return h3api.cellToParent(id, PLAY_H3_RESOLUTION);
-  return h3api.cellToCenterChild(id, PLAY_H3_RESOLUTION);
+  return isRegularHexId(id) ? String(id) : null;
 }
 
 function startGame(nextPlayer, nextState) {
@@ -536,10 +512,10 @@ async function initMap() {
 
   map.createPane("countryMaskPane");
   map.getPane("countryMaskPane").style.zIndex = 350;
-  map.createPane("h3Pane");
-  map.getPane("h3Pane").style.zIndex = 430;
+  map.createPane("gridMarkerPane");
+  map.getPane("gridMarkerPane").style.zIndex = 650;
   map.createPane("labelPane");
-  map.getPane("labelPane").style.zIndex = 650;
+  map.getPane("labelPane").style.zIndex = 700;
 
   await loadUkraineBoundary();
   await loadSettlements();
@@ -548,31 +524,30 @@ async function initMap() {
   await refreshNews();
   drawUkraineMask();
 
-  h3Renderer = L.canvas({ padding: 0.35, tolerance: 8 });
-  h3Layer = L.layerGroup([], { pane: "h3Pane" }).addTo(map);
+  gridMarkerRenderer = L.canvas({ padding: 0.35, tolerance: 8 });
+  gridMarkerLayer = L.layerGroup([], { pane: "gridMarkerPane" }).addTo(map);
   labelLayer = L.layerGroup([], { pane: "labelPane" }).addTo(map);
+  initGridGpuLayer();
   drawSettlementLabels();
-  initDeckOverlay();
 
   map.on("zoomstart", () => {
     isMapMoving = true;
-    clearH3LayerForZoom();
+    clearGridLayerForZoom();
   });
   map.on("movestart", () => {
     isMapMoving = true;
   });
   map.on("zoomend moveend", () => {
     isMapMoving = false;
-    syncDeckViewState();
-    scheduleH3GridUpdate();
+    scheduleGridUpdate();
   });
-  map.on("move zoom resize", syncDeckViewState);
+  map.on("move zoom resize", syncGridGpuCanvas);
   map.on("click", selectCellAtMapPoint);
   setupShiftSelection();
   setTimeout(() => {
     map.invalidateSize();
     map.fitBounds(boundaryLayer.getBounds(), { padding: [18, 18] });
-    updateH3Grid();
+    updateGrid();
   }, 180);
   clearInterval(marketTimer);
   marketTimer = setInterval(refreshMarket, 4500);
@@ -666,8 +641,8 @@ async function refreshMarket() {
     }
     syncOwnedMarketLand();
     reconcileLocalLandWithMarket();
-    if (map && h3Layer) {
-      if (marketChanged && !isMapMoving) scheduleH3GridUpdate();
+    if (map && gridMarkerLayer) {
+      if (marketChanged && !isMapMoving) scheduleGridUpdate();
       render();
     }
   } catch {
@@ -710,6 +685,7 @@ async function refreshNews() {
 function syncOwnedMarketLand() {
   if (!player?.id || !marketState?.land) return;
   Object.entries(marketState.land).forEach(([id, owner]) => {
+    if (!isRegularHexId(id)) return;
     if (owner.ownerId !== player.id || state.land[id]) return;
     const cell = getCell(id);
     state.land[id] = {
@@ -723,7 +699,7 @@ function syncOwnedMarketLand() {
       buildingLevel: 0,
       machinery: false,
       machineryLevel: 0,
-      nickname: `${cell.region}, ${cell.h3.slice(-5)}`
+      nickname: `${cell.region}, ${cell.code.slice(-5)}`
     };
   });
 }
@@ -733,6 +709,11 @@ function reconcileLocalLandWithMarket() {
   let changed = false;
 
   Object.keys(state.land).forEach((id) => {
+    if (!isRegularHexId(id)) {
+      delete state.land[id];
+      changed = true;
+      return;
+    }
     const marketOwner = marketState.land[id];
     if (marketOwner && marketOwner.ownerId !== player.id) {
       delete state.land[id];
@@ -833,199 +814,231 @@ function drawSettlementLabels() {
   });
 }
 
-function h3ResolutionForZoom() {
-  return PLAY_H3_RESOLUTION;
-}
-
-function initDeckOverlay() {
-  if (!globalThis.deck?.Deck || !globalThis.deck?.H3HexagonLayer) {
-    showGameMessage("GPU-шар карти не завантажився. Перевірте підключення до deck.gl.");
+function initGridGpuLayer() {
+  if (gridCanvas || !mapBoard) return;
+  gridCanvas = document.createElement("canvas");
+  gridCanvas.className = "regular-grid-gpu-canvas";
+  gridCanvas.setAttribute("aria-hidden", "true");
+  mapBoard.appendChild(gridCanvas);
+  gridGl = gridCanvas.getContext("webgl", { alpha: true, antialias: false, premultipliedAlpha: true })
+    || gridCanvas.getContext("experimental-webgl", { alpha: true, antialias: false, premultipliedAlpha: true });
+  if (!gridGl) {
+    showGameMessage("WebGL недоступний. Карта може працювати повільніше.");
     return;
   }
-  deckOverlay = new deck.Deck({
-    parent: mapBoard,
-    controller: false,
-    useDevicePixels: Math.min(1.5, window.devicePixelRatio || 1),
-    style: { position: "absolute", inset: "0", pointerEvents: "none", zIndex: 640 },
-    views: [new deck.MapView({ repeat: false })],
-    viewState: deckViewState(),
-    layers: [],
-    onError: (error) => {
-      console.error(error);
-      showGameMessage("GPU-шар землі не зміг відобразити комірки.");
-    }
-  });
+  gridProgram = createGridProgram(gridGl);
+  gridBuffer = gridGl.createBuffer();
+  syncGridGpuCanvas();
 }
 
-function deckViewState() {
-  if (!map) return { longitude: 31.25, latitude: 49.02, zoom: 6, pitch: 0, bearing: 0 };
-  const center = map.getCenter();
-  return {
-    longitude: center.lng,
-    latitude: center.lat,
-    zoom: map.getZoom() + DECK_LEAFLET_ZOOM_OFFSET,
-    pitch: 0,
-    bearing: 0
-  };
+function createGridProgram(gl) {
+  const vertexSource = [
+    "attribute vec2 a_position;",
+    "attribute vec4 a_color;",
+    "varying vec4 v_color;",
+    "void main() {",
+    "  gl_Position = vec4(a_position, 0.0, 1.0);",
+    "  v_color = a_color;",
+    "}"
+  ].join("\n");
+  const fragmentSource = [
+    "precision mediump float;",
+    "varying vec4 v_color;",
+    "void main() {",
+    "  gl_FragColor = v_color;",
+    "}"
+  ].join("\n");
+  const vertexShader = compileShader(gl, gl.VERTEX_SHADER, vertexSource);
+  const fragmentShader = compileShader(gl, gl.FRAGMENT_SHADER, fragmentSource);
+  const program = gl.createProgram();
+  gl.attachShader(program, vertexShader);
+  gl.attachShader(program, fragmentShader);
+  gl.linkProgram(program);
+  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(program) || "Grid shader link failed.");
+  return program;
 }
 
-function syncDeckViewState() {
-  if (!deckOverlay) return;
-  deckOverlay.setProps({ viewState: deckViewState() });
+function compileShader(gl, type, source) {
+  const shader = gl.createShader(type);
+  gl.shaderSource(shader, source);
+  gl.compileShader(shader);
+  if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(shader) || "Grid shader compile failed.");
+  return shader;
 }
 
-function updateDeckH3Layer(cells) {
-  if (!deckOverlay || isOverviewZoom()) {
-    if (deckOverlay) deckOverlay.setProps({ layers: [] });
-    return false;
+function syncGridGpuCanvas() {
+  if (!gridCanvas || !mapBoard) return;
+  const ratio = Math.min(1.5, window.devicePixelRatio || 1);
+  const rect = mapBoard.getBoundingClientRect();
+  const width = Math.max(1, Math.round(rect.width * ratio));
+  const height = Math.max(1, Math.round(rect.height * ratio));
+  if (gridCanvas.width !== width || gridCanvas.height !== height) {
+    gridCanvas.width = width;
+    gridCanvas.height = height;
   }
+  gridCanvas.style.width = rect.width + "px";
+  gridCanvas.style.height = rect.height + "px";
+  renderGridGpuLayer();
+}
 
-  const data = cells.map((cell) => ({
-    id: cell.id,
-    owner: getOwner(cell.id),
-    selected: selectedCellIds.has(cell.id) || cell.id === selectedCellId,
-    color: deckCellColor(cell)
-  }));
-
-  deckOverlay.setProps({
-    viewState: deckViewState(),
-    layers: [
-      new deck.H3HexagonLayer({
-        id: "zemlevlasnyk-h3-cells",
-        data,
-        pickable: false,
-        filled: true,
-        stroked: true,
-        wireframe: false,
-        highPrecision: false,
-        extruded: false,
-        opacity: 1,
-        parameters: { depthTest: false },
-        getHexagon: (item) => item.id,
-        getFillColor: (item) => item.color.fill,
-        getLineColor: (item) => item.color.line,
-        getLineWidth: (item) => item.selected ? 3 : 1,
-        lineWidthUnits: "pixels",
-        lineWidthMinPixels: 1,
-        lineWidthMaxPixels: 3,
-        coverage: 0.995,
-        centerHexagon: selectedCellId || data[Math.floor(data.length / 2)]?.id || null,
-        updateTriggers: {
-          getFillColor: [marketSignature, selectedCellId, selectedCellIds.size, state.color],
-          getLineColor: [marketSignature, selectedCellId, selectedCellIds.size, state.color],
-          getLineWidth: [selectedCellId, selectedCellIds.size]
-        }
-      })
-    ]
-  });
+function updateGridGpuLayer(cells = visibleCells) {
+  visibleCells = Array.isArray(cells) ? cells : visibleCells;
+  renderGridGpuLayer();
   return true;
 }
 
-function deckCellColor(cell) {
-  const selected = selectedCellIds.has(cell.id) || cell.id === selectedCellId;
-  const owner = getOwner(cell.id);
-  if (owner === "player") return {
-    fill: selected ? hexToRgba(state.color, 210) : hexToRgba(state.color, 145),
-    line: selected ? [255, 176, 0, 255] : [45, 124, 77, 220]
-  };
-  if (owner === "rival") {
-    const marketOwner = marketState?.land?.[cell.id];
-    return {
-      fill: hexToRgba(marketOwner?.ownerColor || "#ef7669", selected ? 190 : 125),
-      line: selected ? [255, 176, 0, 255] : [122, 56, 47, 220]
-    };
+function clearGridGpuLayer() {
+  if (!gridGl || !gridCanvas) return;
+  gridGl.viewport(0, 0, gridCanvas.width, gridCanvas.height);
+  gridGl.clearColor(0, 0, 0, 0);
+  gridGl.clear(gridGl.COLOR_BUFFER_BIT);
+}
+
+function renderGridGpuLayer() {
+  if (!gridGl || !gridProgram || !gridBuffer || !map || isOverviewZoom()) {
+    clearGridGpuLayer();
+    return;
   }
-  return {
-    fill: selected ? [255, 176, 0, 130] : [255, 255, 255, 42],
-    line: selected ? [255, 176, 0, 255] : [17, 17, 17, 235]
-  };
+  const rect = mapBoard.getBoundingClientRect();
+  const vertices = [];
+  visibleCells.forEach((cell) => appendCellVertices(vertices, cell, rect.width, rect.height));
+  gridGl.viewport(0, 0, gridCanvas.width, gridCanvas.height);
+  gridGl.clearColor(0, 0, 0, 0);
+  gridGl.clear(gridGl.COLOR_BUFFER_BIT);
+  if (!vertices.length) return;
+  gridGl.useProgram(gridProgram);
+  gridGl.bindBuffer(gridGl.ARRAY_BUFFER, gridBuffer);
+  gridGl.bufferData(gridGl.ARRAY_BUFFER, new Float32Array(vertices), gridGl.DYNAMIC_DRAW);
+  const stride = 6 * Float32Array.BYTES_PER_ELEMENT;
+  const positionLocation = gridGl.getAttribLocation(gridProgram, "a_position");
+  const colorLocation = gridGl.getAttribLocation(gridProgram, "a_color");
+  gridGl.enableVertexAttribArray(positionLocation);
+  gridGl.vertexAttribPointer(positionLocation, 2, gridGl.FLOAT, false, stride, 0);
+  gridGl.enableVertexAttribArray(colorLocation);
+  gridGl.vertexAttribPointer(colorLocation, 4, gridGl.FLOAT, false, stride, 2 * Float32Array.BYTES_PER_ELEMENT);
+  gridGl.enable(gridGl.BLEND);
+  gridGl.blendFunc(gridGl.SRC_ALPHA, gridGl.ONE_MINUS_SRC_ALPHA);
+  gridGl.drawArrays(gridGl.TRIANGLES, 0, vertices.length / 6);
 }
 
-function hexToRgba(hex, alpha) {
+function appendCellVertices(vertices, cell, width, height) {
+  const boundary = cell.boundary && cell.boundary.length ? cell.boundary : getCell(cell.id).boundary;
+  if (!boundary || !boundary.length) return;
+  const centerPoint = map.latLngToContainerPoint([cell.lat, cell.lng]);
+  const center = screenToClip(centerPoint.x, centerPoint.y, width, height);
+  const fill = gridCellColor(cell.id);
+  const stroke = gridCellStrokeColor(cell.id);
+  const selected = selectedCellIds.has(cell.id) || cell.id === selectedCellId;
+  const edgeScale = selected ? 0.92 : 0.965;
+  const outlineScale = selected ? 1 : 0.985;
+  const points = boundary.map(([lat, lng]) => map.latLngToContainerPoint([lat, lng]));
+  for (let index = 0; index < 6; index += 1) {
+    const a = scaledClipPoint(points[index], centerPoint, edgeScale, width, height);
+    const b = scaledClipPoint(points[(index + 1) % 6], centerPoint, edgeScale, width, height);
+    vertices.push(center.x, center.y, ...fill, a.x, a.y, ...fill, b.x, b.y, ...fill);
+  }
+  for (let index = 0; index < 6; index += 1) {
+    const outerA = scaledClipPoint(points[index], centerPoint, outlineScale, width, height);
+    const outerB = scaledClipPoint(points[(index + 1) % 6], centerPoint, outlineScale, width, height);
+    const innerA = scaledClipPoint(points[index], centerPoint, selected ? 0.86 : 0.94, width, height);
+    const innerB = scaledClipPoint(points[(index + 1) % 6], centerPoint, selected ? 0.86 : 0.94, width, height);
+    vertices.push(outerA.x, outerA.y, ...stroke, outerB.x, outerB.y, ...stroke, innerB.x, innerB.y, ...stroke);
+    vertices.push(outerA.x, outerA.y, ...stroke, innerB.x, innerB.y, ...stroke, innerA.x, innerA.y, ...stroke);
+  }
+}
+
+function screenToClip(x, y, width, height) {
+  return { x: (x / width) * 2 - 1, y: 1 - (y / height) * 2 };
+}
+
+function scaledClipPoint(point, center, scale, width, height) {
+  return screenToClip(center.x + (point.x - center.x) * scale, center.y + (point.y - center.y) * scale, width, height);
+}
+
+function gridCellColor(id) {
+  const selected = selectedCellIds.has(id) || id === selectedCellId;
+  const owner = getOwner(id);
+  if (owner === "player") return colorToFloats(state.color, selected ? 0.78 : 0.52);
+  if (owner === "rival") return colorToFloats(marketState?.land?.[id]?.ownerColor || "#ef7669", selected ? 0.72 : 0.42);
+  return selected ? [1, 0.69, 0, 0.42] : [1, 1, 1, 0.08];
+}
+
+function gridCellStrokeColor(id) {
+  const selected = selectedCellIds.has(id) || id === selectedCellId;
+  const owner = getOwner(id);
+  if (selected) return [1, 0.69, 0, 1];
+  if (owner === "player") return [0.18, 0.49, 0.3, 0.9];
+  if (owner === "rival") return [0.48, 0.22, 0.18, 0.9];
+  return [0.07, 0.07, 0.07, 0.88];
+}
+
+function colorToFloats(hex, alpha) {
   const normalized = String(hex || "").replace("#", "");
-  const value = normalized.length === 3
-    ? normalized.split("").map((part) => part + part).join("")
-    : normalized.padEnd(6, "0").slice(0, 6);
-  return [
-    parseInt(value.slice(0, 2), 16) || 0,
-    parseInt(value.slice(2, 4), 16) || 0,
-    parseInt(value.slice(4, 6), 16) || 0,
-    alpha
-  ];
+  const value = normalized.length === 3 ? normalized.split("").map((part) => part + part).join("") : normalized.padEnd(6, "0").slice(0, 6);
+  return [(parseInt(value.slice(0, 2), 16) || 0) / 255, (parseInt(value.slice(2, 4), 16) || 0) / 255, (parseInt(value.slice(4, 6), 16) || 0) / 255, alpha];
 }
 
-async function updateH3Grid() {
-  if (!map || !h3Layer) return;
-  cancelPendingH3Render();
-  h3RenderJob += 1;
-  const renderJob = h3RenderJob;
-  h3Layer.clearLayers();
+async function updateGrid() {
+  if (!map || !gridMarkerLayer) return;
+  cancelPendingGridRender();
+  gridRenderJob += 1;
+  const renderJob = gridRenderJob;
+  gridMarkerLayer.clearLayers();
   cellLayerById = new Map();
   detailedMapMarkerCount = 0;
-  updateDeckH3Layer([]);
-
+  clearGridGpuLayer();
   if (isOverviewZoom()) {
     visibleCells = [];
-    renderOverviewH3Layer();
+    renderOverviewGridLayer();
     updateSettlementLabelVisibility();
     renderSelectedCell();
     return;
   }
-
-  visibleCells = h3Lib() ? await h3CellsInView() : fallbackCellsInView();
-  if (renderJob !== h3RenderJob || isOverviewZoom()) return;
+  visibleCells = gridCellsInView();
+  if (renderJob !== gridRenderJob || isOverviewZoom()) return;
   if (!visibleCells.length) {
     updateSettlementLabelVisibility();
     renderSelectedCell();
     return;
   }
-
-  if (visibleCells.length && !visibleCells.some((cell) => cell.id === selectedCellId)) {
+  if (visibleCells.length && (!selectedCellId || !visibleCells.some((cell) => cell.id === selectedCellId))) {
     selectedCellId = visibleCells[0].id;
     selectedCellIds = new Set([selectedCellId]);
   }
-
   updateSettlementLabelVisibility();
-  updateDeckH3Layer(visibleCells);
+  updateGridGpuLayer(visibleCells);
   renderDetailedCellsChunked(visibleCells, renderJob);
 }
 
-function clearH3LayerForZoom() {
-  if (!h3Layer) return;
-  cancelPendingH3Render();
-  h3RenderJob += 1;
-  h3Layer.clearLayers();
+function clearGridLayerForZoom() {
+  if (!gridMarkerLayer) return;
+  cancelPendingGridRender();
+  gridRenderJob += 1;
+  gridMarkerLayer.clearLayers();
   cellLayerById = new Map();
   detailedMapMarkerCount = 0;
-  updateDeckH3Layer([]);
+  clearGridGpuLayer();
 }
 
 function renderDetailedCellsChunked(cells, renderJob) {
   const chunkSize = isLowPowerDevice() ? 180 : 420;
   let index = 0;
-
   function renderChunk() {
-    h3RenderFrame = null;
-    if (renderJob !== h3RenderJob || isOverviewZoom()) return;
+    gridRenderFrame = null;
+    if (renderJob !== gridRenderJob || isOverviewZoom()) return;
     const end = Math.min(index + chunkSize, cells.length);
-    for (; index < end; index += 1) {
-      addDetailedCellLayer(cells[index]);
-    }
-
+    for (; index < end; index += 1) addDetailedCellLayer(cells[index]);
     if (index < cells.length) {
-      h3RenderFrame = requestAnimationFrame(renderChunk);
+      gridRenderFrame = requestAnimationFrame(renderChunk);
       return;
     }
-
     renderSelectedCell();
   }
-
-  h3RenderFrame = requestAnimationFrame(renderChunk);
+  gridRenderFrame = requestAnimationFrame(renderChunk);
 }
 
 function addDetailedCellLayer(cell) {
-  const owner = getOwner(cell.id);
-  addBuildingEmojiLayer(cell, owner);
+  addBuildingEmojiLayer(cell, getOwner(cell.id));
 }
 
 function showTouchTooltip(cell, owner, latlng) {
@@ -1085,7 +1098,7 @@ function addBuildingEmojiLayer(cell, owner) {
       iconSize: [28, 28],
       iconAnchor: [14, 14]
     })
-  }).addTo(h3Layer);
+  }).addTo(gridMarkerLayer);
   detailedMapMarkerCount += 1;
 }
 
@@ -1095,8 +1108,7 @@ function canAddDetailedMapMarker() {
 }
 
 function cellCenterLatLng(cell) {
-  const h3api = h3Lib();
-  if (h3api && h3api.isValidCell(cell.id)) return h3api.cellToLatLng(cell.id);
+  if (Number.isFinite(cell.lat) && Number.isFinite(cell.lng)) return [cell.lat, cell.lng];
   if (!Array.isArray(cell.boundary) || !cell.boundary.length) return null;
   const total = cell.boundary.reduce((sum, point) => [sum[0] + point[0], sum[1] + point[1]], [0, 0]);
   return [total[0] / cell.boundary.length, total[1] / cell.boundary.length];
@@ -1116,26 +1128,22 @@ function isOverviewZoom() {
   return map.getZoom() < DETAIL_ZOOM_MIN;
 }
 
-function overviewRenderResolution() {
-  if (map.getZoom() >= 8) return 6;
-  return map.getZoom() <= 6 ? 4 : 5;
+function overviewClusterKey(cell, precision = 0.45) {
+  return Math.round(cell.lat / precision) + ":" + Math.round(cell.lng / precision);
 }
 
-function renderOverviewH3Layer() {
-  const h3api = h3Lib();
-  if (!h3api) return;
-
+function renderOverviewGridLayer() {
   const rivalIds = Object.entries(marketState?.land || {})
     .filter(([, owner]) => owner.ownerId !== player?.id)
-    .map(([id]) => id);
-  const ownedIds = Object.keys(state.land || {}).filter((id) => getOwner(id) === "player");
+    .map(([id]) => id)
+    .filter(isRegularHexId);
+  const ownedIds = Object.keys(state.land || {}).filter((id) => isRegularHexId(id) && getOwner(id) === "player");
   const buildingIds = ownedIds.filter((id) => state.land[id]?.building || state.land[id]?.buildingId);
   const landOnlyIds = ownedIds.filter((id) => !state.land[id]?.building && !state.land[id]?.buildingId);
   const rivalBuildingIds = rivalIds.filter((id) => marketState?.land?.[id]?.building || marketState?.land?.[id]?.buildingId || marketState?.land?.[id]?.buildingMapEmoji);
   const rivalBuildingSet = new Set(rivalBuildingIds);
   const rivalLandOnlyIds = rivalIds.filter((id) => !rivalBuildingSet.has(id));
-  const selectedIds = selectedCellIds.size ? [...selectedCellIds] : selectedCellId ? [selectedCellId] : [];
-
+  const selectedIds = (selectedCellIds.size ? [...selectedCellIds] : selectedCellId ? [selectedCellId] : []).filter(isRegularHexId);
   addAggregateCells(rivalIds, "rival");
   addAggregateCells(ownedIds, "owned");
   addAggregateCells(selectedIds, "selected");
@@ -1146,154 +1154,96 @@ function renderOverviewH3Layer() {
 }
 
 function addOverviewLandMarkers(ids, isRival = false) {
-  addOverviewEmojiMarkers(
-    ids,
-    (id) => isRival ? marketState?.land?.[id]?.cellEmoji || "🌾" : "🌾",
-    `land-cell-icon overview-land-icon ${isRival ? "is-rival" : ""}`
-  );
+  addOverviewEmojiMarkers(ids, (id) => isRival ? marketState?.land?.[id]?.cellEmoji || "??" : "??", "land-cell-icon overview-land-icon " + (isRival ? "is-rival" : ""));
 }
 
 function addOverviewBuildingMarkers(ids, isRival = false) {
-  addOverviewEmojiMarkers(
-    ids,
-    (id) => isRival ? marketState?.land?.[id]?.buildingMapEmoji : buildingMapEmojiForCell(state.land[id]),
-    `building-cell-icon overview-building-icon ${isRival ? "is-rival" : ""}`
-  );
+  addOverviewEmojiMarkers(ids, (id) => isRival ? marketState?.land?.[id]?.buildingMapEmoji : buildingMapEmojiForCell(state.land[id]), "building-cell-icon overview-building-icon " + (isRival ? "is-rival" : ""));
 }
 
 function addOverviewEmojiMarkers(ids, emojiForId, className) {
-  const h3api = h3Lib();
   const bounds = map.getBounds().pad(0.08);
-  const renderedParents = new Set();
-  const resolution = overviewRenderResolution();
-  ids.forEach((id) => {
-    const normalized = normalizePlayableCellId(id);
-    if (!normalized || normalized.startsWith("fallback-") || !h3api.isValidCell(normalized)) return;
-    const parent = h3api.getResolution(normalized) > resolution ? h3api.cellToParent(normalized, resolution) : normalized;
-    if (renderedParents.has(parent)) return;
-    const [lat, lng] = h3api.cellToLatLng(parent);
-    if (!pointInBounds(lat, lng, bounds)) return;
-    const emoji = emojiForId(id);
-    if (!emoji) return;
-    renderedParents.add(parent);
-    L.marker([lat, lng], {
-      pane: "labelPane",
-      interactive: false,
-      icon: L.divIcon({
-        className,
-        html: escapeHtml(emoji),
-        iconSize: [28, 28],
-        iconAnchor: [14, 14]
-      })
-    }).addTo(h3Layer);
-  });
-}
-
-function addOverviewCellMarkers(ids, kind, limit) {
-  const h3api = h3Lib();
-  const bounds = map.getBounds().pad(0.08);
+  const renderedGroups = new Set();
+  const precision = map.getZoom() <= 6 ? 0.85 : 0.42;
+  const limit = isLowPowerDevice() ? 80 : 150;
   let rendered = 0;
   ids.some((id) => {
-    const normalized = normalizePlayableCellId(id);
-    if (!normalized || normalized.startsWith("fallback-") || !h3api.isValidCell(normalized)) return false;
-    const [lat, lng] = h3api.cellToLatLng(normalized);
-    if (!pointInBounds(lat, lng, bounds)) return false;
-    L.circleMarker([lat, lng], overviewMarkerStyle(kind))
-      .on("click", (event) => {
-        L.DomEvent.stop(event);
-        if (clusterSelectionMode) {
-          toggleCellSelection(normalized);
-          return;
-        }
-        selectedCellId = normalized;
-        selectedCellIds = new Set([normalized]);
-        map.setView([lat, lng], DETAIL_ZOOM_MIN);
-        render();
-      })
-      .addTo(h3Layer);
+    if (!isRegularHexId(id)) return false;
+    const cell = getCell(id);
+    if (!cell || !pointInBounds(cell.lat, cell.lng, bounds)) return false;
+    const key = overviewClusterKey(cell, precision);
+    if (renderedGroups.has(key)) return false;
+    const emoji = emojiForId(id);
+    if (!emoji) return false;
+    renderedGroups.add(key);
+    L.marker([cell.lat, cell.lng], {
+      pane: "labelPane",
+      interactive: false,
+      icon: L.divIcon({ className, html: escapeHtml(emoji), iconSize: [28, 28], iconAnchor: [14, 14] })
+    }).addTo(gridMarkerLayer);
     rendered += 1;
     return rendered >= limit;
   });
 }
 
-function overviewMarkerStyle(kind) {
-  const styles = {
-    rival: { color: "#7a382f", fillColor: "#ef7669", fillOpacity: 0.62, radius: 3.5, weight: 1 },
-    owned: { color: "#113d28", fillColor: state.color, fillOpacity: 0.85, radius: 4.5, weight: 1.4 },
-    selected: { color: "#7a5200", fillColor: "#ffb000", fillOpacity: 0.95, radius: 5.5, weight: 1.8 }
-  };
-  return {
-    pane: "h3Pane",
-    renderer: h3Renderer,
-    ...styles[kind]
-  };
-}
-
 function addAggregateCells(ids, kind) {
-  const h3api = h3Lib();
-  const resolution = overviewRenderResolution();
   const bounds = map.getBounds().pad(0.12);
-  const parents = new Set();
-
+  const precision = map.getZoom() <= 6 ? 0.85 : 0.42;
+  const groups = new Map();
   ids.forEach((id) => {
-    const normalized = normalizePlayableCellId(id);
-    if (!normalized || normalized.startsWith("fallback-") || !h3api.isValidCell(normalized)) return;
-    const cellResolution = h3api.getResolution(normalized);
-    const parent = cellResolution > resolution ? h3api.cellToParent(normalized, resolution) : normalized;
-    const [lat, lng] = h3api.cellToLatLng(parent);
-    if (pointInBounds(lat, lng, bounds)) parents.add(parent);
+    if (!isRegularHexId(id)) return;
+    const cell = getCell(id);
+    if (!cell || !pointInBounds(cell.lat, cell.lng, bounds)) return;
+    const key = overviewClusterKey(cell, precision);
+    if (!groups.has(key)) groups.set(key, { lat: cell.lat, lng: cell.lng, count: 0 });
+    groups.get(key).count += 1;
   });
-
-  parents.forEach((id) => {
-    L.polygon(h3api.cellToBoundary(id).map(([lat, lng]) => [lat, lng]), aggregateCellStyle(kind, resolution))
+  [...groups.values()].slice(0, isLowPowerDevice() ? 100 : 180).forEach((group) => {
+    L.circleMarker([group.lat, group.lng], aggregateCellStyle(kind, group.count))
       .on("click", () => {
-        map.setZoom(Math.max(DETAIL_ZOOM_MIN, map.getZoom() + 1));
+        map.setView([group.lat, group.lng], DETAIL_ZOOM_MIN);
         showGameMessage("Наблизьте карту, щоб обирати окремі земельні ділянки.");
       })
-      .addTo(h3Layer);
+      .addTo(gridMarkerLayer);
   });
 }
 
-function aggregateCellStyle(kind, resolution) {
+function aggregateCellStyle(kind, count = 1) {
+  const radius = Math.min(18, 4 + Math.sqrt(count) * 1.8);
   const styles = {
-    rival: { color: "#7a382f", fillColor: "#ef7669", fillOpacity: 0.24, weight: resolution >= 6 ? 0.35 : 0 },
-    owned: { color: "#1b6f43", fillColor: state.color, fillOpacity: 0.46, weight: resolution >= 6 ? 0.45 : 0 },
-    selected: { color: "#ffb000", fillColor: "#ffb000", fillOpacity: 0.36, weight: 1.3 }
+    rival: { color: "#7a382f", fillColor: "#ef7669", fillOpacity: 0.2, weight: 1 },
+    owned: { color: "#1b6f43", fillColor: state.color, fillOpacity: 0.34, weight: 1 },
+    selected: { color: "#ffb000", fillColor: "#ffb000", fillOpacity: 0.4, weight: 1.4 }
   };
-  return {
-    pane: "h3Pane",
-    renderer: h3Renderer,
-    className: `h3-aggregate ${kind}`,
-    ...styles[kind]
-  };
+  return { pane: "gridMarkerPane", renderer: gridMarkerRenderer, radius, className: "grid-aggregate " + kind, ...styles[kind] };
 }
 
-function scheduleH3GridUpdate() {
-  clearTimeout(h3UpdateTimer);
-  h3UpdateTimer = setTimeout(() => {
-    h3UpdateTimer = null;
-    updateH3Grid();
+function scheduleGridUpdate() {
+  clearTimeout(gridUpdateTimer);
+  gridUpdateTimer = setTimeout(() => {
+    gridUpdateTimer = null;
+    updateGrid();
   }, isLowPowerDevice() ? 260 : 180);
 }
 
-function cancelPendingH3Render() {
-  clearTimeout(h3UpdateTimer);
-  h3UpdateTimer = null;
-  if (h3RenderFrame !== null) {
-    cancelAnimationFrame(h3RenderFrame);
-    h3RenderFrame = null;
+function cancelPendingGridRender() {
+  clearTimeout(gridUpdateTimer);
+  gridUpdateTimer = null;
+  if (gridRenderFrame !== null) {
+    cancelAnimationFrame(gridRenderFrame);
+    gridRenderFrame = null;
   }
 }
 
 function refreshVisibleCellLayers(cellIds = null) {
-  if (!map || !h3Layer) return;
+  if (!map || !gridMarkerLayer) return;
   if (isOverviewZoom()) {
-    scheduleH3GridUpdate();
+    scheduleGridUpdate();
     return;
   }
 
-  updateDeckH3Layer(visibleCells);
-  scheduleH3GridUpdate();
+  updateGridGpuLayer(visibleCells);
+  scheduleGridUpdate();
   renderSelectedCell();
 }
 
@@ -1363,11 +1313,8 @@ function finishShiftSelection(event) {
   if (!drag.moved) {
     if (clusterSelectionMode) {
       const latlng = map.containerPointToLatLng([drag.endX, drag.endY]);
-      const h3api = h3Lib();
-      if (h3api && pointInUkraine([latlng.lng, latlng.lat])) {
-        const id = h3api.latLngToCell(latlng.lat, latlng.lng, h3ResolutionForZoom());
-        toggleCellSelection(normalizePlayableCellId(id));
-      }
+      const cell = cellFromLatLng(latlng.lat, latlng.lng);
+      if (cell) toggleCellSelection(cell.id);
     }
     return;
   }
@@ -1395,10 +1342,7 @@ function finishShiftSelection(event) {
 
 function selectionCandidateCells() {
   if (!isOverviewZoom()) return visibleCells;
-  const h3api = h3Lib();
-  if (!h3api) return [];
-  const bounds = map.getBounds().pad(0.02);
-  return (h3CellsForBounds(bounds, h3ResolutionForZoom()) || []).map((id) => makeVisibleCell(id));
+  return gridCellsInView(map.getBounds().pad(0.02));
 }
 
 function selectCellAtMapPoint(event) {
@@ -1411,250 +1355,167 @@ function selectCellAtMapPoint(event) {
     return;
   }
 
-  const h3api = h3Lib();
-  if (h3api) {
-    const id = h3api.latLngToCell(event.latlng.lat, event.latlng.lng, h3ResolutionForZoom());
-    const knownCell = visibleCells.find((cell) => cell.id === id);
-    if (clusterSelectionMode) {
-      toggleCellSelection(knownCell ? knownCell.id : normalizePlayableCellId(id));
-      return;
-    }
-    selectCell(knownCell ? knownCell.id : id, event.originalEvent);
-    return;
-  }
-
-  const nearest = visibleCells
-    .map((cell) => ({
-      cell,
-      distance: Math.hypot(cell.lat - event.latlng.lat, cell.lng - event.latlng.lng)
-    }))
-    .sort((a, b) => a.distance - b.distance)[0];
-
-  if (nearest) {
-    if (clusterSelectionMode) toggleCellSelection(nearest.cell.id);
-    else selectCell(nearest.cell.id, event.originalEvent);
+  const cell = cellFromLatLng(event.latlng.lat, event.latlng.lng);
+  if (cell) {
+    if (clusterSelectionMode) toggleCellSelection(cell.id);
+    else selectCell(cell.id, event.originalEvent);
   }
 }
 
-async function h3CellsInView() {
-  const resolution = h3ResolutionForZoom();
-  const bounds = map.getBounds().pad(0.04);
-
-  try {
-    const result = await requestH3Ids(bounds, resolution, h3CellLimitForZoom());
-    if (result.tooDense) {
-      notifyGridTooDense();
-      return [];
-    }
-    return result.ids.map((id) => makeVisibleCell(id));
-  } catch {
-    return h3CellsForBounds(bounds, resolution).map((id) => makeVisibleCell(id));
-  }
+function hexId(q, r) {
+  return "hex-" + q + "-" + r;
 }
 
-function h3CellsForBounds(bounds, resolution) {
-  const h3api = h3Lib();
-  const viewportPolygon = [[
-    [bounds.getSouth(), bounds.getWest()],
-    [bounds.getSouth(), bounds.getEast()],
-    [bounds.getNorth(), bounds.getEast()],
-    [bounds.getNorth(), bounds.getWest()],
-    [bounds.getSouth(), bounds.getWest()]
-  ]];
-  const maxCells = h3CellLimitForZoom();
-  const ids = h3api.polygonToCells(viewportPolygon, resolution, false)
-    .filter((id) => {
-      const [cellLat, cellLng] = h3api.cellToLatLng(id);
-      return pointInBounds(cellLat, cellLng, bounds) && pointInUkraine([cellLng, cellLat]);
-    });
-  if (ids.length > maxCells) {
-    notifyGridTooDense();
-    return [];
-  }
-  return ids;
+function isRegularHexId(id) {
+  return /^hex--?\d+--?\d+$/.test(String(id || ""));
 }
 
-function requestH3Ids(bounds, resolution, limit) {
-  const worker = ensureH3Worker();
-  if (!worker) return Promise.resolve({ ids: h3CellsForBounds(bounds, resolution), tooDense: false });
-  const requestId = h3WorkerRequestId += 1;
-  const payload = {
-    requestId,
-    type: "cells",
-    resolution,
-    limit,
-    bounds: {
-      south: bounds.getSouth(),
-      west: bounds.getWest(),
-      north: bounds.getNorth(),
-      east: bounds.getEast()
-    }
+function parseHexId(id) {
+  const match = String(id || "").match(/^hex-(-?\d+)-(-?\d+)$/);
+  return { q: match ? Number(match[1]) : 0, r: match ? Number(match[2]) : 0 };
+}
+
+function latLngToWorldMeters(lat, lng) {
+  const radius = 6378137;
+  const limitedLat = Math.max(-85.05112878, Math.min(85.05112878, lat));
+  return {
+    x: radius * lng * Math.PI / 180,
+    y: radius * Math.log(Math.tan(Math.PI / 4 + limitedLat * Math.PI / 360))
   };
-  return new Promise((resolve, reject) => {
-    h3WorkerPending.set(requestId, { resolve, reject });
-    worker.postMessage(payload);
-    window.setTimeout(() => {
-      if (!h3WorkerPending.has(requestId)) return;
-      h3WorkerPending.delete(requestId);
-      reject(new Error("H3 worker timeout"));
-    }, 3500);
-  });
 }
 
-function ensureH3Worker() {
-  if (h3Worker || typeof Worker === "undefined") return h3Worker;
-  try {
-    h3Worker = new Worker("/h3-worker.js");
-    h3Worker.onmessage = (event) => {
-      const message = event.data || {};
-      const pending = h3WorkerPending.get(message.requestId);
-      if (!pending) return;
-      h3WorkerPending.delete(message.requestId);
-      if (message.error) pending.reject(new Error(message.error));
-      else pending.resolve({
-        ids: Array.isArray(message.ids) ? message.ids : [],
-        tooDense: Boolean(message.tooDense)
-      });
-    };
-    h3Worker.onerror = (error) => {
-      h3WorkerPending.forEach((pending) => pending.reject(error));
-      h3WorkerPending.clear();
-    };
-  } catch {
-    h3Worker = null;
+function worldMetersToLatLng(x, y) {
+  const radius = 6378137;
+  return {
+    lng: x / radius * 180 / Math.PI,
+    lat: (2 * Math.atan(Math.exp(y / radius)) - Math.PI / 2) * 180 / Math.PI
+  };
+}
+
+function axialFromWorld(x, y) {
+  const q = (2 / 3 * x) / REGULAR_HEX_RADIUS_METERS;
+  const r = (-1 / 3 * x + Math.sqrt(3) / 3 * y) / REGULAR_HEX_RADIUS_METERS;
+  return axialRound(q, r);
+}
+
+function axialRound(q, r) {
+  let x = q;
+  let z = r;
+  let y = -x - z;
+  let rx = Math.round(x);
+  let ry = Math.round(y);
+  let rz = Math.round(z);
+  const xDiff = Math.abs(rx - x);
+  const yDiff = Math.abs(ry - y);
+  const zDiff = Math.abs(rz - z);
+  if (xDiff > yDiff && xDiff > zDiff) rx = -ry - rz;
+  else if (yDiff > zDiff) ry = -rx - rz;
+  else rz = -rx - ry;
+  return { q: rx, r: rz };
+}
+
+function worldFromAxial(q, r) {
+  return {
+    x: REGULAR_HEX_RADIUS_METERS * 1.5 * q,
+    y: REGULAR_HEX_RADIUS_METERS * Math.sqrt(3) * (r + q / 2)
+  };
+}
+
+function regularHexBoundaryLatLng(q, r) {
+  const center = worldFromAxial(q, r);
+  const points = [];
+  for (let index = 0; index < 6; index += 1) {
+    const angle = Math.PI / 180 * (60 * index);
+    const point = worldMetersToLatLng(
+      center.x + REGULAR_HEX_RADIUS_METERS * Math.cos(angle),
+      center.y + REGULAR_HEX_RADIUS_METERS * Math.sin(angle)
+    );
+    points.push([point.lat, point.lng]);
   }
-  return h3Worker;
+  return points;
+}
+
+function cellFromLatLng(lat, lng) {
+  const point = latLngToWorldMeters(lat, lng);
+  const axial = axialFromWorld(point.x, point.y);
+  const cell = makeCell(hexId(axial.q, axial.r));
+  return pointInUkraine([cell.lng, cell.lat]) ? cell : null;
+}
+
+function gridCellsInView(bounds = map.getBounds().pad(0.04), limit = gridCellLimitForZoom()) {
+  const corners = [
+    latLngToWorldMeters(bounds.getSouth(), bounds.getWest()),
+    latLngToWorldMeters(bounds.getSouth(), bounds.getEast()),
+    latLngToWorldMeters(bounds.getNorth(), bounds.getEast()),
+    latLngToWorldMeters(bounds.getNorth(), bounds.getWest())
+  ];
+  const axialCorners = corners.map((point) => axialFromWorld(point.x, point.y));
+  const qValues = axialCorners.map((point) => point.q);
+  const rValues = axialCorners.map((point) => point.r);
+  const minQ = Math.floor(Math.min(...qValues)) - 3;
+  const maxQ = Math.ceil(Math.max(...qValues)) + 3;
+  const minR = Math.floor(Math.min(...rValues)) - 3;
+  const maxR = Math.ceil(Math.max(...rValues)) + 3;
+  const cells = [];
+  for (let q = minQ; q <= maxQ; q += 1) {
+    for (let r = minR; r <= maxR; r += 1) {
+      const cell = makeVisibleCell(hexId(q, r));
+      if (!pointInBounds(cell.lat, cell.lng, bounds)) continue;
+      if (!pointInUkraine([cell.lng, cell.lat])) continue;
+      cells.push(cell);
+      if (cells.length > limit) {
+        notifyGridTooDense();
+        return [];
+      }
+    }
+  }
+  return cells;
 }
 
 function notifyGridTooDense() {
   const now = Date.now();
   if (now - gridTooDenseNotifiedAt < 4500) return;
   gridTooDenseNotifiedAt = now;
-  showGameMessage("Занадто багато ділянок для цього масштабу. Наблизьте карту, щоб сітка була повною і швидкою.");
+  showGameMessage("Занадто багато ділянок для цього масштабу. Наблизьте карту, щоб сітка була чіткою.");
 }
 
 function ukrainePlayableCellIds() {
-  const resolution = h3ResolutionForZoom();
-  if (ukraineCellCache.has(resolution)) return ukraineCellCache.get(resolution);
-
-  const h3api = h3Lib();
-  const cells = new Set();
-  playableCoveragePolygons().forEach((polygon) => {
-    const h3Polygon = polygon.map((ring) => ring.map(([lng, lat]) => [lat, lng]));
-    h3api.polygonToCells(h3Polygon, resolution, false).forEach((id) => cells.add(id));
-  });
-
-  const ids = [...cells];
-  ukraineCellCache.set(resolution, ids);
+  const key = "regular-hex-v1";
+  if (ukraineCellCache.has(key)) return ukraineCellCache.get(key);
+  const bounds = boundaryLayer?.getBounds?.() || L.latLngBounds([[43.2, 21.0], [53.0, 41.2]]);
+  const ids = gridCellsInView(bounds.pad(0.08), MAX_VISIBLE_GRID_CELLS).map((cell) => cell.id);
+  ukraineCellCache.set(key, ids);
   return ids;
 }
 
-function playableCoveragePolygons() {
-  return ukrainePolygons.map((polygon) => {
-    const outer = polygon[0] || [];
-    const step = Math.max(1, Math.ceil(outer.length / 420));
-    const simplified = outer.filter((_, index) => index % step === 0);
-    if (simplified.length && simplified[0] !== simplified[simplified.length - 1]) {
-      simplified.push(simplified[0]);
-    }
-    return [simplified.length >= 4 ? simplified : outer];
-  });
-}
-
-function h3CellLimitForZoom() {
+function gridCellLimitForZoom() {
   const zoom = map?.getZoom?.() || DETAIL_ZOOM_MIN;
   const lowPower = isLowPowerDevice();
-  const zoomLimit = zoom >= 13
-    ? (lowPower ? 4200 : 9000)
-    : (lowPower ? 2500 : 7000);
-  return Math.min(MAX_VISIBLE_H3_CELLS, zoomLimit);
-}
-
-function h3CellsBySampling(bounds, resolution) {
-  const h3api = h3Lib();
-  const cellsInView = new Set();
-  const step = h3SamplingStepForResolution(resolution);
-
-  for (let lat = bounds.getSouth(); lat <= bounds.getNorth(); lat += step.lat) {
-    for (let lng = bounds.getWest(); lng <= bounds.getEast(); lng += step.lng) {
-      if (!pointInUkraine([lng, lat])) continue;
-      const seed = h3api.latLngToCell(lat, lng, resolution);
-      h3api.gridDisk(seed, 1).forEach((id) => {
-        const [cellLat, cellLng] = h3api.cellToLatLng(id);
-        if (pointInBounds(cellLat, cellLng, bounds) && pointInUkraine([cellLng, cellLat])) {
-          cellsInView.add(id);
-        }
-      });
-      if (cellsInView.size >= h3CellLimitForZoom()) break;
-    }
-    if (cellsInView.size >= h3CellLimitForZoom()) break;
-  }
-
-  return [...cellsInView].slice(0, h3CellLimitForZoom()).map((id) => makeVisibleCell(id));
-}
-
-function h3SamplingStepForResolution(resolution) {
-  if (resolution >= 8) return { lat: 0.018, lng: 0.026 };
-  if (resolution >= 7) return { lat: 0.038, lng: 0.056 };
-  if (resolution >= 6) return { lat: 0.075, lng: 0.11 };
-  return { lat: 0.15, lng: 0.22 };
-}
-
-function fallbackCellsInView() {
-  const bounds = map.getBounds().pad(0.08);
-  const zoom = map.getZoom();
-  const radius = zoom >= 12 ? 0.045 : zoom >= 10 ? 0.075 : zoom >= 8 ? 0.13 : 0.22;
-  const latStep = radius * 1.52;
-  const lngStep = radius * 1.72;
-  const cells = [];
-  let row = 0;
-
-  for (let lat = bounds.getSouth(); lat <= bounds.getNorth(); lat += latStep, row += 1) {
-    const offset = row % 2 ? lngStep / 2 : 0;
-    for (let lng = bounds.getWest() + offset; lng <= bounds.getEast(); lng += lngStep) {
-      if (!pointInUkraine([lng, lat])) continue;
-      const id = `fallback-${Math.round((lat + 90) * 10000).toString(16)}-${Math.round((lng + 180) * 10000).toString(16)}-${Math.round(radius * 1000)}`;
-      const seed = Math.abs(hashString(id));
-      const basePrice = rangedSettingValue(gameSettings?.economy?.baseLandPriceMin, gameSettings?.economy?.baseLandPriceSpread, 70, seed);
-      cells.push({
-        id,
-        h3: id.replace("fallback-", "local-h3-"),
-        lat,
-        lng,
-        region: nearestSettlement(lat, lng),
-        basePrice,
-        price: basePrice,
-        income: rangedSettingValue(gameSettings?.economy?.baseIncomeMin, gameSettings?.economy?.baseIncomeSpread, 8, seed),
-        boundary: hexagonLatLng(lat, lng, radius)
-      });
-      if (cells.length >= 1800) return cells;
-    }
-  }
-
-  return cells;
+  const zoomLimit = zoom >= 13 ? (lowPower ? 4200 : 9000) : (lowPower ? 2500 : 7000);
+  return Math.min(MAX_VISIBLE_GRID_CELLS, zoomLimit);
 }
 
 function makeVisibleCell(id) {
-  const h3api = h3Lib();
-  const [lat, lng] = h3api.cellToLatLng(id);
-  return {
-    id,
-    h3: id,
-    lat,
-    lng
-  };
+  const { q, r } = parseHexId(id);
+  const center = worldFromAxial(q, r);
+  const { lat, lng } = worldMetersToLatLng(center.x, center.y);
+  const cell = { id, code: id, lat, lng, boundary: regularHexBoundaryLatLng(q, r) };
+  rememberCell(id, cell);
+  return cell;
 }
 
 function makeCell(id) {
   if (cellCache.has(id)) return cellCache.get(id);
-  const h3api = h3Lib();
-  const [lat, lng] = h3api.cellToLatLng(id);
+  if (!isRegularHexId(id)) return null;
+  const { q, r } = parseHexId(id);
+  const center = worldFromAxial(q, r);
+  const { lat, lng } = worldMetersToLatLng(center.x, center.y);
   const basePrice = basePriceForCellId(id);
   const income = incomeForCellId(id);
   const settlement = nearestSettlement(lat, lng);
   const cell = {
     id,
-    h3: id,
+    code: id,
     lat,
     lng,
     region: settlement.name,
@@ -1662,7 +1523,7 @@ function makeCell(id) {
     basePrice,
     price: priceForCellId(id),
     income,
-    boundary: h3api.cellToBoundary(id).map(([cellLat, cellLng]) => [cellLat, cellLng])
+    boundary: regularHexBoundaryLatLng(q, r)
   };
   rememberCell(id, cell);
   return cell;
@@ -1688,26 +1549,19 @@ function priceForCellId(id) {
 }
 
 function basePriceForCellId(id) {
-  const seed = parseInt(String(id).slice(-6), 16) || 1;
+  const seed = Math.abs(hashString(String(id))) || 1;
   return rangedSettingValue(gameSettings?.economy?.baseLandPriceMin, gameSettings?.economy?.baseLandPriceSpread, 70, seed);
 }
 
 function nearbyOwnedPressure(id) {
-  const h3api = h3Lib();
-  if (!h3api || !h3api.isValidCell(id)) return 0;
-  try {
-    return h3api.gridDisk(id, gameSettings?.economy?.nearbyPriceRadius || 2).reduce((sum, neighborId) => {
-      if (neighborId === id) return sum;
-      const owner = marketState?.land?.[neighborId] || state.land?.[neighborId];
-      return sum + (owner ? 1 : 0);
-    }, 0);
-  } catch {
-    return 0;
-  }
+  return neighborIdsWithinRadius(id, gameSettings?.economy?.nearbyPriceRadius || 2).reduce((sum, neighborId) => {
+    const owner = marketState?.land?.[neighborId] || state.land?.[neighborId];
+    return sum + (owner ? 1 : 0);
+  }, 0);
 }
 
 function incomeForCellId(id) {
-  const seed = parseInt(String(id).slice(-6), 16) || 1;
+  const seed = Math.abs(hashString(String(id))) || 1;
   return rangedSettingValue(gameSettings?.economy?.baseIncomeMin, gameSettings?.economy?.baseIncomeSpread, 8, seed);
 }
 
@@ -1799,7 +1653,7 @@ function pointInPolygon(point, polygon) {
 function getCell(id) {
   const visibleCell = visibleCells.find((item) => item.id === id);
   const cell = visibleCell?.region ? visibleCell : makeCell(id);
-  if (cell && !cell.id.startsWith("fallback-")) cell.price = priceForCellId(cell.id);
+  if (cell) cell.price = priceForCellId(cell.id);
   return cell;
 }
 
@@ -1933,24 +1787,23 @@ function ownedCells() {
 }
 
 function neighbors(cell) {
-  const h3api = h3Lib();
-  if (h3api && !cell.id.startsWith("fallback-")) {
-    return h3api.gridDisk(cell.id, 1).filter((id) => id !== cell.id);
+  return neighborIdsWithinRadius(cell.id, 1);
+}
+
+function neighborIdsWithinRadius(id, radius = 1) {
+  if (!isRegularHexId(id)) return [];
+  const { q, r } = parseHexId(id);
+  const ids = [];
+  const distance = Math.max(1, Math.floor(radius));
+  for (let dq = -distance; dq <= distance; dq += 1) {
+    const minR = Math.max(-distance, -dq - distance);
+    const maxR = Math.min(distance, -dq + distance);
+    for (let dr = minR; dr <= maxR; dr += 1) {
+      if (dq === 0 && dr === 0) continue;
+      ids.push(hexId(q + dq, r + dr));
+    }
   }
-  const [, latPart, lngPart, radiusPart] = cell.id.split("-");
-  const lat = parseInt(latPart, 16) / 10000 - 90;
-  const lng = parseInt(lngPart, 16) / 10000 - 180;
-  const radius = Number(radiusPart || 130) / 1000;
-  const latStep = radius * 1.52;
-  const lngStep = radius * 1.72;
-  return [
-    [lat + latStep, lng],
-    [lat - latStep, lng],
-    [lat, lng + lngStep],
-    [lat, lng - lngStep],
-    [lat + latStep, lng + lngStep / 2],
-    [lat - latStep, lng - lngStep / 2]
-  ].map(([nextLat, nextLng]) => `fallback-${Math.round((nextLat + 90) * 10000).toString(16)}-${Math.round((nextLng + 180) * 10000).toString(16)}-${radiusPart}`);
+  return ids;
 }
 
 function connectedClusters() {
@@ -2346,12 +2199,12 @@ async function buySelectedCell() {
       buildingLevel: 0,
       machinery: false,
       machineryLevel: 0,
-      nickname: `${cell.region}, ${cell.h3.slice(-5)}`
+      nickname: `${cell.region}, ${cell.code.slice(-5)}`
     };
   });
   state.stats.purchased += cells.length;
   addEvent(cells.length === 1
-    ? `Куплено земельну ділянку ${cells[0].h3} біля ${cells[0].region}.`
+    ? `Куплено земельну ділянку ${cells[0].code} біля ${cells[0].region}.`
     : `Куплено земельних ділянок: ${cells.length} за ${money(finalPrice)}.`);
   addLedger("buy", `Купівля землі: ${cells.length} ділянок`, -finalPrice, cells.length);
   showGameMessage(cells.length === 1
@@ -2396,7 +2249,7 @@ function demolishSelectedBuildings(cells = ownedSelectedCells()) {
   addEvent(`Знесено побудов: ${targets.length}.`);
   addLedger("building-demolish", `Знесено побудов: ${targets.length}`, 0, 0);
   refreshVisibleCellLayers(targets.map((cell) => cell.id));
-  scheduleH3GridUpdate();
+  scheduleGridUpdate();
   render();
   queueSave();
 }
@@ -2668,7 +2521,7 @@ function buyAsset(event) {
     addLedger("building", `${item.name}: ${quantity} комірок`, -total, 0);
     closeModals();
     showGameMessage(`Побудовано ${item.name}: ${quantity} комірок. Дохід +${money(item.incomePerDay || 0)} / день.`);
-    scheduleH3GridUpdate();
+    scheduleGridUpdate();
     render();
     queueSave();
     return;
@@ -2695,7 +2548,7 @@ function buyAsset(event) {
   addLedger(bucket === "elevators" ? "elevator" : "machinery", `${item.name}: ${quantity} шт.`, -total, 0);
   closeModals();
   showGameMessage(`Куплено ${item.name}: ${quantity} шт. Витрачено ${money(total)}.`);
-  if (bucket === "elevators") scheduleH3GridUpdate();
+  if (bucket === "elevators") scheduleGridUpdate();
   render();
   queueSave();
 }
@@ -2765,7 +2618,7 @@ async function sellSelectedLand() {
   addEvent(`Продано земельних ділянок: ${soldCells.length}. Отримано ${money(totalRefund)}.`);
   addLedger("sell", `Продаж землі: ${soldCells.length} ділянок`, totalRefund, -soldCells.length);
   showGameMessage(`Землю продано системі за ${money(totalRefund)}.`);
-  scheduleH3GridUpdate();
+  scheduleGridUpdate();
   render();
   queueSave();
 }
@@ -2789,45 +2642,9 @@ function collectIncome() {
   queueSave();
 }
 
-function cellStyle(cell, owner) {
-  const selected = selectedCellIds.has(cell.id) || cell.id === selectedCellId;
-  if (owner === "player") {
-    return {
-      pane: "h3Pane",
-      renderer: h3Renderer,
-      className: `h3-cell owned ${selected ? "is-selected" : ""}`,
-      color: selected ? "#111" : "#2d7c4d",
-      weight: selected ? 3 : 1.1,
-      fillColor: state.color,
-      fillOpacity: 0.58
-    };
-  }
-  if (owner === "rival") {
-    const marketOwner = marketState?.land?.[cell.id];
-    return {
-      pane: "h3Pane",
-      renderer: h3Renderer,
-      className: `h3-cell rival ${selected ? "is-selected" : ""}`,
-      color: selected ? "#111" : "#7a382f",
-      weight: selected ? 3 : 1.1,
-      fillColor: marketOwner?.ownerColor || "#ef7669",
-      fillOpacity: 0.48
-    };
-  }
-  return {
-    pane: "h3Pane",
-    renderer: h3Renderer,
-    className: `h3-cell free ${selected ? "is-selected" : ""}`,
-    color: selected ? "#ffb000" : "#111111",
-    weight: selected ? 4.5 : 1.25,
-    fillColor: "#ffffff",
-    fillOpacity: selected ? 0.42 : 0.06
-  };
-}
-
 function cellTooltip(cell, owner) {
   const settlementLine = `${cell.region}${Number.isFinite(cell.settlementDistanceKm) ? ` - ${cell.settlementDistanceKm.toFixed(1)} км` : ""}`;
-  const displayPrice = owner === "free" && !String(cell.id).startsWith("fallback-") ? priceForCellId(cell.id) : cell.price;
+  const displayPrice = owner === "free" ? priceForCellId(cell.id) : cell.price;
   if (owner === "player") {
     const breakdown = incomeBreakdown(cell, state.land[cell.id]);
     const buildingItem = buildingItemForCell(state.land[cell.id]);
@@ -2892,7 +2709,7 @@ function selectCell(cellId, event = null) {
   const cell = getCell(cellId);
   showGameMessage(selectedCellIds.size > 1
     ? `Обрано земельних ділянок: ${selectedCellIds.size}.`
-    : `Обрано земельну ділянку ${cell.h3} біля ${cell.region}.`);
+    : `Обрано земельну ділянку ${cell.code} біля ${cell.region}.`);
 }
 
 function buildingGroupCellIds(cellId) {
@@ -3033,7 +2850,7 @@ function renderSelectedCell() {
       : "Вільна земля";
 
   const rows = [
-    ["ID ділянки", cell.h3],
+    ["ID ділянки", cell.code],
     ["Статус", owner === "player" ? "ваша власність" : owner === "rival" ? "зайнято іншим гравцем" : "вільна"],
     ["Власник", owner === "free" ? "Система" : ownerInfoButton(selectedCellId)],
     ["Вплив сусідів", pressure ? `${pressure} зайнятих поруч · +${neighborGrowthPercent}% кожна` : "немає"]
@@ -3149,8 +2966,7 @@ function openNewsPanel() {
 
 function focusNewsTarget(cellId) {
   const normalized = normalizePlayableCellId(cellId);
-  const h3api = h3Lib();
-  if (!normalized || !h3api || !h3api.isValidCell(normalized)) return;
+  if (!normalized) return;
   newsReturnState = {
     center: map?.getCenter(),
     zoom: map?.getZoom(),
@@ -3159,10 +2975,9 @@ function focusNewsTarget(cellId) {
   newsModal?.classList.add("is-hidden");
   returnToNewsButton?.classList.remove("is-hidden");
   mapStage?.scrollIntoView({ behavior: "smooth", block: "center" });
-  const [lat, lng] = h3api.cellToLatLng(normalized);
-  map.setView([lat, lng], DETAIL_ZOOM_MIN);
+  const cell = getCell(normalized);
+  map.setView([cell.lat, cell.lng], DETAIL_ZOOM_MIN);
   window.setTimeout(() => {
-    const cell = getCell(normalized);
     selectCell(cell.id);
   }, 220);
 }
@@ -3829,16 +3644,9 @@ function renderAdminStats(summary, users = []) {
 }
 
 function totalPlayableLandCount() {
-  const h3api = h3Lib();
-  if (!h3api) return null;
-  try {
-    const avgCellAreaKm2 = typeof h3api.getHexagonAreaAvg === "function"
-      ? h3api.getHexagonAreaAvg(PLAY_H3_RESOLUTION, "km2")
-      : 0.737327598;
-    return Math.round(603700 / avgCellAreaKm2);
-  } catch {
-    return Math.round(603700 / 0.737327598);
-  }
+  const radiusKm = REGULAR_HEX_RADIUS_METERS / 1000;
+  const areaKm2 = (3 * Math.sqrt(3) / 2) * radiusKm * radiusKm;
+  return Math.round(603700 / areaKm2);
 }
 
 function renderAdminUsers(users) {
@@ -3948,7 +3756,7 @@ async function deleteUser(userId) {
     renderAdminSummary(payload.summary || {}, payload.market || { land: {} }, payload.users || []);
     renderAdminUsers(payload.users || []);
     marketState = payload.market || marketState;
-    scheduleH3GridUpdate();
+    scheduleGridUpdate();
     refreshLeaderboard();
     showGameMessage("Гравця видалено.");
   } catch (error) {
@@ -4033,7 +3841,7 @@ async function saveAdminUser(event) {
     if (body.id === player?.id) {
       state = normalizeState(payload.farm || state);
     }
-    scheduleH3GridUpdate();
+    scheduleGridUpdate();
     refreshLeaderboard();
     showGameMessage("Учасника оновлено.");
     restoreButton();
@@ -4059,7 +3867,7 @@ async function saveAdminSettings(event) {
     renderAdminSettings(gameSettings);
     renderAdminSummary(payload.summary || {}, payload.market || { land: {} }, payload.users || []);
     renderAdminUsers(payload.users || []);
-    scheduleH3GridUpdate();
+    scheduleGridUpdate();
     render();
     showGameMessage("Налаштування гри збережено.");
     restoreButton();
@@ -4241,11 +4049,11 @@ async function resetAllLand() {
     state = normalizeState(payload.farm || { ...state, land: {} });
     selectedCellIds = new Set();
     selectedCellId = null;
-    if (h3Layer) {
-      h3Layer.clearLayers();
+    if (gridMarkerLayer) {
+      gridMarkerLayer.clearLayers();
       cellLayerById = new Map();
     }
-    scheduleH3GridUpdate();
+    scheduleGridUpdate();
     refreshLeaderboard();
     render();
     showGameMessage("Всі землі обнулено.");
@@ -4294,7 +4102,7 @@ async function resetAllAssets() {
     if (payload.farm) state = normalizeState(payload.farm);
     selectedCellIds = new Set();
     selectedCellId = null;
-    scheduleH3GridUpdate();
+    scheduleGridUpdate();
     refreshLeaderboard();
     render();
     showGameMessage("Власність і активи всіх учасників обнулено.");
@@ -4540,5 +4348,3 @@ requestJson("/api/me")
     startGame(payload.player, payload.farm);
   })
   .catch(() => {});
-
-

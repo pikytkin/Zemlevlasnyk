@@ -214,6 +214,15 @@ function intIn(value, fallback, min = 0, max = 1_000_000_000) {
   return Math.floor(numberIn(value, fallback, min, max));
 }
 
+function isPlayableLandId(id) {
+  return /^hex--?\d+--?\d+$/.test(String(id || ""));
+}
+
+function cleanMarketLand(land) {
+  if (!land || typeof land !== "object" || Array.isArray(land)) return {};
+  return Object.fromEntries(Object.entries(land).filter(([id]) => isPlayableLandId(id)));
+}
+
 function numberArray(value, fallback, maxLength = 12) {
   const source = Array.isArray(value) ? value : fallback;
   return source.slice(0, maxLength).map((item, index) => numberIn(Number(item), Number.isFinite(fallback[index]) ? fallback[index] : 0, 0, 100_000_000));
@@ -394,7 +403,7 @@ function sanitizeFarmState(state) {
   return {
     coins: Number.isFinite(state.coins) ? Math.max(0, Math.floor(state.coins)) : fallback.coins,
     currentDay: Number.isFinite(state.currentDay) ? Math.max(1, Math.floor(state.currentDay)) : fallback.currentDay,
-    land: Object.fromEntries(Object.entries(land).map(([id, cell]) => [id, {
+    land: Object.fromEntries(Object.entries(land).filter(([id]) => isPlayableLandId(id)).map(([id, cell]) => [id, {
       id,
       price: Number.isFinite(cell.price) ? Math.max(1, Math.floor(cell.price)) : 100,
       purchasedAt: typeof cell.purchasedAt === "string" ? cell.purchasedAt : new Date().toISOString(),
@@ -504,7 +513,7 @@ function readMarket() {
   try {
     const market = storage?.market || { land: {} };
     return market && typeof market === "object" && market.land && typeof market.land === "object"
-      ? { land: market.land, resetAt: typeof market.resetAt === "string" ? market.resetAt : null }
+      ? { land: cleanMarketLand(market.land), resetAt: typeof market.resetAt === "string" ? market.resetAt : null }
       : { land: {} };
   } catch {
     return { land: {} };
@@ -512,7 +521,7 @@ function readMarket() {
 }
 
 function writeMarket(market) {
-  const clean = { land: market.land || {}, resetAt: market.resetAt || null };
+  const clean = { land: cleanMarketLand(market.land), resetAt: market.resetAt || null };
   if (storage) {
     storage.market = clean;
     persistState("market");
@@ -532,7 +541,7 @@ function readNewsEvents() {
         text: String(item.text || "").slice(0, 500),
         at: typeof item.at === "string" ? item.at : new Date().toISOString(),
         tone: String(item.tone || "").slice(0, 40),
-        targetCellId: typeof item.targetCellId === "string" ? item.targetCellId.slice(0, 32) : null
+        targetCellId: isPlayableLandId(item.targetCellId) ? String(item.targetCellId).slice(0, 48) : null
       }))
       : [];
   } catch {
@@ -676,7 +685,7 @@ function mergeFarmIntoMarket(farm, ownerId, ownerName) {
   const market = readMarket();
   const settings = readSettings();
   Object.entries(farm.land || {}).forEach(([id, cell]) => {
-    if (!/^[0-9a-f]+$/i.test(id)) return;
+    if (!isPlayableLandId(id)) return;
     if (market.land[id] && market.land[id].ownerId !== ownerId) return;
     market.land[id] = marketEntryForCell(farm, ownerId, ownerName, cell, settings);
   });
@@ -695,7 +704,7 @@ function refreshRegisteredMarketEntries(users = readUsers()) {
     const farm = sanitizeFarmState(user.farm);
     const ownerName = userCompanyName(user);
     Object.entries(farm.land || {}).forEach(([id, cell]) => {
-      if (!/^[0-9a-f]+$/i.test(id)) return;
+      if (!isPlayableLandId(id)) return;
       market.land[id] = marketEntryForCell(farm, user.id, ownerName, cell, settings);
     });
   });
@@ -1316,9 +1325,9 @@ async function handleApi(req, res) {
       const alreadyOwned = [];
 
       requestedCells.forEach((cell) => {
-        const id = typeof cell.id === "string" ? cell.id.slice(0, 32) : "";
+        const id = typeof cell.id === "string" ? cell.id.slice(0, 48) : "";
         const price = Number.isFinite(cell.price) ? Math.max(1, Math.floor(cell.price)) : 100;
-        if (!/^[0-9a-f]+$/i.test(id)) return;
+        if (!isPlayableLandId(id)) return;
         const existing = market.land[id];
         if (existing) {
           if (existing.ownerId === session.userId) alreadyOwned.push(id);
@@ -1371,7 +1380,7 @@ async function handleApi(req, res) {
       const requestedCells = Array.isArray(body.cells) ? body.cells.slice(0, 1000) : [];
       const ids = requestedCells
         .map((cell) => typeof cell === "string" ? cell : cell?.id)
-        .filter((id) => typeof id === "string" && /^[0-9a-f]+$/i.test(id));
+        .filter((id) => isPlayableLandId(id));
       const market = readMarket();
       let sold = 0;
       const soldIds = [];

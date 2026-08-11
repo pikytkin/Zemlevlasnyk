@@ -597,8 +597,11 @@ dd {
   background: #f7f8f4;
 }
 
-.map-board .deck-tooltip {
-  display: none;
+.regular-grid-gpu-canvas {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 430;
 }
 
 .selection-popup {
@@ -773,10 +776,6 @@ dd {
 
 .leaflet-countryMask-pane {
   z-index: 350 !important;
-}
-
-.leaflet-h3-pane {
-  z-index: 430 !important;
 }
 
 .leaflet-label-pane {
@@ -982,44 +981,6 @@ dd {
   font-size: 0.82rem;
   font-style: normal;
   font-weight: var(--weight-ui);
-}
-
-.h3-cell {
-  cursor: pointer;
-  transition: fill-opacity 0.15s ease, stroke-width 0.15s ease;
-  vector-effect: non-scaling-stroke;
-  stroke-linejoin: round;
-  pointer-events: auto;
-}
-
-.h3-cell.is-selected {
-  filter: drop-shadow(0 0 6px rgba(240, 189, 74, 0.85));
-}
-
-.h3-cell.free {
-  stroke: #111 !important;
-  stroke-opacity: 0.88;
-}
-
-.h3-cell.owned {
-  stroke: #0b442c !important;
-  stroke-opacity: 0.95;
-}
-
-.h3-cell.rival {
-  stroke: #5d211b !important;
-  stroke-opacity: 0.95;
-}
-
-.h3-cell.is-selected {
-  stroke: #ffb000 !important;
-  stroke-opacity: 1;
-}
-
-.h3-aggregate {
-  cursor: zoom-in;
-  stroke-linejoin: round;
-  vector-effect: non-scaling-stroke;
 }
 
 .settlement-label {
