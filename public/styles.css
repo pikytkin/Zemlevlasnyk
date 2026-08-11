@@ -233,6 +233,13 @@ h1 {
   overflow-wrap: anywhere;
 }
 
+.auth-panel h1 {
+  font-size: clamp(2.1rem, 3.45vw, 4.1rem);
+  line-height: 1;
+  white-space: nowrap;
+  overflow-wrap: normal;
+}
+
 h2 {
   margin-bottom: 0;
   font-size: clamp(1.8rem, 4vw, 3.1rem);
@@ -306,6 +313,12 @@ button.is-pressed:not(:disabled) {
 .secondary-action,
 .guest-action {
   background: rgba(255, 255, 255, 0.05);
+}
+
+.logout-action {
+  border-color: rgba(220, 105, 94, 0.45);
+  color: #ffd4cf;
+  background: rgba(220, 105, 94, 0.1);
 }
 
 .auth-tab.is-active {
@@ -1130,7 +1143,10 @@ dd {
 }
 
 .asset-panel {
-  width: min(760px, 94vw);
+  width: min(700px, 94vw);
+  gap: 9px;
+  max-height: min(760px, 90vh);
+  padding: 18px;
 }
 
 .asset-options {
@@ -1139,27 +1155,28 @@ dd {
 
 .asset-carousel-card {
   display: grid;
-  gap: 12px;
+  gap: 8px;
 }
 
 .asset-carousel-title {
   display: grid;
-  grid-template-columns: 48px minmax(0, 1fr) 48px;
+  grid-template-columns: 40px minmax(0, 1fr) 40px;
   align-items: center;
-  gap: 12px;
+  gap: 8px;
   text-align: center;
 }
 
 .asset-carousel-title strong {
   color: var(--text);
-  font-size: clamp(1.7rem, 5vw, 3.1rem);
+  font-size: clamp(1.35rem, 3.6vw, 2.35rem);
+  line-height: 1;
 }
 
 .asset-nav {
   display: grid;
   place-items: center;
-  width: 38px;
-  height: 46px;
+  width: 34px;
+  height: 38px;
   border: 1px solid rgba(255, 255, 255, 0.22);
   border-radius: 4px;
   cursor: pointer;
@@ -1184,15 +1201,15 @@ dd {
 
 .asset-carousel-media {
   display: grid;
-  grid-template-columns: 44px minmax(0, 1fr) 44px;
+  grid-template-columns: 38px minmax(0, 1fr) 38px;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
 }
 
 .asset-image-frame {
   display: grid;
   place-items: center;
-  min-height: 300px;
+  min-height: 220px;
   border: 1px solid var(--line);
   border-radius: 6px;
   background: rgba(255, 255, 255, 0.04);
@@ -1202,15 +1219,15 @@ dd {
 
 .asset-image-frame img {
   width: 100%;
-  max-height: 360px;
+  max-height: min(270px, 32vh);
   object-fit: contain;
 }
 
 .asset-characteristics,
 .asset-total-main {
   display: grid;
-  gap: 6px;
-  padding: 10px;
+  gap: 4px;
+  padding: 8px 10px;
   border: 1px solid var(--line);
   border-radius: 6px;
   background: rgba(255, 255, 255, 0.035);
@@ -1221,6 +1238,16 @@ dd {
   display: flex;
   justify-content: space-between;
   gap: 12px;
+}
+
+.asset-panel > h3 {
+  margin-bottom: 4px;
+}
+
+.asset-panel > label {
+  display: grid;
+  gap: 5px;
+  margin: 0;
 }
 
 .modal-close {
@@ -1485,6 +1512,27 @@ dd {
   grid-template-columns: minmax(160px, 1fr) 120px minmax(220px, 2fr) auto;
 }
 
+.asset-settings-card {
+  grid-template-columns: 70px repeat(5, minmax(110px, 1fr));
+  align-items: end;
+}
+
+.asset-settings-card .asset-photos-upload {
+  grid-column: 1 / span 3;
+}
+
+.asset-settings-card .asset-photo-list {
+  grid-column: 4 / -1;
+}
+
+.asset-settings-card [data-clear-photos] {
+  grid-column: 1 / span 2;
+}
+
+.asset-settings-card [data-remove-item] {
+  grid-column: 3 / span 2;
+}
+
 .icon-preview {
   display: grid;
   place-items: center;
@@ -1505,12 +1553,12 @@ dd {
 
 .asset-photo-list,
 .asset-gallery {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(86px, 1fr));
   gap: 8px;
-  align-items: center;
+  align-items: stretch;
   min-height: 54px;
-  max-height: 148px;
+  max-height: 230px;
   overflow: auto;
   padding: 8px;
   border: 1px dashed var(--line);
@@ -1521,8 +1569,9 @@ dd {
 .asset-photo-button {
   display: grid;
   place-items: center;
-  width: 58px;
-  height: 58px;
+  width: 100%;
+  aspect-ratio: 1.35;
+  height: auto;
   min-height: 0;
   padding: 0;
   border: 1px solid var(--line);
@@ -1960,11 +2009,16 @@ input:focus-visible {
   .settings-card,
   .compact-list .settings-card,
   .settings-card.compact-card,
-  .settings-card.stage-card {
+  .settings-card.stage-card,
+  .settings-card.asset-settings-card {
     grid-template-columns: 1fr;
   }
 
-  .settings-card .wide-field {
+  .settings-card .wide-field,
+  .asset-settings-card .asset-photos-upload,
+  .asset-settings-card .asset-photo-list,
+  .asset-settings-card [data-clear-photos],
+  .asset-settings-card [data-remove-item] {
     grid-column: 1 / -1;
   }
 

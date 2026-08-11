@@ -91,6 +91,7 @@ const profileButton = document.querySelector("#profileButton");
 const helpButton = document.querySelector("#helpButton");
 const messagesButton = document.querySelector("#messagesButton");
 const messageBadge = document.querySelector("#messageBadge");
+const logoutButton = document.querySelector("#logoutButton");
 const profileModal = document.querySelector("#profileModal");
 const helpModal = document.querySelector("#helpModal");
 const adminModal = document.querySelector("#adminModal");
@@ -167,6 +168,9 @@ let activeChatUserId = null;
 let chats = [];
 let unreadMessages = 0;
 let messagesTimer = null;
+let activeChatTimer = null;
+let activeChatSignature = "";
+let activeChatLoading = false;
 let newsRows = [];
 let newsTimer = null;
 let visibleCells = [];
@@ -437,8 +441,37 @@ function startGame(nextPlayer, nextState) {
   clearInterval(messagesTimer);
   messagesTimer = setInterval(refreshMessageSummary, 10000);
   if (window.location.pathname === "/admin") {
-    openAdminPanel();
+    if (player?.isAdmin) {
+      openAdminPanel();
+    } else {
+      window.history.replaceState({}, "", "/");
+      showGameMessage("Адмін-панель доступна тільки адміністратору.");
+    }
   }
+}
+
+async function logoutPlayer() {
+  if (player) {
+    await saveState();
+  }
+  try {
+    await requestJson("/api/logout", { method: "POST", body: "{}" });
+  } catch {
+    // Local logout still matters if the network request fails.
+  }
+  player = null;
+  selectedCellId = null;
+  activeChatUserId = null;
+  clearTimeout(saveTimer);
+  clearInterval(messagesTimer);
+  stopActiveChatPolling();
+  document.querySelectorAll(".modal").forEach((modal) => modal.classList.add("is-hidden"));
+  hideSelectionPopup();
+  hideCellInfoPanel();
+  gameScreen.classList.add("is-hidden");
+  authScreen.classList.remove("is-hidden");
+  loginForm?.reset();
+  showAuthMessage("Ви вийшли з акаунта.");
 }
 
 function queueSave() {
@@ -2241,7 +2274,8 @@ function updateAssetTotal() {
   const quantity = activeAssetKind === "elevators" ? maxQuantity : Math.max(1, Math.min(maxQuantity, Math.floor(Number(assetQuantity.value) || 1)));
   const total = activeAssetKind === "elevators" ? (item?.cost || 0) : (item?.cost || 0) * quantity;
   const photos = item?.photos?.length ? item.photos : [];
-  const photo = photos[assetPhotoIndex % Math.max(1, photos.length)] || "";
+  const currentPhotoIndex = assetPhotoIndex % Math.max(1, photos.length);
+  const photo = photos[currentPhotoIndex] || "";
   assetTotal.innerHTML = item
     ? `
       <div class="asset-carousel-card">
@@ -2252,7 +2286,7 @@ function updateAssetTotal() {
         </div>
         <div class="asset-carousel-media">
           <button class="asset-nav asset-nav-photo" type="button" data-asset-photo-nav="-1" ${photos.length < 2 ? "disabled" : ""}>‹</button>
-          <button class="asset-image-frame" type="button" ${photo ? `data-preview-src="${escapeHtml(photo)}"` : ""}>
+          <button class="asset-image-frame" type="button" ${photo ? `data-preview-src="${escapeHtml(photo)}" data-preview-gallery="${escapeHtml(JSON.stringify(photos))}" data-preview-index="${currentPhotoIndex}"` : ""}>
             ${photo ? `<img src="${escapeHtml(photo)}" alt="${escapeHtml(item.name)}">` : renderIconPreview(item.icon)}
           </button>
           <button class="asset-nav asset-nav-photo" type="button" data-asset-photo-nav="1" ${photos.length < 2 ? "disabled" : ""}>›</button>
@@ -2329,6 +2363,18 @@ function stepImagePreview(delta) {
 }
 
 function openPreviewFromButton(photoButton) {
+  if (photoButton.dataset.previewGallery) {
+    try {
+      const photos = JSON.parse(photoButton.dataset.previewGallery);
+      if (Array.isArray(photos) && photos.length) {
+        const index = Math.max(0, Math.min(Number(photoButton.dataset.previewIndex) || 0, photos.length - 1));
+        openImagePreview(photos[index] || photoButton.dataset.previewSrc, photos, index);
+        return;
+      }
+    } catch {
+      // Fall back to collecting visible preview buttons below.
+    }
+  }
   const scope = photoButton.closest(".asset-gallery, .asset-photo-list, .asset-carousel-card") || document;
   const buttons = [...scope.querySelectorAll("[data-preview-src]")];
   const photos = buttons.map((button) => button.dataset.previewSrc).filter(Boolean);
@@ -2936,6 +2982,7 @@ function openModal(modal) {
 
 function closeModal(modal) {
   modal?.classList.add("is-hidden");
+  if (modal === messagesModal) stopActiveChatPolling();
   if (modal === imagePreviewModal && imagePreviewTarget) {
     imagePreviewTarget.removeAttribute("src");
     imagePreviewPhotos = [];
@@ -3073,6 +3120,7 @@ async function openMessagesPanel() {
   if (chatMessages) chatMessages.innerHTML = "<p class=\"muted-text\">Оберіть чат або напишіть власнику ділянки.</p>";
   await refreshMessageSummary();
   renderChatList();
+  startActiveChatPolling();
 }
 
 function renderChatList() {
@@ -3091,20 +3139,33 @@ function renderChatList() {
 async function openChat(userId) {
   if (!userId || userId === player?.id) return;
   activeChatUserId = userId;
+  activeChatSignature = "";
   closeModal(ownerModal);
   openModal(messagesModal);
   renderChatList();
-  await loadChatMessages(userId);
+  await loadChatMessages(userId, { force: true, scroll: "bottom" });
   await refreshMessageSummary();
+  startActiveChatPolling();
 }
 
-async function loadChatMessages(userId = activeChatUserId) {
+function chatRowsSignature(rows) {
+  return rows.map((message) => `${message.id || ""}:${message.readAt || ""}:${message.createdAt || ""}`).join("|");
+}
+
+async function loadChatMessages(userId = activeChatUserId, options = {}) {
   if (!userId || !chatMessages) return;
-  chatMessages.innerHTML = "<p>Завантажуємо повідомлення...</p>";
+  if (activeChatLoading) return;
+  activeChatLoading = true;
+  const silent = Boolean(options.silent);
+  if (!silent) chatMessages.innerHTML = "<p>Завантажуємо повідомлення...</p>";
   try {
     const payload = await requestJson(`/api/messages/thread?userId=${encodeURIComponent(userId)}`);
     const rows = Array.isArray(payload.messages) ? payload.messages : [];
+    const signature = chatRowsSignature(rows);
+    if (!options.force && signature === activeChatSignature) return;
+    activeChatSignature = signature;
     const partner = payload.partner || {};
+    const nearBottom = chatMessages.scrollHeight - chatMessages.scrollTop - chatMessages.clientHeight < 80;
     chatMessages.innerHTML = `
       <div class="chat-thread-head">
         <strong>${escapeHtml(partner.companyName || partner.username || "Гравець")}</strong>
@@ -3118,10 +3179,26 @@ async function loadChatMessages(userId = activeChatUserId) {
         `).join("") : "<p class=\"muted-text\">Почніть діалог першим повідомленням.</p>"}
       </div>
     `;
-    chatMessages.scrollTop = chatMessages.scrollHeight;
+    if (options.scroll === "bottom" || nearBottom) chatMessages.scrollTop = chatMessages.scrollHeight;
   } catch (error) {
-    chatMessages.innerHTML = `<p>${escapeHtml(error.message)}</p>`;
+    if (!silent) chatMessages.innerHTML = `<p>${escapeHtml(error.message)}</p>`;
+  } finally {
+    activeChatLoading = false;
   }
+}
+
+function startActiveChatPolling() {
+  clearInterval(activeChatTimer);
+  activeChatTimer = setInterval(async () => {
+    if (!player || !activeChatUserId || messagesModal?.classList.contains("is-hidden")) return;
+    await loadChatMessages(activeChatUserId, { silent: true });
+    await refreshMessageSummary();
+  }, 2500);
+}
+
+function stopActiveChatPolling() {
+  clearInterval(activeChatTimer);
+  activeChatTimer = null;
 }
 
 async function sendChatMessage(event) {
@@ -3134,7 +3211,7 @@ async function sendChatMessage(event) {
       method: "POST",
       body: JSON.stringify({ toUserId: activeChatUserId, text })
     });
-    await loadChatMessages(activeChatUserId);
+    await loadChatMessages(activeChatUserId, { force: true, scroll: "bottom" });
     await refreshMessageSummary();
   } catch (error) {
     showGameMessage(error.message);
@@ -3295,7 +3372,7 @@ function renderAssetEditor(key, title, items, tip) {
       </div>
       <div class="settings-list">
         ${items.map((item) => `
-          <div class="settings-card" data-item="${key}">
+          <div class="settings-card asset-settings-card" data-item="${key}">
             <div class="icon-preview" data-icon-preview>${renderIconPreview(item.icon)}</div>
             <label>ID <input data-field="id" value="${escapeHtml(item.id || "")}"></label>
             <label>Іконка / emoji <input data-field="icon" value="${escapeHtml(item.icon || "")}"></label>
@@ -3314,9 +3391,9 @@ function renderAssetEditor(key, title, items, tip) {
                 <label>Бонус доходу землі, % <input data-field="incomeBonusPercent" type="number" min="0" step="0.01" value="${item.incomeBonusPercent || 0}"></label>
                 <label>Термін дії, днів <input data-field="durationDays" type="number" min="1" value="${item.durationDays || 100}"></label>
               `}
-            <label class="wide-field">Фото для перегляду (можна обрати кілька одразу) <input type="file" accept="image/png,image/jpeg,image/webp,image/svg+xml" multiple data-photos-upload></label>
+            <label class="asset-photos-upload">Фото для перегляду (можна обрати кілька одразу) <input type="file" accept="image/png,image/jpeg,image/webp,image/svg+xml" multiple data-photos-upload></label>
             <input type="hidden" data-field="photos" value="${escapeHtml(JSON.stringify(item.photos || []))}">
-            <div class="asset-photo-list wide-field" data-photo-list>${renderPhotoThumbs(item.photos || [])}</div>
+            <div class="asset-photo-list" data-photo-list>${renderPhotoThumbs(item.photos || [])}</div>
             <button class="secondary-action" type="button" data-clear-photos>Очистити фото</button>
             <button class="danger-action" type="button" data-remove-item>Видалити</button>
           </div>
@@ -4068,6 +4145,7 @@ profileButton.addEventListener("click", () => {
 });
 helpButton.addEventListener("click", () => openModal(helpModal));
 messagesButton?.addEventListener("click", openMessagesPanel);
+logoutButton?.addEventListener("click", logoutPlayer);
 chatList?.addEventListener("click", (event) => {
   const item = event.target.closest("[data-chat-user]");
   if (item?.dataset.chatUser) openChat(item.dataset.chatUser);

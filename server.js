@@ -804,6 +804,15 @@ function isAdmin(session, users = readUsers()) {
   return Boolean(user && (user.isAdmin || user.username.toLowerCase() === "admin"));
 }
 
+function playerSessionPayload(user) {
+  return {
+    id: user.id,
+    username: user.username,
+    isGuest: false,
+    isAdmin: Boolean(user.isAdmin || String(user.username || "").toLowerCase() === "admin")
+  };
+}
+
 function publicUserRow(user) {
   const farm = sanitizeFarmState(user.farm);
   const settings = readSettings();
@@ -1068,6 +1077,12 @@ function getSession(req) {
   return session;
 }
 
+function getSessionToken(req) {
+  const cookie = req.headers.cookie || "";
+  const match = cookie.match(/(?:^|;\s*)agro_session=([^;]+)/);
+  return match ? decodeURIComponent(match[1]) : "";
+}
+
 function sendJson(res, status, payload, headers = {}) {
   res.writeHead(status, {
     "content-type": "application/json; charset=utf-8",
@@ -1099,6 +1114,12 @@ function readBody(req) {
 
 function serveStatic(req, res) {
   const url = new URL(req.url, `http://${req.headers.host}`);
+  const session = getSession(req);
+  if (url.pathname === "/admin" && session && !isAdmin(session)) {
+    res.writeHead(302, { location: "/" });
+    res.end();
+    return;
+  }
   const requestedPath = decodeURIComponent(url.pathname === "/" || url.pathname === "/admin" ? "/index.html" : url.pathname);
   const filePath = path.normalize(path.join(PUBLIC_DIR, requestedPath));
 
@@ -1165,6 +1186,13 @@ async function handleApi(req, res) {
 
     if (req.method === "GET" && req.url === "/api/settings") {
       sendJson(res, 200, readSettings());
+      return;
+    }
+
+    if (req.method === "POST" && req.url === "/api/logout") {
+      const token = getSessionToken(req);
+      if (token) sessions.delete(token);
+      sendJson(res, 200, { ok: true }, { "set-cookie": "agro_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0" });
       return;
     }
 
@@ -1756,7 +1784,7 @@ async function handleApi(req, res) {
 
       const token = createSession(user.id);
       sendJson(res, 201, {
-        player: { id: user.id, username: user.username, isGuest: false },
+        player: playerSessionPayload(user),
         farm: user.farm
       }, { "set-cookie": `agro_session=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=86400` });
       return;
@@ -1777,7 +1805,7 @@ async function handleApi(req, res) {
 
       const token = createSession(user.id);
       sendJson(res, 200, {
-        player: { id: user.id, username: user.username, isGuest: false },
+        player: playerSessionPayload(user),
         farm: sanitizeFarmState(user.farm)
       }, { "set-cookie": `agro_session=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=86400` });
       return;
@@ -1851,7 +1879,7 @@ async function handleApi(req, res) {
       }
 
       sendJson(res, 200, {
-        player: { id: user.id, username: user.username, isGuest: false },
+        player: playerSessionPayload(user),
         farm: sanitizeFarmState(user.farm)
       });
       return;
