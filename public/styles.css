@@ -234,7 +234,7 @@ h1 {
 }
 
 .auth-panel h1 {
-  font-size: clamp(2.1rem, 3.45vw, 4.1rem);
+  font-size: clamp(2rem, 2.05vw, 2.65rem);
   line-height: 1;
   white-space: nowrap;
   overflow-wrap: normal;
