@@ -970,7 +970,8 @@ async function updateH3Grid() {
   }
 
   updateSettlementLabelVisibility();
-  if (!updateDeckH3Layer(visibleCells)) renderLeafletFallbackH3Layer(visibleCells);
+  updateDeckH3Layer(visibleCells);
+  renderLeafletFallbackH3Layer(visibleCells);
   renderDetailedCellsChunked(visibleCells, renderJob);
 }
 
@@ -1324,10 +1325,8 @@ function refreshVisibleCellLayers(cellIds = null) {
     return;
   }
 
-  if (!updateDeckH3Layer(visibleCells)) {
-    scheduleH3GridUpdate();
-    return;
-  }
+  updateDeckH3Layer(visibleCells);
+  scheduleH3GridUpdate();
   renderSelectedCell();
 }
 
