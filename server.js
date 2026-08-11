@@ -49,7 +49,7 @@ const DEFAULT_SETTINGS = {
     nearbyPriceGrowthPercent: 8,
     nearbyPriceRadius: 2,
     sellRefundPercent: 62,
-    maxVisibleCells: 46000,
+    maxVisibleCells: 120000,
     detailZoomMin: 10,
     claimBatchSize: 1000
   },
@@ -825,7 +825,10 @@ function publicUserRow(user) {
   return {
     id: user.id,
     username: user.username,
+    email: user.email || "",
     companyName: userCompanyName(user),
+    createdAt: user.createdAt || null,
+    updatedAt: user.updatedAt || null,
     coins: farm.coins,
     currentDay: farm.currentDay,
     landCount,
@@ -1310,14 +1313,16 @@ async function handleApi(req, res) {
       const now = new Date().toISOString();
       const claimed = [];
       const rejected = [];
+      const alreadyOwned = [];
 
       requestedCells.forEach((cell) => {
         const id = typeof cell.id === "string" ? cell.id.slice(0, 32) : "";
         const price = Number.isFinite(cell.price) ? Math.max(1, Math.floor(cell.price)) : 100;
         if (!/^[0-9a-f]+$/i.test(id)) return;
         const existing = market.land[id];
-        if (existing && existing.ownerId !== session.userId) {
-          rejected.push(id);
+        if (existing) {
+          if (existing.ownerId === session.userId) alreadyOwned.push(id);
+          else rejected.push(id);
           return;
         }
         market.land[id] = {
@@ -1351,7 +1356,7 @@ async function handleApi(req, res) {
           targetCellId: claimed[0]
         });
       }
-      sendJson(res, 200, { ok: true, claimed, rejected, market });
+      sendJson(res, 200, { ok: true, claimed, rejected, alreadyOwned, market });
       return;
     }
 
@@ -1369,6 +1374,7 @@ async function handleApi(req, res) {
         .filter((id) => typeof id === "string" && /^[0-9a-f]+$/i.test(id));
       const market = readMarket();
       let sold = 0;
+      const soldIds = [];
       let sellerName = "Гравець";
       let targetCellId = null;
       const regions = [];
@@ -1381,6 +1387,7 @@ async function handleApi(req, res) {
           if (requestRow?.region) regions.push(String(requestRow.region));
           delete market.land[id];
           sold += 1;
+          soldIds.push(id);
         }
       });
 
@@ -1395,7 +1402,7 @@ async function handleApi(req, res) {
           targetCellId
         });
       }
-      sendJson(res, 200, { ok: true, sold, market });
+      sendJson(res, 200, { ok: true, sold, soldIds, market });
       return;
     }
 

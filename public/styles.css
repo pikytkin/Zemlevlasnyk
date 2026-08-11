@@ -28,9 +28,21 @@ body {
   min-height: 100vh;
   overflow-x: hidden;
   color: var(--text);
+  font-weight: var(--weight-ui);
   background:
     radial-gradient(circle at 24% 12%, rgba(53, 201, 130, 0.18), transparent 26rem),
     linear-gradient(135deg, #07120f 0%, #0f1c17 48%, #122018 100%);
+}
+
+strong,
+b,
+h1,
+h2,
+h3,
+h4,
+h5,
+button {
+  font-weight: var(--weight-ui);
 }
 
 button,
@@ -551,7 +563,7 @@ dd {
 }
 
 .legend {
-  display: flex;
+  display: none;
   flex-wrap: wrap;
   justify-content: flex-end;
   gap: 10px;
@@ -1288,8 +1300,20 @@ dd {
   gap: 8px;
 }
 
+.admin-stats-panel {
+  display: grid;
+  gap: 14px;
+}
+
+.admin-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
 .profile-stats div,
-.admin-summary div {
+.admin-summary div,
+.admin-summary-grid div {
   display: grid;
   gap: 3px;
   padding: 8px;
@@ -1299,15 +1323,78 @@ dd {
 }
 
 .profile-stats span,
-.admin-summary span {
+.admin-summary span,
+.admin-summary-grid span {
   color: var(--muted);
   font-size: 0.76rem;
 }
 
 .profile-stats strong,
-.admin-summary strong {
+.admin-summary strong,
+.admin-summary-grid strong {
   color: var(--text);
   font-size: 0.92rem;
+}
+
+.admin-section-head,
+.admin-new-user,
+.admin-new-user-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.admin-section-head {
+  justify-content: space-between;
+}
+
+.admin-section-head h4 {
+  margin: 0;
+}
+
+.admin-section-head span,
+.admin-new-user small,
+.admin-new-user span {
+  color: var(--muted);
+}
+
+.admin-new-users {
+  display: grid;
+  gap: 10px;
+}
+
+.admin-new-users-list {
+  display: grid;
+  gap: 8px;
+}
+
+.admin-new-user {
+  justify-content: space-between;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.admin-new-user > div:first-child {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.admin-new-user-actions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.admin-new-user-actions button {
+  min-height: 34px;
+  padding: 7px 10px;
+}
+
+.admin-user.is-highlighted {
+  border-color: var(--amber);
+  box-shadow: 0 0 0 3px rgba(240, 189, 74, 0.16);
 }
 
 .inline-owner-button {

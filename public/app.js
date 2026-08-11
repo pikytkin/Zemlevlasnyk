@@ -33,8 +33,8 @@ const fallbackUkrainePolygon = [[[
 ]]];
 
 const rivalOwners = ["Інший гравець"];
-const PLAY_H3_RESOLUTION = 7;
-let MAX_VISIBLE_H3_CELLS = 46000;
+const PLAY_H3_RESOLUTION = 8;
+let MAX_VISIBLE_H3_CELLS = 120000;
 const SETTLEMENT_GRID_SIZE = 0.25;
 let DETAIL_ZOOM_MIN = 10;
 let CLAIM_BATCH_SIZE = 1000;
@@ -176,6 +176,7 @@ let newsTimer = null;
 let visibleCells = [];
 let cellLayerById = new Map();
 let selectedCellIds = new Set();
+let purchaseInProgress = false;
 let selectionDrag = null;
 let clusterSelectionMode = false;
 let suppressMapClick = false;
@@ -353,7 +354,7 @@ function applyGameSettings(settings) {
   gameSettings = settings || gameSettings;
   const economy = gameSettings?.economy || {};
   const upgrades = gameSettings?.upgrades || {};
-  MAX_VISIBLE_H3_CELLS = Number.isFinite(economy.maxVisibleCells) ? economy.maxVisibleCells : MAX_VISIBLE_H3_CELLS;
+  MAX_VISIBLE_H3_CELLS = Number.isFinite(economy.maxVisibleCells) ? Math.max(120000, economy.maxVisibleCells) : MAX_VISIBLE_H3_CELLS;
   DETAIL_ZOOM_MIN = Number.isFinite(economy.detailZoomMin) ? economy.detailZoomMin : DETAIL_ZOOM_MIN;
   CLAIM_BATCH_SIZE = Number.isFinite(economy.claimBatchSize) ? economy.claimBatchSize : CLAIM_BATCH_SIZE;
   SELL_REFUND_RATE = Number.isFinite(economy.sellRefundPercent) ? economy.sellRefundPercent / 100 : SELL_REFUND_RATE;
@@ -483,10 +484,14 @@ async function saveState() {
   if (!player) return;
 
   try {
-    await requestJson("/api/save", {
+    const payload = await requestJson("/api/save", {
       method: "POST",
       body: JSON.stringify({ farm: state })
     });
+    if (payload.farm && Number.isFinite(payload.farm.coins) && payload.farm.coins !== state.coins) {
+      state.coins = payload.farm.coins;
+      renderPlayerHeader();
+    }
     refreshLeaderboard();
     refreshNews();
   } catch (error) {
@@ -2062,6 +2067,7 @@ function setSavingButton(button, isSaving, savedText = "Збережено") {
 }
 
 async function buySelectedCell() {
+  if (purchaseInProgress) return;
   const cells = freeSelectedCells();
   if (!cells.length) return;
   const totalPrice = cells.reduce((sum, cell) => sum + cell.price, 0);
@@ -2070,6 +2076,8 @@ async function buySelectedCell() {
     return;
   }
 
+  purchaseInProgress = true;
+  buyButton.disabled = true;
   try {
     const claimedIds = new Set();
     for (let index = 0; index < cells.length; index += CLAIM_BATCH_SIZE) {
@@ -2092,11 +2100,21 @@ async function buySelectedCell() {
     if (claimedCells.length < cells.length) {
       showGameMessage(`Куплено ${claimedCells.length} з ${cells.length} земельних ділянок. Частину вже зайняли інші гравці.`);
     }
+    const finalPrice = claimedCells.reduce((sum, cell) => sum + cell.price, 0);
+    if (state.coins < finalPrice) {
+      showGameMessage(`Недостатньо коштів після оновлення карти. Потрібно ${money(finalPrice)}, на балансі ${money(state.coins)}.`);
+      refreshVisibleCellLayers(cells.map((cell) => cell.id));
+      render();
+      return;
+    }
     cells.length = 0;
     cells.push(...claimedCells);
   } catch (error) {
     showGameMessage(error.message);
     return;
+  } finally {
+    purchaseInProgress = false;
+    buyButton.disabled = false;
   }
 
   const finalPrice = cells.reduce((sum, cell) => sum + cell.price, 0);
@@ -2502,7 +2520,7 @@ function buyFertilizerLevel() {
 async function sellSelectedLand() {
   const cells = ownedSelectedCells();
   if (!cells.length) return;
-  const totalRefund = cells.reduce((sum, cell) => sum + sellValue(cell, state.land[cell.id]), 0);
+  let soldCells = [];
 
   try {
     const payload = await requestJson("/api/sell", {
@@ -2510,18 +2528,28 @@ async function sellSelectedLand() {
       body: JSON.stringify({ cells: cells.map((cell) => ({ id: cell.id, region: cell.region })) })
     });
     marketState = payload.market || marketState;
+    const soldIds = new Set(Array.isArray(payload.soldIds) ? payload.soldIds : []);
+    soldCells = cells.filter((cell) => soldIds.has(cell.id));
   } catch (error) {
     showGameMessage(error.message);
     return;
   }
 
-  cells.forEach((cell) => delete state.land[cell.id]);
+  if (!soldCells.length) {
+    showGameMessage("Продаж не виконано: ці ділянки вже не належать вам або карта оновилась.");
+    refreshVisibleCellLayers(cells.map((cell) => cell.id));
+    render();
+    return;
+  }
+
+  const totalRefund = soldCells.reduce((sum, cell) => sum + sellValue(cell, state.land[cell.id]), 0);
+  soldCells.forEach((cell) => delete state.land[cell.id]);
   state.stats.buildings = Object.values(state.land || {}).filter((owned) => owned.building || owned.buildingId).length;
   state.coins += totalRefund;
   selectedCellIds = new Set();
   selectedCellId = null;
-  addEvent(`Продано земельних ділянок: ${cells.length}. Отримано ${money(totalRefund)}.`);
-  addLedger("sell", `Продаж землі: ${cells.length} ділянок`, totalRefund, -cells.length);
+  addEvent(`Продано земельних ділянок: ${soldCells.length}. Отримано ${money(totalRefund)}.`);
+  addLedger("sell", `Продаж землі: ${soldCells.length} ділянок`, totalRefund, -soldCells.length);
   showGameMessage(`Землю продано системі за ${money(totalRefund)}.`);
   scheduleH3GridUpdate();
   render();
@@ -3270,8 +3298,7 @@ async function openAdminPanel() {
     const payload = await requestJson("/api/admin");
     applyGameSettings(payload.settings || gameSettings);
     renderAdminSettings(gameSettings);
-    renderAdminSummary(payload.summary || {}, payload.market || { land: {} });
-    renderAdminStats(payload.summary || {});
+    renderAdminSummary(payload.summary || {}, payload.market || { land: {} }, payload.users || []);
     renderAdminUsers(payload.users || []);
   } catch (error) {
     adminSummary.innerHTML = "";
@@ -3535,11 +3562,11 @@ function normalizeAssetCard(item) {
   };
 }
 
-function renderAdminSummary(summary, market) {
+function renderAdminSummary(summary, market, users = []) {
   const occupiedLand = Number.isFinite(summary.occupiedLand) ? summary.occupiedLand : Object.keys(market.land || {}).length;
   const totalLand = totalPlayableLandCount();
   const freeLand = Number.isFinite(totalLand) ? Math.max(0, totalLand - occupiedLand) : null;
-  renderAdminStats(summary);
+  renderAdminStats(summary, users);
   adminSummary.innerHTML = [
     ["Учасників", Number.isFinite(summary.users) ? summary.users : 0],
     ["Адмінів", Number.isFinite(summary.admins) ? summary.admins : 0],
@@ -3549,14 +3576,42 @@ function renderAdminSummary(summary, market) {
   ].map(([key, value]) => `<div><span>${key}</span><strong>${value}</strong></div>`).join("");
 }
 
-function renderAdminStats(summary) {
+function renderAdminStats(summary, users = []) {
   if (!adminStats) return;
-  adminStats.innerHTML = [
+  const newestUsers = [...(Array.isArray(users) ? users : [])]
+    .sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0))
+    .slice(0, 40);
+  const summaryHtml = [
     ["Онлайн зараз", Number.isFinite(summary.onlineUsers) ? summary.onlineUsers : 0],
     ["Усього зареєстровано", Number.isFinite(summary.users) ? summary.users : 0],
     ["Зареєстровано сьогодні", Number.isFinite(summary.registeredToday) ? summary.registeredToday : 0],
     ["Зареєстровано за 30 днів", Number.isFinite(summary.registeredLast30Days) ? summary.registeredLast30Days : 0]
   ].map(([key, value]) => `<div><span>${key}</span><strong>${value}</strong></div>`).join("");
+  adminStats.innerHTML = `
+    <div class="admin-summary-grid">${summaryHtml}</div>
+    <section class="admin-new-users">
+      <div class="admin-section-head">
+        <button class="secondary-action" type="button">Список нових гравців</button>
+        <span>${newestUsers.length} останніх</span>
+      </div>
+      <div class="admin-new-users-list">
+        ${newestUsers.length ? newestUsers.map((user) => `
+          <article class="admin-new-user" data-user-id="${escapeHtml(user.id)}">
+            <div>
+              <strong>${escapeHtml(user.username || "Гравець")}</strong>
+              <span>${escapeHtml(user.companyName || "")}</span>
+              <small>${user.createdAt ? new Date(user.createdAt).toLocaleString("uk-UA") : "дата невідома"} · ${user.landCount || 0} зем. · ${money(user.coins || 0)}</small>
+            </div>
+            <div class="admin-new-user-actions">
+              <button class="secondary-action" type="button" data-admin-message-player="${escapeHtml(user.id)}">Написати</button>
+              <button class="secondary-action" type="button" data-player-stats="${escapeHtml(user.id)}">Статистика</button>
+              <button class="secondary-action" type="button" data-admin-edit-player="${escapeHtml(user.id)}">Редагувати</button>
+            </div>
+          </article>
+        `).join("") : "<p>Нових гравців поки немає.</p>"}
+      </div>
+    </section>
+  `;
 }
 
 function totalPlayableLandCount() {
@@ -3654,7 +3709,7 @@ async function clearEvents(userId = "") {
       method: "POST",
       body: JSON.stringify(userId ? { id: userId } : {})
     });
-    renderAdminSummary(payload.summary || {}, payload.market || { land: {} });
+    renderAdminSummary(payload.summary || {}, payload.market || { land: {} }, payload.users || []);
     renderAdminUsers(payload.users || []);
     if (!userId || userId === player?.id) state = normalizeState(payload.farm || { ...state, events: [] });
     render();
@@ -3671,7 +3726,7 @@ async function deleteUser(userId) {
       method: "POST",
       body: JSON.stringify({ id: userId })
     });
-    renderAdminSummary(payload.summary || {}, payload.market || { land: {} });
+    renderAdminSummary(payload.summary || {}, payload.market || { land: {} }, payload.users || []);
     renderAdminUsers(payload.users || []);
     marketState = payload.market || marketState;
     scheduleH3GridUpdate();
@@ -3715,6 +3770,20 @@ async function showPlayerStats(userId) {
   }
 }
 
+function activateAdminTab(tab) {
+  document.querySelectorAll("[data-admin-tab]").forEach((item) => item.classList.toggle("is-active", item.dataset.adminTab === tab));
+  document.querySelectorAll("[data-admin-panel]").forEach((panel) => panel.classList.toggle("is-hidden", panel.dataset.adminPanel !== tab));
+}
+
+function focusAdminUser(userId) {
+  activateAdminTab("players");
+  const form = adminUsers?.querySelector(`[data-user-id="${CSS.escape(userId)}"]`);
+  if (!form) return;
+  form.scrollIntoView({ behavior: "smooth", block: "center" });
+  form.classList.add("is-highlighted");
+  window.setTimeout(() => form.classList.remove("is-highlighted"), 1600);
+}
+
 function escapeHtml(value) {
   return String(value).replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char]));
 }
@@ -3739,7 +3808,7 @@ async function saveAdminUser(event) {
   const restoreButton = setSavingButton(event.submitter, true);
   try {
     const payload = await requestJson("/api/admin/user", { method: "POST", body: JSON.stringify(body) });
-    renderAdminSummary(payload.summary || {}, payload.market || { land: {} });
+    renderAdminSummary(payload.summary || {}, payload.market || { land: {} }, payload.users || []);
     renderAdminUsers(payload.users || []);
     marketState = payload.market || marketState;
     if (body.id === player?.id) {
@@ -3769,7 +3838,7 @@ async function saveAdminSettings(event) {
     });
     applyGameSettings(payload.settings);
     renderAdminSettings(gameSettings);
-    renderAdminSummary(payload.summary || {}, payload.market || { land: {} });
+    renderAdminSummary(payload.summary || {}, payload.market || { land: {} }, payload.users || []);
     renderAdminUsers(payload.users || []);
     scheduleH3GridUpdate();
     render();
@@ -3947,7 +4016,7 @@ async function resetAllLand() {
   if (!confirm("Обнулити всі землі всіх учасників?")) return;
   try {
     const payload = await requestJson("/api/admin/reset-land", { method: "POST", body: "{}" });
-    renderAdminSummary(payload.summary || {}, payload.market || { land: {} });
+    renderAdminSummary(payload.summary || {}, payload.market || { land: {} }, payload.users || []);
     renderAdminUsers(payload.users || []);
     marketState = payload.market || { land: {} };
     state = normalizeState(payload.farm || { ...state, land: {} });
@@ -3970,7 +4039,7 @@ async function resetAllMoney() {
   if (!confirm("Обнулити гроші всіх учасників до стартового балансу?")) return;
   try {
     const payload = await requestJson("/api/admin/reset-money", { method: "POST", body: "{}" });
-    renderAdminSummary(payload.summary || {}, payload.market || { land: {} });
+    renderAdminSummary(payload.summary || {}, payload.market || { land: {} }, payload.users || []);
     renderAdminUsers(payload.users || []);
     if (payload.farm) state = normalizeState(payload.farm);
     refreshLeaderboard();
@@ -3985,7 +4054,7 @@ async function resetAllMachinery() {
   if (!confirm("Обнулити техніку всіх учасників?")) return;
   try {
     const payload = await requestJson("/api/admin/reset-machinery", { method: "POST", body: "{}" });
-    renderAdminSummary(payload.summary || {}, payload.market || { land: {} });
+    renderAdminSummary(payload.summary || {}, payload.market || { land: {} }, payload.users || []);
     renderAdminUsers(payload.users || []);
     if (payload.farm) state = normalizeState(payload.farm);
     refreshLeaderboard();
@@ -4000,7 +4069,7 @@ async function resetAllAssets() {
   if (!confirm("Обнулити всю власність і активи всіх учасників? Гроші залишаться.")) return;
   try {
     const payload = await requestJson("/api/admin/reset-assets", { method: "POST", body: "{}" });
-    renderAdminSummary(payload.summary || {}, payload.market || { land: {} });
+    renderAdminSummary(payload.summary || {}, payload.market || { land: {} }, payload.users || []);
     renderAdminUsers(payload.users || []);
     marketState = payload.market || { land: {} };
     if (payload.farm) state = normalizeState(payload.farm);
@@ -4157,13 +4226,26 @@ newsList?.addEventListener("click", (event) => {
 });
 document.querySelectorAll("[data-admin-tab]").forEach((button) => {
   button.addEventListener("click", () => {
-    const tab = button.dataset.adminTab;
-    document.querySelectorAll("[data-admin-tab]").forEach((item) => item.classList.toggle("is-active", item === button));
-    document.querySelectorAll("[data-admin-panel]").forEach((panel) => panel.classList.toggle("is-hidden", panel.dataset.adminPanel !== tab));
+    activateAdminTab(button.dataset.adminTab);
   });
 });
 profileForm.addEventListener("submit", saveProfile);
 profileLogo.addEventListener("change", loadProfileLogo);
+adminStats?.addEventListener("click", (event) => {
+  const messageButton = event.target.closest("[data-admin-message-player]");
+  if (messageButton?.dataset.adminMessagePlayer) {
+    openChat(messageButton.dataset.adminMessagePlayer);
+    return;
+  }
+  const statsButton = event.target.closest("[data-player-stats]");
+  if (statsButton?.dataset.playerStats) {
+    activateAdminTab("players");
+    showPlayerStats(statsButton.dataset.playerStats);
+    return;
+  }
+  const editButton = event.target.closest("[data-admin-edit-player]");
+  if (editButton?.dataset.adminEditPlayer) focusAdminUser(editButton.dataset.adminEditPlayer);
+});
 adminUsers.addEventListener("submit", saveAdminUser);
 adminUsers.addEventListener("click", (event) => {
   const button = event.target.closest("[data-player-stats]");

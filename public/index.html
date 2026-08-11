@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Землевласник</title>
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIINfQnLtnNSsK2suw0K5pEqxyfDzGZU4kk=" crossorigin="">
-    <link rel="stylesheet" href="/styles.css?v=20260811-font-weight">
+    <link rel="stylesheet" href="/styles.css?v=20260811-admin-cells-fonts">
   </head>
   <body>
     <main class="app-shell">
@@ -87,11 +87,6 @@
               <div>
                 <p class="eyebrow">Інтерактивна карта України</p>
                 <h3>Масштабуйте карту та купуйте земельні ділянки</h3>
-              </div>
-              <div class="legend">
-                <span><i class="free"></i>вільно</span>
-                <span><i class="owned"></i>ваше</span>
-                <span><i class="rival"></i>інші гравці</span>
               </div>
             </div>
             <div class="map-board" id="mapBoard" aria-label="Інтерактивна карта України"></div>
@@ -177,7 +172,7 @@
               </div>
             </section>
             <section class="admin-tab-panel is-hidden" data-admin-panel="stats">
-              <div class="admin-summary" id="adminStats"></div>
+              <div class="admin-stats-panel" id="adminStats"></div>
             </section>
             <section class="admin-tab-panel is-hidden" data-admin-panel="settings">
               <form class="admin-settings" id="adminSettingsForm">
