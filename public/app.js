@@ -193,6 +193,7 @@ let touchTooltipTimer = null;
 let gridUpdateTimer = null;
 let gridRenderJob = 0;
 let gridRenderFrame = null;
+let gridPanFrame = null;
 let isMapMoving = false;
 let gridTooDenseNotifiedAt = 0;
 let gridSkippedForDensity = false;
@@ -539,9 +540,8 @@ async function initMap() {
   });
   map.on("movestart", () => {
     isMapMoving = true;
-    setGridCanvasVisible(false);
-    if (gridMarkerLayer) gridMarkerLayer.clearLayers();
   });
+  map.on("move", requestGridPanRender);
   map.on("zoomend moveend", () => {
     isMapMoving = false;
     setGridCanvasVisible(true);
@@ -909,7 +909,7 @@ function clearGridGpuLayer() {
 }
 
 function renderGridGpuLayer() {
-  if (!gridGl || !gridProgram || !gridBuffer || !map || isOverviewZoom() || isMapMoving) {
+  if (!gridGl || !gridProgram || !gridBuffer || !map || isOverviewZoom()) {
     clearGridGpuLayer();
     return;
   }
@@ -937,6 +937,15 @@ function renderGridGpuLayer() {
   gridGl.drawArrays(gridGl.TRIANGLES, 0, vertices.length / 6);
 }
 
+function requestGridPanRender() {
+  if (!gridCanvas || isOverviewZoom() || !visibleCells.length) return;
+  if (gridPanFrame) return;
+  gridPanFrame = requestAnimationFrame(() => {
+    gridPanFrame = null;
+    renderGridGpuLayer();
+  });
+}
+
 function appendCellVertices(strokeVertices, fillVertices, cell, width, height) {
   const boundary = cell.boundary && cell.boundary.length ? cell.boundary : getCell(cell.id).boundary;
   if (!boundary || !boundary.length) return;
@@ -948,15 +957,30 @@ function appendCellVertices(strokeVertices, fillVertices, cell, width, height) {
   const edgeScale = selected ? 0.86 : 0.955;
   const points = boundary.map(([lat, lng]) => map.latLngToContainerPoint([lat, lng]));
   for (let index = 0; index < 6; index += 1) {
-    const strokeA = screenToClip(points[index].x, points[index].y, width, height);
-    const strokeB = screenToClip(points[(index + 1) % 6].x, points[(index + 1) % 6].y, width, height);
-    strokeVertices.push(center.x, center.y, ...stroke, strokeA.x, strokeA.y, ...stroke, strokeB.x, strokeB.y, ...stroke);
+    appendLineQuad(strokeVertices, points[index], points[(index + 1) % 6], selected ? 3.4 : 1.45, stroke, width, height);
   }
+  if (fill[3] <= 0) return;
   for (let index = 0; index < 6; index += 1) {
     const a = scaledClipPoint(points[index], centerPoint, edgeScale, width, height);
     const b = scaledClipPoint(points[(index + 1) % 6], centerPoint, edgeScale, width, height);
     fillVertices.push(center.x, center.y, ...fill, a.x, a.y, ...fill, b.x, b.y, ...fill);
   }
+}
+
+function appendLineQuad(vertices, a, b, thickness, color, width, height) {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const length = Math.hypot(dx, dy) || 1;
+  const nx = -dy / length * thickness / 2;
+  const ny = dx / length * thickness / 2;
+  const p1 = screenToClip(a.x + nx, a.y + ny, width, height);
+  const p2 = screenToClip(a.x - nx, a.y - ny, width, height);
+  const p3 = screenToClip(b.x - nx, b.y - ny, width, height);
+  const p4 = screenToClip(b.x + nx, b.y + ny, width, height);
+  vertices.push(
+    p1.x, p1.y, ...color, p2.x, p2.y, ...color, p3.x, p3.y, ...color,
+    p1.x, p1.y, ...color, p3.x, p3.y, ...color, p4.x, p4.y, ...color
+  );
 }
 
 function screenToClip(x, y, width, height) {
@@ -969,10 +993,7 @@ function scaledClipPoint(point, center, scale, width, height) {
 
 function gridCellColor(id) {
   const selected = selectedCellIds.has(id) || id === selectedCellId;
-  const owner = getOwner(id);
-  if (owner === "player") return colorToFloats(state.color, selected ? 0.78 : 0.52);
-  if (owner === "rival") return colorToFloats(marketState?.land?.[id]?.ownerColor || "#ef7669", selected ? 0.72 : 0.42);
-  return selected ? [1, 0.69, 0, 0.42] : [1, 1, 1, 0.08];
+  return selected ? [1, 0.69, 0, 0] : [1, 1, 1, 0];
 }
 
 function gridCellStrokeColor(id) {
@@ -1126,18 +1147,20 @@ function addAggregateCells(ids, kind) {
     const cell = getCell(id);
     if (!cell || !pointInBounds(cell.lat, cell.lng, bounds)) return;
     const key = overviewClusterKey(cell, precision);
-    if (!groups.has(key)) groups.set(key, { latSum: 0, lngSum: 0, count: 0 });
+    if (!groups.has(key)) groups.set(key, { qSum: 0, rSum: 0, count: 0 });
     const group = groups.get(key);
-    group.latSum += cell.lat;
-    group.lngSum += cell.lng;
+    const axial = parseHexId(id);
+    group.qSum += axial.q;
+    group.rSum += axial.r;
     group.count += 1;
   });
   [...groups.values()].slice(0, isLowPowerDevice() ? 100 : 180).forEach((group) => {
-    const lat = group.latSum / group.count;
-    const lng = group.lngSum / group.count;
-    L.polygon(aggregateHexBoundary(lat, lng, group.count), aggregateCellStyle(kind, group.count))
+    const q = Math.round(group.qSum / group.count);
+    const r = Math.round(group.rSum / group.count);
+    const cell = makeVisibleCell(hexId(q, r));
+    L.polygon(cell.boundary, aggregateCellStyle(kind, group.count))
       .on("click", () => {
-        map.setView([lat, lng], detailZoomStart());
+        map.setView([cell.lat, cell.lng], detailZoomStart());
         showGameMessage("Наблизьте карту, щоб обирати окремі земельні ділянки.");
       })
       .addTo(gridMarkerLayer);
@@ -1146,21 +1169,11 @@ function addAggregateCells(ids, kind) {
 
 function aggregateCellStyle(kind, count = 1) {
   const styles = {
-    rival: { color: "#7a382f", fillColor: "#ef7669", fillOpacity: 0.22, weight: 1.4 },
-    owned: { color: "#1b6f43", fillColor: state.color, fillOpacity: 0.36, weight: 1.5 },
-    selected: { color: "#ffb000", fillColor: "#ffdf43", fillOpacity: 0.44, weight: 2.2 }
+    rival: { color: "#7a382f", fillColor: "#ef7669", fillOpacity: 0, weight: 1.8 },
+    owned: { color: state.color || "#35c982", fillColor: state.color || "#35c982", fillOpacity: 0, weight: 2 },
+    selected: { color: "#ffb000", fillColor: "#ffdf43", fillOpacity: 0, weight: 2.6 }
   };
   return { pane: "gridMarkerPane", renderer: gridMarkerRenderer, className: "grid-aggregate " + kind, ...styles[kind] };
-}
-
-function aggregateHexBoundary(lat, lng, count = 1) {
-  const radius = Math.min(32, 10 + Math.sqrt(count) * 2.2);
-  const center = map.latLngToContainerPoint([lat, lng]);
-  return Array.from({ length: 6 }, (_, index) => {
-    const angle = Math.PI / 6 + index * Math.PI / 3;
-    const point = L.point(center.x + radius * Math.cos(angle), center.y + radius * Math.sin(angle));
-    return map.containerPointToLatLng(point);
-  });
 }
 
 function scheduleGridUpdate() {
