@@ -157,6 +157,10 @@ let gridCanvas = null;
 let gridGl = null;
 let gridProgram = null;
 let gridBuffer = null;
+let mvtMap = null;
+let mvtSyncing = false;
+let mvtSyncFrame = null;
+let mvtSocket = null;
 let labelLayer = null;
 let ukrainePolygons = fallbackUkrainePolygon;
 let ukraineCellCache = new Map();
@@ -531,6 +535,7 @@ async function initMap() {
   gridMarkerRenderer = L.canvas({ padding: 0.35, tolerance: 8 });
   gridMarkerLayer = L.layerGroup([], { pane: "gridMarkerPane" }).addTo(map);
   labelLayer = L.layerGroup([], { pane: "labelPane" }).addTo(map);
+  initMvtLandMap();
   initGridGpuLayer();
   drawSettlementLabels();
 
@@ -542,15 +547,21 @@ async function initMap() {
   map.on("movestart", () => {
     isMapMoving = true;
   });
-  map.on("move", requestGridPanRender);
+  map.on("move", () => {
+    requestGridPanRender();
+    requestMvtSync();
+  });
   map.on("zoomend moveend", () => {
     isMapMoving = false;
     setGridCanvasVisible(true);
     updateZoomBadge();
+    syncMvtMap();
     scheduleGridUpdate();
   });
   map.on("resize", () => {
     syncGridGpuCanvas();
+    if (mvtMap) mvtMap.resize();
+    syncMvtMap();
     scheduleGridUpdate();
   });
   map.on("click", selectCellAtMapPoint);
@@ -638,12 +649,13 @@ async function refreshMarket() {
   try {
     const nextMarket = await requestJson("/api/market");
     const nextMarketCellCount = Object.keys(nextMarket?.land || {}).length;
-    const nextMarketSignature = marketRenderSignature(nextMarket);
+    const nextMarketSignature = nextMarket?.version ? `v:${nextMarket.version}` : marketRenderSignature(nextMarket);
     const resetChanged = nextMarket?.resetAt && state.lastAdminResetAt !== nextMarket.resetAt;
     const marketChanged = nextMarketCellCount !== marketCellCount || nextMarketSignature !== marketSignature || resetChanged;
     marketState = nextMarket;
     marketCellCount = nextMarketCellCount;
     marketSignature = nextMarketSignature;
+    if (marketChanged) refreshMvtTiles();
     if (resetChanged) {
       state.land = {};
       state.lastAdminResetAt = nextMarket.resetAt;
@@ -878,6 +890,110 @@ function compileShader(gl, type, source) {
   return shader;
 }
 
+function initMvtLandMap() {
+  if (mvtMap || !mapBoard || !window.maplibregl) return;
+  const container = document.createElement("div");
+  container.className = "mvt-land-map";
+  container.setAttribute("aria-hidden", "true");
+  mapBoard.appendChild(container);
+  const center = map.getCenter();
+  mvtMap = new maplibregl.Map({
+    container,
+    attributionControl: false,
+    interactive: false,
+    fadeDuration: 0,
+    center: [center.lng, center.lat],
+    zoom: map.getZoom(),
+    style: {
+      version: 8,
+      sources: {
+        land: {
+          type: "vector",
+          tiles: [`${location.origin}/tiles/land/{z}/{x}/{y}.mvt`],
+          minzoom: 0,
+          maxzoom: 16
+        }
+      },
+      layers: [
+        {
+          id: "owned-land-fill",
+          type: "fill",
+          source: "land",
+          "source-layer": "land",
+          paint: {
+            "fill-color": ["coalesce", ["get", "ownerColor"], "#35c982"],
+            "fill-opacity": 0.42
+          }
+        },
+        {
+          id: "owned-land-line",
+          type: "line",
+          source: "land",
+          "source-layer": "land",
+          paint: {
+            "line-color": ["coalesce", ["get", "ownerColor"], "#1b6f43"],
+            "line-opacity": 0.58,
+            "line-width": ["interpolate", ["linear"], ["zoom"], 7, 0.45, 11, 0.75, 14, 1.1]
+          }
+        }
+      ]
+    }
+  });
+  mvtMap.on("load", () => {
+    syncMvtMap();
+    connectMvtSocket();
+  });
+}
+
+function syncMvtMap() {
+  if (!mvtMap || !map || mvtSyncing) return;
+  const center = map.getCenter();
+  mvtSyncing = true;
+  mvtMap.jumpTo({
+    center: [center.lng, center.lat],
+    zoom: map.getZoom(),
+    bearing: 0,
+    pitch: 0
+  });
+  mvtSyncing = false;
+}
+
+function requestMvtSync() {
+  if (!mvtMap || mvtSyncFrame) return;
+  mvtSyncFrame = requestAnimationFrame(() => {
+    mvtSyncFrame = null;
+    syncMvtMap();
+  });
+}
+
+function refreshMvtTiles() {
+  if (!mvtMap || !mvtMap.isStyleLoaded()) return;
+  const source = mvtMap.getSource("land");
+  if (source?.setTiles) {
+    source.setTiles([`${location.origin}/tiles/land/{z}/{x}/{y}.mvt?v=${Date.now()}`]);
+  } else if (source?.reload) {
+    source.reload();
+  } else {
+    mvtMap.triggerRepaint();
+  }
+}
+
+function connectMvtSocket() {
+  if (mvtSocket || !("WebSocket" in window)) return;
+  const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+  mvtSocket = new WebSocket(`${protocol}//${location.host}/ws`);
+  mvtSocket.addEventListener("message", (event) => {
+    try {
+      const payload = JSON.parse(event.data);
+      if (payload.type === "tiles-invalidated") refreshMvtTiles();
+    } catch {}
+  });
+  mvtSocket.addEventListener("close", () => {
+    mvtSocket = null;
+    setTimeout(connectMvtSocket, 3000);
+  });
+}
+
 function syncGridGpuCanvas() {
   if (!gridCanvas || !mapBoard) return;
   const ratio = Math.min(1.5, window.devicePixelRatio || 1);
@@ -1001,18 +1117,12 @@ function scaledClipPoint(point, center, scale, width, height) {
 
 function gridCellColor(id) {
   const selected = selectedCellIds.has(id) || id === selectedCellId;
-  const owner = getOwner(id);
-  if (owner === "player") return colorToFloats(state.color, selected ? 0.78 : 0.52);
-  if (owner === "rival") return colorToFloats(marketState?.land?.[id]?.ownerColor || "#ef7669", selected ? 0.72 : 0.42);
   return selected ? [1, 0.69, 0, 0.42] : [1, 1, 1, 0];
 }
 
 function gridCellStrokeColor(id) {
   const selected = selectedCellIds.has(id) || id === selectedCellId;
-  const owner = getOwner(id);
   if (selected) return [1, 0.69, 0, 1];
-  if (owner === "player") return [0.18, 0.49, 0.3, 0.55];
-  if (owner === "rival") return [0.48, 0.22, 0.18, 0.55];
   return [0.07, 0.07, 0.07, 0.62];
 }
 
@@ -1138,14 +1248,7 @@ function overviewClusterKey(cell, precision = 0.45) {
 }
 
 function renderOverviewGridLayer() {
-  const rivalIds = Object.entries(marketState?.land || {})
-    .filter(([, owner]) => owner.ownerId !== player?.id)
-    .map(([id]) => id)
-    .filter(isRegularHexId);
-  const ownedIds = Object.keys(state.land || {}).filter((id) => isRegularHexId(id) && getOwner(id) === "player");
   const selectedIds = (selectedCellIds.size ? [...selectedCellIds] : selectedCellId ? [selectedCellId] : []).filter(isRegularHexId);
-  addAggregateCells(rivalIds, "rival");
-  addAggregateCells(ownedIds, "owned");
   addAggregateCells(selectedIds, "selected");
 }
 
@@ -2134,6 +2237,7 @@ async function buySelectedCell() {
         body: JSON.stringify({ cells: batch.map((cell) => ({ id: cell.id, price: cell.price, region: cell.region })) })
       });
       marketState = claim.market || marketState;
+      refreshMvtTiles();
       (claim.claimed || []).forEach((id) => claimedIds.add(id));
     }
     marketCellCount = Object.keys(marketState?.land || {}).length;
@@ -2575,6 +2679,7 @@ async function sellSelectedLand() {
       body: JSON.stringify({ cells: cells.map((cell) => ({ id: cell.id, region: cell.region })) })
     });
     marketState = payload.market || marketState;
+    refreshMvtTiles();
     const soldIds = new Set(Array.isArray(payload.soldIds) ? payload.soldIds : []);
     soldCells = cells.filter((cell) => soldIds.has(cell.id));
   } catch (error) {
@@ -3274,6 +3379,7 @@ async function saveProfile(event) {
     });
     state = normalizeState(payload.farm || state);
     marketState = payload.market || marketState;
+    refreshMvtTiles();
     refreshVisibleCellLayers(Object.keys(state.land));
     render();
     closeModals();
@@ -3736,6 +3842,7 @@ async function deleteUser(userId) {
     renderAdminSummary(payload.summary || {}, payload.market || { land: {} }, payload.users || []);
     renderAdminUsers(payload.users || []);
     marketState = payload.market || marketState;
+    refreshMvtTiles();
     scheduleGridUpdate();
     refreshLeaderboard();
     showGameMessage("Гравця видалено.");
@@ -4026,6 +4133,7 @@ async function resetAllLand() {
     renderAdminSummary(payload.summary || {}, payload.market || { land: {} }, payload.users || []);
     renderAdminUsers(payload.users || []);
     marketState = payload.market || { land: {} };
+    refreshMvtTiles();
     state = normalizeState(payload.farm || { ...state, land: {} });
     selectedCellIds = new Set();
     selectedCellId = null;
@@ -4079,6 +4187,7 @@ async function resetAllAssets() {
     renderAdminSummary(payload.summary || {}, payload.market || { land: {} }, payload.users || []);
     renderAdminUsers(payload.users || []);
     marketState = payload.market || { land: {} };
+    refreshMvtTiles();
     if (payload.farm) state = normalizeState(payload.farm);
     selectedCellIds = new Set();
     selectedCellId = null;

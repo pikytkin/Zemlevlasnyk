@@ -2,6 +2,10 @@
 const fs = require("fs");
 const http = require("http");
 const path = require("path");
+const geojsonvtModule = require("geojson-vt");
+const geojsonvt = geojsonvtModule.default || geojsonvtModule;
+const vtpbf = require("vt-pbf");
+const WebSocket = require("ws");
 
 function loadEnvFile() {
   const envPath = path.join(__dirname, ".env");
@@ -38,6 +42,8 @@ const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "Admin";
 const DATABASE_URL = process.env.DATABASE_URL || "";
 const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || "https://zemlevlasnyk.com";
 const BASE_RIVALS = [];
+const REGULAR_HEX_RADIUS_METERS = 340;
+const TILE_EXTENT = 4096;
 
 const DEFAULT_SETTINGS = {
   economy: {
@@ -92,6 +98,9 @@ const sessions = new Map();
 let previousNewsLeaders = { land: null, assets: null };
 let storage = null;
 let dbPool = null;
+let tileCache = new Map();
+let wsServer = null;
+let marketVersion = 1;
 
 const mimeTypes = {
   ".html": "text/html; charset=utf-8",
@@ -520,8 +529,14 @@ function readMarket() {
   }
 }
 
+function marketResponse(market = readMarket()) {
+  return { ...market, version: marketVersion };
+}
+
 function writeMarket(market) {
   const clean = { land: cleanMarketLand(market.land), resetAt: market.resetAt || null };
+  const previous = storage?.market && typeof storage.market === "object" ? storage.market : { land: {} };
+  const changed = marketSignature(previous) !== marketSignature(clean) || (previous.resetAt || null) !== (clean.resetAt || null);
   if (storage) {
     storage.market = clean;
     persistState("market");
@@ -529,6 +544,173 @@ function writeMarket(market) {
     ensureDataFiles();
     fs.writeFileSync(MARKET_FILE, JSON.stringify(clean, null, 2), "utf8");
   }
+  if (changed) {
+    marketVersion += 1;
+    invalidateLandTiles();
+  }
+}
+
+function invalidateLandTiles() {
+  tileCache = new Map();
+  broadcastMapUpdate();
+}
+
+function broadcastMapUpdate() {
+  if (!wsServer) return;
+  const message = JSON.stringify({ type: "tiles-invalidated", at: new Date().toISOString() });
+  wsServer.clients.forEach((client) => {
+    if (client.readyState === WebSocket.OPEN) client.send(message);
+  });
+}
+
+function parseHexId(id) {
+  const match = String(id || "").match(/^hex-(-?\d+)-(-?\d+)$/);
+  return { q: match ? Number(match[1]) : 0, r: match ? Number(match[2]) : 0 };
+}
+
+function worldMetersToLngLat(x, y) {
+  const radius = 6378137;
+  return [
+    x / radius * 180 / Math.PI,
+    (2 * Math.atan(Math.exp(y / radius)) - Math.PI / 2) * 180 / Math.PI
+  ];
+}
+
+function lngLatToWorldMeters(lng, lat) {
+  const radius = 6378137;
+  const clampedLat = Math.max(-85.05112878, Math.min(85.05112878, Number(lat) || 0));
+  return {
+    x: (Number(lng) || 0) * Math.PI / 180 * radius,
+    y: Math.log(Math.tan(Math.PI / 4 + clampedLat * Math.PI / 360)) * radius
+  };
+}
+
+function worldFromAxial(q, r) {
+  return {
+    x: REGULAR_HEX_RADIUS_METERS * 1.5 * q,
+    y: REGULAR_HEX_RADIUS_METERS * Math.sqrt(3) * (r + q / 2)
+  };
+}
+
+function hexBoundaryLngLat(id) {
+  const { q, r } = parseHexId(id);
+  const center = worldFromAxial(q, r);
+  const points = [];
+  for (let index = 0; index < 6; index += 1) {
+    const angle = Math.PI / 180 * (60 * index);
+    points.push(worldMetersToLngLat(
+      center.x + REGULAR_HEX_RADIUS_METERS * Math.cos(angle),
+      center.y + REGULAR_HEX_RADIUS_METERS * Math.sin(angle)
+    ));
+  }
+  points.push(points[0]);
+  return points;
+}
+
+function axialRangesForBounds(bounds) {
+  const corners = [
+    lngLatToWorldMeters(bounds.west, bounds.south),
+    lngLatToWorldMeters(bounds.west, bounds.north),
+    lngLatToWorldMeters(bounds.east, bounds.south),
+    lngLatToWorldMeters(bounds.east, bounds.north)
+  ];
+  const minX = Math.min(...corners.map((point) => point.x));
+  const maxX = Math.max(...corners.map((point) => point.x));
+  const minY = Math.min(...corners.map((point) => point.y));
+  const maxY = Math.max(...corners.map((point) => point.y));
+  const qMin = Math.floor(minX / (REGULAR_HEX_RADIUS_METERS * 1.5)) - 3;
+  const qMax = Math.ceil(maxX / (REGULAR_HEX_RADIUS_METERS * 1.5)) + 3;
+  const ranges = [];
+  for (let q = qMin; q <= qMax; q += 1) {
+    ranges.push({
+      q,
+      rMin: Math.floor(minY / (REGULAR_HEX_RADIUS_METERS * Math.sqrt(3)) - q / 2) - 3,
+      rMax: Math.ceil(maxY / (REGULAR_HEX_RADIUS_METERS * Math.sqrt(3)) - q / 2) + 3
+    });
+  }
+  return ranges;
+}
+
+function marketSignature(market = readMarket()) {
+  const ids = Object.keys(market.land || {}).sort();
+  let hash = 0;
+  ids.forEach((id) => {
+    const owner = market.land[id] || {};
+    const token = `${id}:${owner.ownerId || ""}:${owner.ownerColor || ""}:${owner.buildingId || ""}:${owner.cellEmoji || ""}`;
+    for (let index = 0; index < token.length; index += 1) hash = ((hash << 5) - hash + token.charCodeAt(index)) | 0;
+  });
+  return `${ids.length}:${hash}`;
+}
+
+function landFeatureCollection(market = readMarket(), bounds = null) {
+  const features = [];
+  const appendFeature = (id, owner) => {
+    const { q, r } = parseHexId(id);
+    const center = worldFromAxial(q, r);
+    const [lng, lat] = worldMetersToLngLat(center.x, center.y);
+    if (bounds && (lng < bounds.west || lng > bounds.east || lat < bounds.south || lat > bounds.north)) return;
+    features.push({
+      type: "Feature",
+      id,
+      properties: {
+        id,
+        ownerId: owner.ownerId || "",
+        ownerName: owner.ownerName || "Гравець",
+        ownerColor: owner.ownerColor || "#35c982",
+        kind: owner.ownerId ? "occupied" : "free",
+        buildingId: owner.buildingId || owner.building || "",
+        cellEmoji: owner.buildingMapEmoji || owner.cellEmoji || ""
+      },
+      geometry: { type: "Polygon", coordinates: [hexBoundaryLngLat(id)] }
+    });
+  };
+  if (bounds) {
+    axialRangesForBounds(bounds).forEach(({ q, rMin, rMax }) => {
+      for (let r = rMin; r <= rMax; r += 1) {
+        const id = `hex-${q}-${r}`;
+        const owner = market.land?.[id];
+        if (owner) appendFeature(id, owner);
+      }
+    });
+    return { type: "FeatureCollection", features };
+  }
+  Object.entries(market.land || {}).forEach(([id, owner]) => appendFeature(id, owner));
+  return { type: "FeatureCollection", features };
+}
+
+function mvtTileBuffer(z, x, y) {
+  const key = `${marketVersion}:${z}:${x}:${y}`;
+  const cached = tileCache.get(key);
+  if (cached) return cached;
+  const tileBounds = xyzTileBounds(z, x, y, 0.06);
+  const collection = landFeatureCollection(readMarket(), tileBounds);
+  const index = geojsonvt(collection, {
+    maxZoom: Math.max(14, z),
+    indexMaxZoom: z,
+    indexMaxPoints: 0,
+    tolerance: 2,
+    extent: TILE_EXTENT,
+    promoteId: "id"
+  });
+  const tile = index.getTile(z, x, y);
+  const buffer = tile ? Buffer.from(vtpbf.fromGeojsonVt({ land: tile }, { version: 2 })) : Buffer.alloc(0);
+  tileCache.set(key, buffer);
+  if (tileCache.size > 800) tileCache.delete(tileCache.keys().next().value);
+  return buffer;
+}
+
+function xyzTileBounds(z, x, y, padDegrees = 0) {
+  const n = 2 ** z;
+  const west = x / n * 360 - 180;
+  const east = (x + 1) / n * 360 - 180;
+  const north = Math.atan(Math.sinh(Math.PI * (1 - 2 * y / n))) * 180 / Math.PI;
+  const south = Math.atan(Math.sinh(Math.PI * (1 - 2 * (y + 1) / n))) * 180 / Math.PI;
+  return {
+    west: west - padDegrees,
+    east: east + padDegrees,
+    south: south - padDegrees,
+    north: north + padDegrees
+  };
 }
 
 function readNewsEvents() {
@@ -1157,7 +1339,7 @@ function serveStatic(req, res) {
 async function handleApi(req, res) {
   try {
     if (req.method === "GET" && req.url === "/api/market") {
-      sendJson(res, 200, refreshRegisteredMarketEntries());
+      sendJson(res, 200, marketResponse(refreshRegisteredMarketEntries()));
       return;
     }
 
@@ -1365,7 +1547,7 @@ async function handleApi(req, res) {
           targetCellId: claimed[0]
         });
       }
-      sendJson(res, 200, { ok: true, claimed, rejected, alreadyOwned, market });
+      sendJson(res, 200, { ok: true, claimed, rejected, alreadyOwned, market: marketResponse(market) });
       return;
     }
 
@@ -1411,7 +1593,7 @@ async function handleApi(req, res) {
           targetCellId
         });
       }
-      sendJson(res, 200, { ok: true, sold, soldIds, market });
+      sendJson(res, 200, { ok: true, sold, soldIds, market: marketResponse(market) });
       return;
     }
 
@@ -1431,7 +1613,7 @@ async function handleApi(req, res) {
 
       if (session.isGuest) {
         mergeFarmIntoMarket(farm, session.userId, farm.companyName || "Гостьова розвідка");
-        sendJson(res, 200, { ok: true, farm, market: readMarket() });
+        sendJson(res, 200, { ok: true, farm, market: marketResponse() });
         return;
       }
 
@@ -1446,7 +1628,7 @@ async function handleApi(req, res) {
       user.updatedAt = new Date().toISOString();
       writeUsers(users);
       mergeFarmIntoMarket(farm, user.id, userCompanyName(user));
-      sendJson(res, 200, { ok: true, farm, market: readMarket() });
+      sendJson(res, 200, { ok: true, farm, market: marketResponse() });
       return;
     }
 
@@ -1942,22 +2124,50 @@ async function handleApi(req, res) {
   }
 }
 
+function serveLandTile(req, res) {
+  const match = req.url.match(/^\/tiles\/land\/(\d+)\/(\d+)\/(\d+)\.mvt(?:\?.*)?$/);
+  if (!match) return false;
+  const z = Number(match[1]);
+  const x = Number(match[2]);
+  const y = Number(match[3]);
+  if (!Number.isInteger(z) || !Number.isInteger(x) || !Number.isInteger(y) || z < 0 || z > 16) {
+    res.writeHead(400, { "content-type": "text/plain; charset=utf-8" });
+    res.end("Bad tile");
+    return true;
+  }
+  const buffer = mvtTileBuffer(z, x, y);
+  res.writeHead(200, {
+    "content-type": "application/x-protobuf",
+    "content-encoding": "identity",
+    "cache-control": "public, max-age=20"
+  });
+  res.end(buffer);
+  return true;
+}
+
 async function startServer() {
   ensureDataFiles();
   await initStorage();
   ensureAdminUser();
 
-  http.createServer((req, res) => {
+  const server = http.createServer((req, res) => {
+    if (serveLandTile(req, res)) return;
     if (req.url.startsWith("/api/")) {
       handleApi(req, res);
       return;
     }
 
     serveStatic(req, res);
-  }).listen(PORT, HOST, () => {
+  });
+  wsServer = new WebSocket.Server({ server, path: "/ws" });
+  wsServer.on("connection", (socket) => {
+    socket.send(JSON.stringify({ type: "connected", at: new Date().toISOString() }));
+  });
+  server.listen(PORT, HOST, () => {
     console.log(`Землевласник працює за адресою http://localhost:${PORT}`);
     console.log(`Доступ з локальної мережі увімкнено на порту ${PORT}.`);
     console.log(DATABASE_URL ? "Сховище гри: PostgreSQL." : "Сховище гри: локальні файли data.");
+    console.log("Карта: MVT тайли + WebSocket інвалідація.");
   });
 }
 
