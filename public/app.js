@@ -847,8 +847,8 @@ async function refreshMarket() {
     }
     syncOwnedMarketLand();
     reconcileLocalLandWithMarket();
-    if (map) {
-      if (marketChanged && !isMapMoving) scheduleGridUpdate();
+    if (map && marketChanged) {
+      if (!isMapMoving) scheduleGridUpdate();
       render();
     }
   } catch {
@@ -1698,7 +1698,6 @@ function refreshVisibleCellLayers(cellIds = null) {
   }
 
   updateGridGpuLayer(visibleCells);
-  scheduleGridUpdate();
   renderSelectedCell();
 }
 

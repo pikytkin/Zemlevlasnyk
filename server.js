@@ -1127,9 +1127,14 @@ function sendJson(res, status, payload, headers = {}) {
   res.end(JSON.stringify(payload));
 }
 
-function conditionalVersionPayload(req, payload, version) {
+function requestVersion(req) {
   const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
   const clientVersion = Number(url.searchParams.get("version"));
+  return Number.isFinite(clientVersion) ? clientVersion : null;
+}
+
+function conditionalVersionPayload(req, payload, version) {
+  const clientVersion = requestVersion(req);
   if (Number.isFinite(clientVersion) && clientVersion === version) {
     return { ok: true, notModified: true, version };
   }
@@ -1190,18 +1195,25 @@ function serveStatic(req, res) {
 async function handleApi(req, res) {
   try {
     if (req.method === "GET" && req.url.startsWith("/api/market")) {
-      const market = refreshRegisteredMarketEntries();
+      if (requestVersion(req) === marketVersion) {
+        sendJson(res, 200, { ok: true, notModified: true, version: marketVersion });
+        return;
+      }
+      const market = readMarket();
       sendJson(res, 200, conditionalVersionPayload(req, marketResponse(market), marketVersion));
       return;
     }
 
     if (req.method === "GET" && req.url.startsWith("/api/leaderboard")) {
+      if (requestVersion(req) === leaderboardVersion) {
+        sendJson(res, 200, { ok: true, notModified: true, version: leaderboardVersion });
+        return;
+      }
       sendJson(res, 200, conditionalVersionPayload(req, { rows: leaderboardRows(), version: leaderboardVersion }, leaderboardVersion));
       return;
     }
 
     if (req.method === "GET" && req.url === "/api/news") {
-      refreshRegisteredMarketEntries();
       sendJson(res, 200, { rows: newsRows() });
       return;
     }
