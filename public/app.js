@@ -153,13 +153,11 @@ let state = defaultGameState();
 let selectedCellId = null;
 let saveTimer = null;
 let map = null;
-let mapTileLayer = null;
 let mapTilesCanvas = null;
 let gridCanvas = null;
 let gridGl = null;
 let gridProgram = null;
 let gridBuffer = null;
-let osmTileElements = new Map();
 let mapPointerState = null;
 let ukrainePolygons = fallbackUkrainePolygon;
 let ukraineCellCache = new Map();
@@ -493,10 +491,30 @@ async function saveState() {
 async function initMap() {
   if (map) return;
 
-  map = createMathMap(mapBoard, { center: [49.02, 31.25], zoom: 6, minZoom: 4, maxZoom: 13 });
+  map = L.map(mapBoard, {
+    zoomControl: true,
+    minZoom: 4,
+    maxZoom: 13,
+    zoomSnap: 1,
+    zoomDelta: 1,
+    boxZoom: false,
+    wheelDebounceTime: 75,
+    wheelPxPerZoomLevel: 165,
+    maxBounds: [[MAP_BOUNDS.south, MAP_BOUNDS.west], [MAP_BOUNDS.north, MAP_BOUNDS.east]],
+    maxBoundsViscosity: 0.9
+  }).setView([49.02, 31.25], 6);
   globalThis.agroMap = map;
   document.agroMap = map;
   addMapQuickActionsControl();
+
+  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    maxZoom: 19,
+    updateWhenIdle: true,
+    updateWhenZooming: false,
+    updateInterval: 180,
+    keepBuffer: 3,
+    attribution: "&copy; OpenStreetMap"
+  }).addTo(map);
 
   await loadUkraineBoundary();
   await loadSettlements();
@@ -504,7 +522,6 @@ async function initMap() {
   await refreshLeaderboard();
   await refreshNews();
 
-  initOsmTileLayer();
   initMapTilesCanvas();
   initGridGpuLayer();
   drawMapBaseLayer();
@@ -513,7 +530,6 @@ async function initMap() {
     isMapMoving = true;
   });
   map.on("move", () => {
-    updateOsmTileLayer();
     requestMapBaseRender();
     requestGridPanRender();
   });
@@ -521,14 +537,12 @@ async function initMap() {
     isMapMoving = false;
     setGridCanvasVisible(true);
     updateZoomBadge();
-    updateOsmTileLayer();
     requestMapBaseRender();
     scheduleGridUpdate();
   };
   map.on("zoomend", handleSettledMapChange);
   map.on("moveend", handleSettledMapChange);
   map.on("resize", () => {
-    updateOsmTileLayer();
     syncMapTilesCanvas();
     syncGridGpuCanvas();
     requestMapBaseRender();
@@ -538,7 +552,7 @@ async function initMap() {
   setupShiftSelection();
   setTimeout(() => {
     map.invalidateSize();
-    map.fitBounds(mathBounds(MAP_BOUNDS), { padding: [18, 18] });
+    map.fitBounds([[MAP_BOUNDS.south, MAP_BOUNDS.west], [MAP_BOUNDS.north, MAP_BOUNDS.east]], { padding: [18, 18] });
     updateZoomBadge();
     drawMapBaseLayer();
     updateGrid();
@@ -936,19 +950,14 @@ function syncMapTilesCanvas() {
   if (!mapTilesCanvas || !mapBoard) return;
   const ratio = Math.min(1.5, window.devicePixelRatio || 1);
   const rect = mapBoard.getBoundingClientRect();
-  mapTilesCanvas.width = Math.max(1, Math.round(rect.width * ratio));
-  mapTilesCanvas.height = Math.max(1, Math.round(rect.height * ratio));
+  const width = Math.max(1, Math.round(rect.width * ratio));
+  const height = Math.max(1, Math.round(rect.height * ratio));
+  if (mapTilesCanvas.width !== width || mapTilesCanvas.height !== height) {
+    mapTilesCanvas.width = width;
+    mapTilesCanvas.height = height;
+  }
   mapTilesCanvas.style.width = rect.width + "px";
   mapTilesCanvas.style.height = rect.height + "px";
-}
-
-function initOsmTileLayer() {
-  if (mapTileLayer || !mapBoard) return;
-  mapTileLayer = document.createElement("div");
-  mapTileLayer.className = "osm-tile-layer";
-  mapTileLayer.setAttribute("aria-hidden", "true");
-  mapBoard.prepend(mapTileLayer);
-  updateOsmTileLayer();
 }
 
 function drawStaticUkrainePreview(container, polygons) {
@@ -982,50 +991,6 @@ function drawMapBaseLayer() {
 function requestMapBaseRender() {
   if (mapBaseRenderFrame) return;
   mapBaseRenderFrame = requestAnimationFrame(drawMapBaseLayer);
-}
-
-function updateOsmTileLayer() {
-  if (!mapTileLayer || !map) return;
-  const rect = mapBoard.getBoundingClientRect();
-  const width = rect.width;
-  const height = rect.height;
-  const zoom = map.getZoom();
-  const center = map.getCenter();
-  const centerPixel = lngLatToGlobalPixel(center.lat, center.lng, zoom);
-  const topLeft = { x: centerPixel.x - width / 2, y: centerPixel.y - height / 2 };
-  const worldTiles = 2 ** zoom;
-  const minTileX = Math.floor(topLeft.x / TILE_SIZE);
-  const maxTileX = Math.floor((topLeft.x + width) / TILE_SIZE);
-  const minTileY = Math.max(0, Math.floor(topLeft.y / TILE_SIZE));
-  const maxTileY = Math.min(worldTiles - 1, Math.floor((topLeft.y + height) / TILE_SIZE));
-
-  const visibleKeys = new Set();
-  for (let tileX = minTileX - 1; tileX <= maxTileX + 1; tileX += 1) {
-    for (let tileY = Math.max(0, minTileY - 1); tileY <= Math.min(worldTiles - 1, maxTileY + 1); tileY += 1) {
-      const wrappedX = ((tileX % worldTiles) + worldTiles) % worldTiles;
-      const key = `${zoom}/${wrappedX}/${tileY}/${tileX}`;
-      visibleKeys.add(key);
-      let image = osmTileElements.get(key);
-      if (!image) {
-        image = document.createElement("img");
-        image.className = "osm-tile";
-        image.alt = "";
-        image.decoding = "async";
-        image.loading = "eager";
-        image.draggable = false;
-        image.src = `${OSM_TILE_URL}/${zoom}/${wrappedX}/${tileY}.png`;
-        osmTileElements.set(key, image);
-        mapTileLayer.appendChild(image);
-      }
-      image.style.transform = `translate3d(${Math.round(tileX * TILE_SIZE - topLeft.x)}px, ${Math.round(tileY * TILE_SIZE - topLeft.y)}px, 0)`;
-    }
-  }
-
-  Array.from(osmTileElements.entries()).forEach(([key, image]) => {
-    if (visibleKeys.has(key)) return;
-    image.remove();
-    osmTileElements.delete(key);
-  });
 }
 
 function drawUkrainePolygons(context, polygons, width, height, bounds, staticPreview) {
@@ -1218,13 +1183,13 @@ function appendCellVertices(strokeVertices, fillVertices, cell, width, height) {
   if (!boundary || !boundary.length) return;
   const centerPoint = map.latLngToContainerPoint([cell.lat, cell.lng]);
   const center = screenToClip(centerPoint.x, centerPoint.y, width, height);
-  const fill = gridCellColor(cell.id);
-  const stroke = gridCellStrokeColor(cell.id);
+  const fill = cell.overviewOwner ? overviewCellColor(cell) : gridCellColor(cell.id);
+  const stroke = cell.overviewOwner ? overviewCellStrokeColor(cell) : gridCellStrokeColor(cell.id);
   const selected = selectedCellIds.has(cell.id) || cell.id === selectedCellId;
   const edgeScale = 0.985;
   const points = boundary.map(([lat, lng]) => map.latLngToContainerPoint([lat, lng]));
   for (let index = 0; index < points.length; index += 1) {
-    appendLineQuad(strokeVertices, points[index], points[(index + 1) % points.length], selected ? 2.2 : 0.65, stroke, width, height);
+    appendLineQuad(strokeVertices, points[index], points[(index + 1) % points.length], cell.overviewOwner ? 1.3 : selected ? 2.2 : 0.65, stroke, width, height);
   }
   if (fill[3] <= 0) return;
   for (let index = 0; index < points.length; index += 1) {
@@ -1291,8 +1256,8 @@ async function updateGrid() {
   detailedMapMarkerCount = 0;
   clearGridGpuLayer();
   if (isOverviewZoom()) {
-    visibleCells = gridCellsInView(map.getBounds().pad(0.02), gridCellLimitForZoom());
-    renderGridGpuLayer();
+    visibleCells = [];
+    renderOverviewGridLayer();
     updateSettlementLabelVisibility();
     renderSelectedCell();
     return;
@@ -1373,21 +1338,81 @@ function overviewClusterKey(cell, precision = 0.45) {
   return Math.round(cell.lat / precision) + ":" + Math.round(cell.lng / precision);
 }
 
+function overviewCellColor(cell) {
+  if (cell.overviewOwner === "selected") return [1, 0.69, 0, 0.38];
+  if (cell.overviewOwner === "player") return colorToFloats(cell.overviewColor || state.color || "#35c982", 0.28);
+  return colorToFloats(cell.overviewColor || "#ef7669", 0.24);
+}
+
+function overviewCellStrokeColor(cell) {
+  if (cell.overviewOwner === "selected") return [1, 0.69, 0, 0.9];
+  if (cell.overviewOwner === "player") return colorToFloats(cell.overviewColor || state.color || "#35c982", 0.72);
+  return colorToFloats(cell.overviewColor || "#ef7669", 0.62);
+}
+
 function renderOverviewGridLayer() {
+  const cells = overviewTerritoryCells();
+  if (!cells.length) return;
+  visibleCells = cells;
   renderGridGpuLayer();
 }
 
-function addAggregateCells(ids, kind) {
-  return;
+function overviewTerritoryCells() {
+  const zoom = map.getZoom();
+  const step = overviewGridStepForZoom(zoom);
+  const bounds = map.getBounds().pad(0.16);
+  const groups = new Map();
+  const addCell = (id, ownerKind, ownerColor) => {
+    if (!isRegularHexId(id)) return;
+    const { q, r } = parseHexId(id);
+    const center = cellCenterFromGrid(q, r);
+    if (!pointInBounds(center.lat, center.lng, bounds)) return;
+    const parentQ = Math.floor(q / step) * step;
+    const parentR = Math.floor(r / step) * step;
+    const key = `${ownerKind}:${ownerColor || ""}:${parentQ}:${parentR}`;
+    if (!groups.has(key)) {
+      groups.set(key, {
+        id: `territory-${ownerKind}-${parentQ}-${parentR}`,
+        code: `territory-${ownerKind}-${parentQ}-${parentR}`,
+        q: parentQ,
+        r: parentR,
+        lat: 0,
+        lng: 0,
+        count: 0,
+        overviewOwner: ownerKind,
+        overviewColor: ownerColor || ""
+      });
+    }
+    const group = groups.get(key);
+    group.lat += center.lat;
+    group.lng += center.lng;
+    group.count += 1;
+  };
+
+  Object.keys(state.land || {}).forEach((id) => addCell(id, "player", state.color || "#35c982"));
+  Object.entries(marketState?.land || {}).forEach(([id, ownership]) => {
+    if (ownership?.ownerId === player?.id) return;
+    addCell(id, "rival", ownership?.ownerColor || "#ef7669");
+  });
+  selectedCellIds.forEach((id) => addCell(id, "selected", "#ffb000"));
+  if (selectedCellId) addCell(selectedCellId, "selected", "#ffb000");
+
+  return [...groups.values()]
+    .sort((a, b) => b.count - a.count)
+    .slice(0, isLowPowerDevice() ? 900 : 1800)
+    .map((group) => ({
+      ...group,
+      lat: group.lat / group.count,
+      lng: group.lng / group.count,
+      boundary: rectBoundaryLatLngBlock(group.q, group.r, step)
+    }));
 }
 
-function aggregateCellStyle(kind, count = 1) {
-  const styles = {
-    rival: { color: "#7a382f", fillColor: "#ef7669", fillOpacity: 0.22, weight: 1 },
-    owned: { color: state.color || "#35c982", fillColor: state.color || "#35c982", fillOpacity: 0.36, weight: 1.15 },
-    selected: { color: "#ffb000", fillColor: "#ffdf43", fillOpacity: 0.44, weight: 1.7 }
-  };
-  return { pane: "gridMarkerPane", renderer: gridMarkerRenderer, className: "grid-aggregate " + kind, ...styles[kind] };
+function overviewGridStepForZoom(zoom) {
+  if (zoom <= 5) return 96;
+  if (zoom <= 7) return 48;
+  if (zoom <= 9) return 24;
+  return 12;
 }
 
 function scheduleGridUpdate() {
@@ -1649,6 +1674,14 @@ function rectBoundaryLatLng(q, r) {
   const east = west + RECT_CELL_WIDTH_DEGREES;
   const north = MAP_BOUNDS.north - r * RECT_CELL_HEIGHT_DEGREES;
   const south = north - RECT_CELL_HEIGHT_DEGREES;
+  return [[north, west], [north, east], [south, east], [south, west]];
+}
+
+function rectBoundaryLatLngBlock(q, r, step) {
+  const west = MAP_BOUNDS.west + q * RECT_CELL_WIDTH_DEGREES;
+  const east = MAP_BOUNDS.west + (q + step) * RECT_CELL_WIDTH_DEGREES;
+  const north = MAP_BOUNDS.north - r * RECT_CELL_HEIGHT_DEGREES;
+  const south = MAP_BOUNDS.north - (r + step) * RECT_CELL_HEIGHT_DEGREES;
   return [[north, west], [north, east], [south, east], [south, west]];
 }
 
