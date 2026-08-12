@@ -993,7 +993,10 @@ function scaledClipPoint(point, center, scale, width, height) {
 
 function gridCellColor(id) {
   const selected = selectedCellIds.has(id) || id === selectedCellId;
-  return selected ? [1, 0.69, 0, 0] : [1, 1, 1, 0];
+  const owner = getOwner(id);
+  if (owner === "player") return colorToFloats(state.color, selected ? 0.78 : 0.52);
+  if (owner === "rival") return colorToFloats(marketState?.land?.[id]?.ownerColor || "#ef7669", selected ? 0.72 : 0.42);
+  return selected ? [1, 0.69, 0, 0.42] : [1, 1, 1, 0];
 }
 
 function gridCellStrokeColor(id) {
@@ -1169,9 +1172,9 @@ function addAggregateCells(ids, kind) {
 
 function aggregateCellStyle(kind, count = 1) {
   const styles = {
-    rival: { color: "#7a382f", fillColor: "#ef7669", fillOpacity: 0, weight: 1.8 },
-    owned: { color: state.color || "#35c982", fillColor: state.color || "#35c982", fillOpacity: 0, weight: 2 },
-    selected: { color: "#ffb000", fillColor: "#ffdf43", fillOpacity: 0, weight: 2.6 }
+    rival: { color: "#7a382f", fillColor: "#ef7669", fillOpacity: 0.22, weight: 1.8 },
+    owned: { color: state.color || "#35c982", fillColor: state.color || "#35c982", fillOpacity: 0.36, weight: 2 },
+    selected: { color: "#ffb000", fillColor: "#ffdf43", fillOpacity: 0.44, weight: 2.6 }
   };
   return { pane: "gridMarkerPane", renderer: gridMarkerRenderer, className: "grid-aggregate " + kind, ...styles[kind] };
 }
