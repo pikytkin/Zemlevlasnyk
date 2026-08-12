@@ -171,8 +171,10 @@ let pendingSettingsImages = 0;
 let marketTimer = null;
 let marketCellCount = 0;
 let marketSignature = "";
+let marketVersion = 0;
 let leaderboardRows = [];
 let leaderboardTimer = null;
+let leaderboardVersion = 0;
 let activeChatUserId = null;
 let chats = [];
 let unreadMessages = 0;
@@ -826,15 +828,16 @@ function updateSettlementMapSource() {
 
 async function refreshMarket() {
   try {
-    const nextMarket = await requestJson("/api/market");
+    const nextMarket = await requestJson(`/api/market?version=${encodeURIComponent(marketVersion || 0)}`);
+    if (nextMarket?.notModified) return;
     const nextMarketCellCount = Object.keys(nextMarket?.land || {}).length;
     const nextMarketSignature = nextMarket?.version ? `v:${nextMarket.version}` : marketRenderSignature(nextMarket);
     const resetChanged = nextMarket?.resetAt && state.lastAdminResetAt !== nextMarket.resetAt;
     const marketChanged = nextMarketCellCount !== marketCellCount || nextMarketSignature !== marketSignature || resetChanged;
     marketState = nextMarket;
+    marketVersion = Number(nextMarket?.version) || marketVersion;
     marketCellCount = nextMarketCellCount;
     marketSignature = nextMarketSignature;
-    if (marketChanged && !isMapMoving) scheduleGridUpdate();
     if (resetChanged) {
       state.land = {};
       state.lastAdminResetAt = nextMarket.resetAt;
@@ -855,7 +858,9 @@ async function refreshMarket() {
 
 async function refreshLeaderboard() {
   try {
-    const payload = await requestJson("/api/leaderboard");
+    const payload = await requestJson(`/api/leaderboard?version=${encodeURIComponent(leaderboardVersion || 0)}`);
+    if (payload?.notModified) return;
+    leaderboardVersion = Number(payload?.version) || leaderboardVersion;
     leaderboardRows = Array.isArray(payload.rows) ? payload.rows : [];
     renderLeaderboard();
   } catch {
@@ -3728,7 +3733,7 @@ async function openAdminPanel() {
     const payload = await requestJson("/api/admin");
     applyGameSettings(payload.settings || gameSettings);
     renderAdminSettings(gameSettings);
-    renderAdminSummary(payload.summary || {}, payload.market || { land: {} }, payload.users || []);
+    renderAdminSummary(payload.summary || {}, payload.users || []);
     renderAdminUsers(payload.users || []);
   } catch (error) {
     adminSummary.innerHTML = "";
@@ -3999,8 +4004,8 @@ function normalizeAssetCard(item) {
   };
 }
 
-function renderAdminSummary(summary, market, users = []) {
-  const occupiedLand = Number.isFinite(summary.occupiedLand) ? summary.occupiedLand : Object.keys(market.land || {}).length;
+function renderAdminSummary(summary, users = []) {
+  const occupiedLand = Number.isFinite(summary.occupiedLand) ? summary.occupiedLand : marketCellCount;
   const totalLand = totalPlayableLandCount();
   const freeLand = Number.isFinite(totalLand) ? Math.max(0, totalLand - occupiedLand) : null;
   renderAdminStats(summary, users);
@@ -4143,7 +4148,7 @@ async function clearEvents(userId = "") {
       method: "POST",
       body: JSON.stringify(userId ? { id: userId } : {})
     });
-    renderAdminSummary(payload.summary || {}, payload.market || { land: {} }, payload.users || []);
+    renderAdminSummary(payload.summary || {}, payload.users || []);
     renderAdminUsers(payload.users || []);
     if (!userId || userId === player?.id) state = normalizeState(payload.farm || { ...state, events: [] });
     render();
@@ -4160,10 +4165,9 @@ async function deleteUser(userId) {
       method: "POST",
       body: JSON.stringify({ id: userId })
     });
-    renderAdminSummary(payload.summary || {}, payload.market || { land: {} }, payload.users || []);
+    renderAdminSummary(payload.summary || {}, payload.users || []);
     renderAdminUsers(payload.users || []);
-    marketState = payload.market || marketState;
-    refreshCanvasMapLayers();
+    await refreshMarket();
     scheduleGridUpdate();
     refreshLeaderboard();
     showGameMessage("Гравця видалено.");
@@ -4243,12 +4247,12 @@ async function saveAdminUser(event) {
   const restoreButton = setSavingButton(event.submitter, true);
   try {
     const payload = await requestJson("/api/admin/user", { method: "POST", body: JSON.stringify(body) });
-    renderAdminSummary(payload.summary || {}, payload.market || { land: {} }, payload.users || []);
+    renderAdminSummary(payload.summary || {}, payload.users || []);
     renderAdminUsers(payload.users || []);
-    marketState = payload.market || marketState;
     if (body.id === player?.id) {
       state = normalizeState(payload.farm || state);
     }
+    if (body.resetLand) await refreshMarket();
     scheduleGridUpdate();
     refreshLeaderboard();
     showGameMessage("Учасника оновлено.");
@@ -4273,7 +4277,7 @@ async function saveAdminSettings(event) {
     });
     applyGameSettings(payload.settings);
     renderAdminSettings(gameSettings);
-    renderAdminSummary(payload.summary || {}, payload.market || { land: {} }, payload.users || []);
+    renderAdminSummary(payload.summary || {}, payload.users || []);
     renderAdminUsers(payload.users || []);
     scheduleGridUpdate();
     render();
@@ -4451,9 +4455,12 @@ async function resetAllLand() {
   if (!confirm("Обнулити всі землі всіх учасників?")) return;
   try {
     const payload = await requestJson("/api/admin/reset-land", { method: "POST", body: "{}" });
-    renderAdminSummary(payload.summary || {}, payload.market || { land: {} }, payload.users || []);
+    renderAdminSummary(payload.summary || {}, payload.users || []);
     renderAdminUsers(payload.users || []);
-    marketState = payload.market || { land: {} };
+    marketState = { land: {}, resetAt: payload.farm?.lastAdminResetAt || null };
+    marketVersion = 0;
+    marketCellCount = 0;
+    marketSignature = "";
     refreshCanvasMapLayers();
     state = normalizeState(payload.farm || { ...state, land: {} });
     selectedCellIds = new Set();
@@ -4472,7 +4479,7 @@ async function resetAllMoney() {
   if (!confirm("Обнулити гроші всіх учасників до стартового балансу?")) return;
   try {
     const payload = await requestJson("/api/admin/reset-money", { method: "POST", body: "{}" });
-    renderAdminSummary(payload.summary || {}, payload.market || { land: {} }, payload.users || []);
+    renderAdminSummary(payload.summary || {}, payload.users || []);
     renderAdminUsers(payload.users || []);
     if (payload.farm) state = normalizeState(payload.farm);
     refreshLeaderboard();
@@ -4487,7 +4494,7 @@ async function resetAllMachinery() {
   if (!confirm("Обнулити техніку всіх учасників?")) return;
   try {
     const payload = await requestJson("/api/admin/reset-machinery", { method: "POST", body: "{}" });
-    renderAdminSummary(payload.summary || {}, payload.market || { land: {} }, payload.users || []);
+    renderAdminSummary(payload.summary || {}, payload.users || []);
     renderAdminUsers(payload.users || []);
     if (payload.farm) state = normalizeState(payload.farm);
     refreshLeaderboard();
@@ -4502,9 +4509,12 @@ async function resetAllAssets() {
   if (!confirm("Обнулити всю власність і активи всіх учасників? Гроші залишаться.")) return;
   try {
     const payload = await requestJson("/api/admin/reset-assets", { method: "POST", body: "{}" });
-    renderAdminSummary(payload.summary || {}, payload.market || { land: {} }, payload.users || []);
+    renderAdminSummary(payload.summary || {}, payload.users || []);
     renderAdminUsers(payload.users || []);
-    marketState = payload.market || { land: {} };
+    marketState = { land: {}, resetAt: payload.farm?.lastAdminResetAt || null };
+    marketVersion = 0;
+    marketCellCount = 0;
+    marketSignature = "";
     refreshCanvasMapLayers();
     if (payload.farm) state = normalizeState(payload.farm);
     selectedCellIds = new Set();

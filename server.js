@@ -94,6 +94,7 @@ let previousNewsLeaders = { land: null, assets: null };
 let storage = null;
 let dbPool = null;
 let marketVersion = 1;
+let leaderboardVersion = 1;
 
 const mimeTypes = {
   ".html": "text/html; charset=utf-8",
@@ -486,6 +487,7 @@ function writeUsers(users) {
     const content = users.map((user) => JSON.stringify(user)).join("\n");
     fs.writeFileSync(USERS_FILE, content ? `${content}\n` : "", "utf8");
   }
+  leaderboardVersion += 1;
 }
 
 function ensureAdminUser() {
@@ -1055,7 +1057,6 @@ function adminPayload(users = readUsers(), market = readMarket()) {
     .map((session) => session.userId));
   return {
     users: users.map(publicUserRow),
-    market,
     summary: {
       users: users.length,
       admins: users.filter((user) => user.isAdmin).length,
@@ -1126,6 +1127,15 @@ function sendJson(res, status, payload, headers = {}) {
   res.end(JSON.stringify(payload));
 }
 
+function conditionalVersionPayload(req, payload, version) {
+  const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
+  const clientVersion = Number(url.searchParams.get("version"));
+  if (Number.isFinite(clientVersion) && clientVersion === version) {
+    return { ok: true, notModified: true, version };
+  }
+  return payload;
+}
+
 function readBody(req) {
   return new Promise((resolve, reject) => {
     let body = "";
@@ -1179,13 +1189,14 @@ function serveStatic(req, res) {
 
 async function handleApi(req, res) {
   try {
-    if (req.method === "GET" && req.url === "/api/market") {
-      sendJson(res, 200, marketResponse(refreshRegisteredMarketEntries()));
+    if (req.method === "GET" && req.url.startsWith("/api/market")) {
+      const market = refreshRegisteredMarketEntries();
+      sendJson(res, 200, conditionalVersionPayload(req, marketResponse(market), marketVersion));
       return;
     }
 
-    if (req.method === "GET" && req.url === "/api/leaderboard") {
-      sendJson(res, 200, { rows: leaderboardRows() });
+    if (req.method === "GET" && req.url.startsWith("/api/leaderboard")) {
+      sendJson(res, 200, conditionalVersionPayload(req, { rows: leaderboardRows(), version: leaderboardVersion }, leaderboardVersion));
       return;
     }
 
