@@ -153,12 +153,13 @@ let state = defaultGameState();
 let selectedCellId = null;
 let saveTimer = null;
 let map = null;
+let mapTileLayer = null;
 let mapTilesCanvas = null;
 let gridCanvas = null;
 let gridGl = null;
 let gridProgram = null;
 let gridBuffer = null;
-let osmTileCache = new Map();
+let osmTileElements = new Map();
 let mapPointerState = null;
 let ukrainePolygons = fallbackUkrainePolygon;
 let ukraineCellCache = new Map();
@@ -197,6 +198,7 @@ let gridUpdateTimer = null;
 let gridRenderJob = 0;
 let gridRenderFrame = null;
 let gridPanFrame = null;
+let mapBaseRenderFrame = null;
 let isMapMoving = false;
 let gridTooDenseNotifiedAt = 0;
 let gridSkippedForDensity = false;
@@ -502,6 +504,7 @@ async function initMap() {
   await refreshLeaderboard();
   await refreshNews();
 
+  initOsmTileLayer();
   initMapTilesCanvas();
   initGridGpuLayer();
   drawMapBaseLayer();
@@ -510,22 +513,25 @@ async function initMap() {
     isMapMoving = true;
   });
   map.on("move", () => {
-    drawMapBaseLayer();
+    updateOsmTileLayer();
+    requestMapBaseRender();
     requestGridPanRender();
   });
   const handleSettledMapChange = () => {
     isMapMoving = false;
     setGridCanvasVisible(true);
     updateZoomBadge();
-    drawMapBaseLayer();
+    updateOsmTileLayer();
+    requestMapBaseRender();
     scheduleGridUpdate();
   };
   map.on("zoomend", handleSettledMapChange);
   map.on("moveend", handleSettledMapChange);
   map.on("resize", () => {
+    updateOsmTileLayer();
     syncMapTilesCanvas();
     syncGridGpuCanvas();
-    drawMapBaseLayer();
+    requestMapBaseRender();
     scheduleGridUpdate();
   });
   map.on("click", selectCellAtMapPoint);
@@ -936,6 +942,15 @@ function syncMapTilesCanvas() {
   mapTilesCanvas.style.height = rect.height + "px";
 }
 
+function initOsmTileLayer() {
+  if (mapTileLayer || !mapBoard) return;
+  mapTileLayer = document.createElement("div");
+  mapTileLayer.className = "osm-tile-layer";
+  mapTileLayer.setAttribute("aria-hidden", "true");
+  mapBoard.prepend(mapTileLayer);
+  updateOsmTileLayer();
+}
+
 function drawStaticUkrainePreview(container, polygons) {
   container.innerHTML = "";
   const canvas = document.createElement("canvas");
@@ -951,6 +966,7 @@ function drawStaticUkrainePreview(container, polygons) {
 
 function drawMapBaseLayer() {
   if (!mapTilesCanvas || !map) return;
+  mapBaseRenderFrame = null;
   syncMapTilesCanvas();
   const context = mapTilesCanvas.getContext("2d");
   const rect = mapBoard.getBoundingClientRect();
@@ -959,14 +975,20 @@ function drawMapBaseLayer() {
   const height = rect.height;
   context.setTransform(ratio, 0, 0, ratio, 0, 0);
   context.clearRect(0, 0, width, height);
-  context.fillStyle = "#f4f2df";
-  context.fillRect(0, 0, width, height);
-  drawOsmTiles(context, width, height);
   drawUkrainePolygons(context, ukrainePolygons, width, height, map.getBounds(), false);
   drawSettlementLabelsOnCanvas(context, width, height);
 }
 
-function drawOsmTiles(context, width, height) {
+function requestMapBaseRender() {
+  if (mapBaseRenderFrame) return;
+  mapBaseRenderFrame = requestAnimationFrame(drawMapBaseLayer);
+}
+
+function updateOsmTileLayer() {
+  if (!mapTileLayer || !map) return;
+  const rect = mapBoard.getBoundingClientRect();
+  const width = rect.width;
+  const height = rect.height;
   const zoom = map.getZoom();
   const center = map.getCenter();
   const centerPixel = lngLatToGlobalPixel(center.lat, center.lng, zoom);
@@ -977,55 +999,33 @@ function drawOsmTiles(context, width, height) {
   const minTileY = Math.max(0, Math.floor(topLeft.y / TILE_SIZE));
   const maxTileY = Math.min(worldTiles - 1, Math.floor((topLeft.y + height) / TILE_SIZE));
 
-  for (let tileX = minTileX; tileX <= maxTileX; tileX += 1) {
-    for (let tileY = minTileY; tileY <= maxTileY; tileY += 1) {
+  const visibleKeys = new Set();
+  for (let tileX = minTileX - 1; tileX <= maxTileX + 1; tileX += 1) {
+    for (let tileY = Math.max(0, minTileY - 1); tileY <= Math.min(worldTiles - 1, maxTileY + 1); tileY += 1) {
       const wrappedX = ((tileX % worldTiles) + worldTiles) % worldTiles;
-      const tile = getOsmTile(zoom, wrappedX, tileY);
-      const x = Math.round(tileX * TILE_SIZE - topLeft.x);
-      const y = Math.round(tileY * TILE_SIZE - topLeft.y);
-      if (tile.loaded) {
-        context.drawImage(tile.image, x, y, TILE_SIZE + 1, TILE_SIZE + 1);
-      } else {
-        context.fillStyle = tile.failed ? "#e8ead8" : "#f2f0de";
-        context.fillRect(x, y, TILE_SIZE + 1, TILE_SIZE + 1);
+      const key = `${zoom}/${wrappedX}/${tileY}/${tileX}`;
+      visibleKeys.add(key);
+      let image = osmTileElements.get(key);
+      if (!image) {
+        image = document.createElement("img");
+        image.className = "osm-tile";
+        image.alt = "";
+        image.decoding = "async";
+        image.loading = "eager";
+        image.draggable = false;
+        image.src = `${OSM_TILE_URL}/${zoom}/${wrappedX}/${tileY}.png`;
+        osmTileElements.set(key, image);
+        mapTileLayer.appendChild(image);
       }
+      image.style.transform = `translate3d(${Math.round(tileX * TILE_SIZE - topLeft.x)}px, ${Math.round(tileY * TILE_SIZE - topLeft.y)}px, 0)`;
     }
   }
 
-  context.save();
-  context.fillStyle = "rgba(255, 255, 255, 0.82)";
-  context.fillRect(width - 128, height - 22, 124, 18);
-  context.fillStyle = "rgba(20, 31, 24, 0.7)";
-  context.font = "12px system-ui, sans-serif";
-  context.fillText("© OpenStreetMap", width - 120, height - 8);
-  context.restore();
-}
-
-function getOsmTile(zoom, x, y) {
-  const key = `${zoom}/${x}/${y}`;
-  const cached = osmTileCache.get(key);
-  if (cached) return cached;
-
-  const tile = { image: new Image(), loaded: false, failed: false };
-  tile.image.decoding = "async";
-  tile.image.onload = () => {
-    tile.loaded = true;
-    requestAnimationFrame(drawMapBaseLayer);
-  };
-  tile.image.onerror = () => {
-    tile.failed = true;
-  };
-  tile.image.src = `${OSM_TILE_URL}/${zoom}/${x}/${y}.png`;
-  osmTileCache.set(key, tile);
-  trimOsmTileCache();
-  return tile;
-}
-
-function trimOsmTileCache() {
-  const maxTiles = isLowPowerDevice() ? 160 : 320;
-  if (osmTileCache.size <= maxTiles) return;
-  const removeCount = Math.ceil(maxTiles * 0.25);
-  Array.from(osmTileCache.keys()).slice(0, removeCount).forEach((key) => osmTileCache.delete(key));
+  Array.from(osmTileElements.entries()).forEach(([key, image]) => {
+    if (visibleKeys.has(key)) return;
+    image.remove();
+    osmTileElements.delete(key);
+  });
 }
 
 function drawUkrainePolygons(context, polygons, width, height, bounds, staticPreview) {
@@ -1076,7 +1076,7 @@ function drawSettlementLabelsOnCanvas(context) {
 }
 
 function drawSettlementLabels() {
-  drawMapBaseLayer();
+  requestMapBaseRender();
 }
 
 function initGridGpuLayer() {

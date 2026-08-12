@@ -603,10 +603,30 @@ dd {
   cursor: grabbing;
 }
 
+.osm-tile-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  overflow: hidden;
+  pointer-events: none;
+  background: #f4f2df;
+}
+
+.osm-tile {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 257px;
+  height: 257px;
+  user-select: none;
+  will-change: transform;
+}
+
 .math-map-canvas {
   position: absolute;
   inset: 0;
   z-index: 10;
+  pointer-events: none;
 }
 
 .regular-grid-gpu-canvas {
