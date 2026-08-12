@@ -36,6 +36,8 @@ const rivalOwners = ["Інший гравець"];
 const RECT_CELL_WIDTH_DEGREES = 0.018;
 const RECT_CELL_HEIGHT_DEGREES = 0.012;
 const MAP_BOUNDS = { south: 43.2, west: 21.0, north: 53.0, east: 41.2 };
+const TILE_SIZE = 256;
+const OSM_TILE_URL = "https://tile.openstreetmap.org";
 const DETAIL_ZOOM_LEVEL_COUNT = 4;
 let MAX_VISIBLE_GRID_CELLS = 18000;
 const SETTLEMENT_GRID_SIZE = 0.25;
@@ -156,6 +158,7 @@ let gridCanvas = null;
 let gridGl = null;
 let gridProgram = null;
 let gridBuffer = null;
+let osmTileCache = new Map();
 let mapPointerState = null;
 let ukrainePolygons = fallbackUkrainePolygon;
 let ukraineCellCache = new Map();
@@ -510,13 +513,15 @@ async function initMap() {
     drawMapBaseLayer();
     requestGridPanRender();
   });
-  map.on("zoomend moveend", () => {
+  const handleSettledMapChange = () => {
     isMapMoving = false;
     setGridCanvasVisible(true);
     updateZoomBadge();
     drawMapBaseLayer();
     scheduleGridUpdate();
-  });
+  };
+  map.on("zoomend", handleSettledMapChange);
+  map.on("moveend", handleSettledMapChange);
   map.on("resize", () => {
     syncMapTilesCanvas();
     syncGridGpuCanvas();
@@ -585,7 +590,7 @@ async function refreshMarket() {
     marketState = nextMarket;
     marketCellCount = nextMarketCellCount;
     marketSignature = nextMarketSignature;
-    if (marketChanged) refreshMvtTiles();
+    if (marketChanged) refreshCanvasMapLayers();
     if (resetChanged) {
       state.land = {};
       state.lastAdminResetAt = nextMarket.resetAt;
@@ -834,14 +839,11 @@ function setupMathMapInput(container, api, state) {
   });
   container.addEventListener("pointermove", (event) => {
     if (!mapPointerState || !api.dragging._enabled) return;
-    const scale = mapScale(state.zoom);
     const dx = event.clientX - mapPointerState.x;
     const dy = event.clientY - mapPointerState.y;
     if (Math.abs(dx) + Math.abs(dy) > 3) mapPointerState.moved = true;
-    state.center = clampCenter({
-      lat: mapPointerState.center.lat + dy / scale,
-      lng: mapPointerState.center.lng - dx / scale
-    });
+    const startPixel = lngLatToGlobalPixel(mapPointerState.center.lat, mapPointerState.center.lng, state.zoom);
+    state.center = clampCenter(globalPixelToLngLat(startPixel.x - dx, startPixel.y - dy, state.zoom));
     api.emit("move");
   });
   container.addEventListener("pointerup", (event) => {
@@ -869,37 +871,50 @@ function clampCenter(center) {
   };
 }
 
-function mapScale(zoom) {
-  return 26 * 2 ** Math.max(0, zoom - 4);
-}
-
 function latLngToPoint(lat, lng, center, zoom, container = mapBoard) {
   const rect = container.getBoundingClientRect();
-  const scale = mapScale(zoom);
+  const centerPixel = lngLatToGlobalPixel(center.lat, center.lng, zoom);
+  const pixel = lngLatToGlobalPixel(lat, lng, zoom);
   return {
-    x: rect.width / 2 + (lng - center.lng) * scale,
-    y: rect.height / 2 - (lat - center.lat) * scale
+    x: rect.width / 2 + pixel.x - centerPixel.x,
+    y: rect.height / 2 + pixel.y - centerPixel.y
   };
 }
 
 function pointToLatLng(x, y, center, zoom, container = mapBoard) {
   const rect = container.getBoundingClientRect();
-  const scale = mapScale(zoom);
-  return {
-    lat: center.lat - (y - rect.height / 2) / scale,
-    lng: center.lng + (x - rect.width / 2) / scale
-  };
+  const centerPixel = lngLatToGlobalPixel(center.lat, center.lng, zoom);
+  return globalPixelToLngLat(centerPixel.x + x - rect.width / 2, centerPixel.y + y - rect.height / 2, zoom);
 }
 
 function viewportBounds(center, zoom) {
   const rect = mapBoard.getBoundingClientRect();
-  const scale = mapScale(zoom);
+  const northWest = pointToLatLng(0, 0, center, zoom, mapBoard);
+  const southEast = pointToLatLng(rect.width, rect.height, center, zoom, mapBoard);
   return mathBounds({
-    south: center.lat - rect.height / 2 / scale,
-    north: center.lat + rect.height / 2 / scale,
-    west: center.lng - rect.width / 2 / scale,
-    east: center.lng + rect.width / 2 / scale
+    south: Math.min(northWest.lat, southEast.lat),
+    north: Math.max(northWest.lat, southEast.lat),
+    west: Math.min(northWest.lng, southEast.lng),
+    east: Math.max(northWest.lng, southEast.lng)
   });
+}
+
+function lngLatToGlobalPixel(lat, lng, zoom) {
+  const clampedLat = Math.max(-85.05112878, Math.min(85.05112878, Number(lat) || 0));
+  const scale = TILE_SIZE * 2 ** zoom;
+  const sinLat = Math.sin(clampedLat * Math.PI / 180);
+  return {
+    x: ((Number(lng) || 0) + 180) / 360 * scale,
+    y: (0.5 - Math.log((1 + sinLat) / (1 - sinLat)) / (4 * Math.PI)) * scale
+  };
+}
+
+function globalPixelToLngLat(x, y, zoom) {
+  const scale = TILE_SIZE * 2 ** zoom;
+  const lng = x / scale * 360 - 180;
+  const n = Math.PI - 2 * Math.PI * y / scale;
+  const lat = 180 / Math.PI * Math.atan(0.5 * (Math.exp(n) - Math.exp(-n)));
+  return { lat, lng };
 }
 
 function initMapTilesCanvas() {
@@ -938,42 +953,79 @@ function drawMapBaseLayer() {
   if (!mapTilesCanvas || !map) return;
   syncMapTilesCanvas();
   const context = mapTilesCanvas.getContext("2d");
-  const width = mapTilesCanvas.width;
-  const height = mapTilesCanvas.height;
+  const rect = mapBoard.getBoundingClientRect();
+  const ratio = mapTilesCanvas.width / Math.max(1, rect.width);
+  const width = rect.width;
+  const height = rect.height;
+  context.setTransform(ratio, 0, 0, ratio, 0, 0);
   context.clearRect(0, 0, width, height);
-  context.fillStyle = "#eef4dc";
+  context.fillStyle = "#f4f2df";
   context.fillRect(0, 0, width, height);
-  drawProceduralMapTexture(context, width, height);
+  drawOsmTiles(context, width, height);
   drawUkrainePolygons(context, ukrainePolygons, width, height, map.getBounds(), false);
   drawSettlementLabelsOnCanvas(context, width, height);
 }
 
-function drawProceduralMapTexture(context, width, height) {
-  const zoom = map?.getZoom?.() || 6;
-  const bounds = map?.getBounds?.() || mathBounds(MAP_BOUNDS);
-  const step = Math.max(34, Math.round(96 - zoom * 4));
-  context.save();
-  context.globalAlpha = 0.28;
-  context.strokeStyle = "#8abd7b";
-  context.lineWidth = 1;
-  for (let x = -step; x < width + step; x += step) {
-    const wobble = Math.sin((x + bounds.getWest() * 31) * 0.03) * 16;
-    context.beginPath();
-    context.moveTo(x, 0);
-    context.lineTo(x + wobble, height);
-    context.stroke();
-  }
-  context.globalAlpha = 0.2;
-  context.strokeStyle = "#74a5c7";
-  for (let y = step / 2; y < height; y += step * 1.7) {
-    context.beginPath();
-    context.moveTo(0, y);
-    for (let x = 0; x <= width; x += 48) {
-      context.lineTo(x, y + Math.sin((x + y) * 0.015) * 15);
+function drawOsmTiles(context, width, height) {
+  const zoom = map.getZoom();
+  const center = map.getCenter();
+  const centerPixel = lngLatToGlobalPixel(center.lat, center.lng, zoom);
+  const topLeft = { x: centerPixel.x - width / 2, y: centerPixel.y - height / 2 };
+  const worldTiles = 2 ** zoom;
+  const minTileX = Math.floor(topLeft.x / TILE_SIZE);
+  const maxTileX = Math.floor((topLeft.x + width) / TILE_SIZE);
+  const minTileY = Math.max(0, Math.floor(topLeft.y / TILE_SIZE));
+  const maxTileY = Math.min(worldTiles - 1, Math.floor((topLeft.y + height) / TILE_SIZE));
+
+  for (let tileX = minTileX; tileX <= maxTileX; tileX += 1) {
+    for (let tileY = minTileY; tileY <= maxTileY; tileY += 1) {
+      const wrappedX = ((tileX % worldTiles) + worldTiles) % worldTiles;
+      const tile = getOsmTile(zoom, wrappedX, tileY);
+      const x = Math.round(tileX * TILE_SIZE - topLeft.x);
+      const y = Math.round(tileY * TILE_SIZE - topLeft.y);
+      if (tile.loaded) {
+        context.drawImage(tile.image, x, y, TILE_SIZE + 1, TILE_SIZE + 1);
+      } else {
+        context.fillStyle = tile.failed ? "#e8ead8" : "#f2f0de";
+        context.fillRect(x, y, TILE_SIZE + 1, TILE_SIZE + 1);
+      }
     }
-    context.stroke();
   }
+
+  context.save();
+  context.fillStyle = "rgba(255, 255, 255, 0.82)";
+  context.fillRect(width - 128, height - 22, 124, 18);
+  context.fillStyle = "rgba(20, 31, 24, 0.7)";
+  context.font = "12px system-ui, sans-serif";
+  context.fillText("© OpenStreetMap", width - 120, height - 8);
   context.restore();
+}
+
+function getOsmTile(zoom, x, y) {
+  const key = `${zoom}/${x}/${y}`;
+  const cached = osmTileCache.get(key);
+  if (cached) return cached;
+
+  const tile = { image: new Image(), loaded: false, failed: false };
+  tile.image.decoding = "async";
+  tile.image.onload = () => {
+    tile.loaded = true;
+    requestAnimationFrame(drawMapBaseLayer);
+  };
+  tile.image.onerror = () => {
+    tile.failed = true;
+  };
+  tile.image.src = `${OSM_TILE_URL}/${zoom}/${x}/${y}.png`;
+  osmTileCache.set(key, tile);
+  trimOsmTileCache();
+  return tile;
+}
+
+function trimOsmTileCache() {
+  const maxTiles = isLowPowerDevice() ? 160 : 320;
+  if (osmTileCache.size <= maxTiles) return;
+  const removeCount = Math.ceil(maxTiles * 0.25);
+  Array.from(osmTileCache.keys()).slice(0, removeCount).forEach((key) => osmTileCache.delete(key));
 }
 
 function drawUkrainePolygons(context, polygons, width, height, bounds, staticPreview) {
@@ -998,9 +1050,9 @@ function drawUkrainePolygons(context, polygons, width, height, bounds, staticPre
       });
       context.closePath();
     });
-    context.fillStyle = staticPreview ? "rgba(53, 201, 130, 0.16)" : "rgba(53, 201, 130, 0.06)";
+    context.fillStyle = staticPreview ? "rgba(53, 201, 130, 0.16)" : "rgba(53, 201, 130, 0.012)";
     context.strokeStyle = staticPreview ? "#9ee85f" : "#18231d";
-    context.lineWidth = staticPreview ? 2 : 3;
+    context.lineWidth = staticPreview ? 2 : 2.2;
     context.fill("evenodd");
     context.stroke();
   });
@@ -1079,7 +1131,7 @@ function compileShader(gl, type, source) {
   return shader;
 }
 
-function refreshMvtTiles() {
+function refreshCanvasMapLayers() {
   drawMapBaseLayer();
   renderGridGpuLayer();
 }
@@ -1169,7 +1221,7 @@ function appendCellVertices(strokeVertices, fillVertices, cell, width, height) {
   const fill = gridCellColor(cell.id);
   const stroke = gridCellStrokeColor(cell.id);
   const selected = selectedCellIds.has(cell.id) || cell.id === selectedCellId;
-  const edgeScale = selected ? 0.92 : 0.985;
+  const edgeScale = 0.985;
   const points = boundary.map(([lat, lng]) => map.latLngToContainerPoint([lat, lng]));
   for (let index = 0; index < points.length; index += 1) {
     appendLineQuad(strokeVertices, points[index], points[(index + 1) % points.length], selected ? 2.2 : 0.65, stroke, width, height);
@@ -1675,7 +1727,7 @@ function nearestSettlement(lat, lng) {
 
   return candidates
     .map((place) => ({
-      name: place.n,
+      name: place.n || place.name || place.asciiname || place.toponymName || "населений пункт",
       distanceKm: distanceKm(lat, lng, place.lat, place.lng),
       population: place.p || 0
     }))
@@ -2214,7 +2266,7 @@ async function buySelectedCell() {
         body: JSON.stringify({ cells: batch.map((cell) => ({ id: cell.id, price: cell.price, region: cell.region })) })
       });
       marketState = claim.market || marketState;
-      refreshMvtTiles();
+      refreshCanvasMapLayers();
       (claim.claimed || []).forEach((id) => claimedIds.add(id));
     }
     marketCellCount = Object.keys(marketState?.land || {}).length;
@@ -2656,7 +2708,7 @@ async function sellSelectedLand() {
       body: JSON.stringify({ cells: cells.map((cell) => ({ id: cell.id, region: cell.region })) })
     });
     marketState = payload.market || marketState;
-    refreshMvtTiles();
+    refreshCanvasMapLayers();
     const soldIds = new Set(Array.isArray(payload.soldIds) ? payload.soldIds : []);
     soldCells = cells.filter((cell) => soldIds.has(cell.id));
   } catch (error) {
@@ -3356,7 +3408,7 @@ async function saveProfile(event) {
     });
     state = normalizeState(payload.farm || state);
     marketState = payload.market || marketState;
-    refreshMvtTiles();
+    refreshCanvasMapLayers();
     refreshVisibleCellLayers(Object.keys(state.land));
     render();
     closeModals();
@@ -3818,7 +3870,7 @@ async function deleteUser(userId) {
     renderAdminSummary(payload.summary || {}, payload.market || { land: {} }, payload.users || []);
     renderAdminUsers(payload.users || []);
     marketState = payload.market || marketState;
-    refreshMvtTiles();
+    refreshCanvasMapLayers();
     scheduleGridUpdate();
     refreshLeaderboard();
     showGameMessage("Гравця видалено.");
@@ -4109,7 +4161,7 @@ async function resetAllLand() {
     renderAdminSummary(payload.summary || {}, payload.market || { land: {} }, payload.users || []);
     renderAdminUsers(payload.users || []);
     marketState = payload.market || { land: {} };
-    refreshMvtTiles();
+    refreshCanvasMapLayers();
     state = normalizeState(payload.farm || { ...state, land: {} });
     selectedCellIds = new Set();
     selectedCellId = null;
@@ -4160,7 +4212,7 @@ async function resetAllAssets() {
     renderAdminSummary(payload.summary || {}, payload.market || { land: {} }, payload.users || []);
     renderAdminUsers(payload.users || []);
     marketState = payload.market || { land: {} };
-    refreshMvtTiles();
+    refreshCanvasMapLayers();
     if (payload.farm) state = normalizeState(payload.farm);
     selectedCellIds = new Set();
     selectedCellId = null;
@@ -4410,3 +4462,4 @@ requestJson("/api/me")
     startGame(payload.player, payload.farm);
   })
   .catch(() => {});
+
