@@ -2,8 +2,7 @@
 const fs = require("fs");
 const http = require("http");
 const path = require("path");
-const geojsonvtModule = require("geojson-vt");
-const geojsonvt = geojsonvtModule.default || geojsonvtModule;
+const geojsonvt = require("geojson-vt");
 const vtpbf = require("vt-pbf");
 const WebSocket = require("ws");
 

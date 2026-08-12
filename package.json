@@ -7,7 +7,7 @@
     "start": "node server.js"
   },
   "dependencies": {
-    "geojson-vt": "^4.0.3",
+    "geojson-vt": "^3.2.1",
     "nodemailer": "^6.9.14",
     "pg": "^8.13.1",
     "vt-pbf": "^3.1.3",
