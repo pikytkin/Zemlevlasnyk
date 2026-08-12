@@ -33,7 +33,9 @@ const fallbackUkrainePolygon = [[[
 ]]];
 
 const rivalOwners = ["Інший гравець"];
-const REGULAR_HEX_RADIUS_METERS = 340;
+const RECT_CELL_WIDTH_DEGREES = 0.018;
+const RECT_CELL_HEIGHT_DEGREES = 0.012;
+const MAP_BOUNDS = { south: 43.2, west: 21.0, north: 53.0, east: 41.2 };
 const DETAIL_ZOOM_LEVEL_COUNT = 4;
 let MAX_VISIBLE_GRID_CELLS = 18000;
 const SETTLEMENT_GRID_SIZE = 0.25;
@@ -149,19 +151,12 @@ let state = defaultGameState();
 let selectedCellId = null;
 let saveTimer = null;
 let map = null;
-let boundaryLayer = null;
-let maskLayer = null;
-let gridMarkerLayer = null;
-let gridMarkerRenderer = null;
+let mapTilesCanvas = null;
 let gridCanvas = null;
 let gridGl = null;
 let gridProgram = null;
 let gridBuffer = null;
-let mvtMap = null;
-let mvtSyncing = false;
-let mvtSyncFrame = null;
-let mvtSocket = null;
-let labelLayer = null;
+let mapPointerState = null;
 let ukrainePolygons = fallbackUkrainePolygon;
 let ukraineCellCache = new Map();
 let cellCache = new Map();
@@ -493,83 +488,48 @@ async function saveState() {
 async function initMap() {
   if (map) return;
 
-  map = L.map(mapBoard, {
-    zoomControl: true,
-    minZoom: 4,
-    maxZoom: 13,
-    zoomSnap: 1,
-    zoomDelta: 1,
-    boxZoom: false,
-    wheelDebounceTime: 75,
-    wheelPxPerZoomLevel: 165,
-    maxBounds: [[43.2, 21.0], [53.0, 41.2]],
-    maxBoundsViscosity: 0.9
-  }).setView([49.02, 31.25], 6);
+  map = createMathMap(mapBoard, { center: [49.02, 31.25], zoom: 6, minZoom: 4, maxZoom: 13 });
   globalThis.agroMap = map;
   document.agroMap = map;
   addMapQuickActionsControl();
-
-  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-    maxZoom: 19,
-    updateWhenIdle: true,
-    updateWhenZooming: false,
-    updateInterval: 180,
-    keepBuffer: 3,
-    attribution: "&copy; OpenStreetMap"
-  }).addTo(map);
-
-  map.createPane("countryMaskPane");
-  map.getPane("countryMaskPane").style.zIndex = 350;
-  map.createPane("gridMarkerPane");
-  map.getPane("gridMarkerPane").style.zIndex = 650;
-  map.createPane("labelPane");
-  map.getPane("labelPane").style.zIndex = 700;
 
   await loadUkraineBoundary();
   await loadSettlements();
   await refreshMarket();
   await refreshLeaderboard();
   await refreshNews();
-  drawUkraineMask();
 
-  gridMarkerRenderer = L.canvas({ padding: 0.35, tolerance: 8 });
-  gridMarkerLayer = L.layerGroup([], { pane: "gridMarkerPane" }).addTo(map);
-  labelLayer = L.layerGroup([], { pane: "labelPane" }).addTo(map);
-  initMvtLandMap();
+  initMapTilesCanvas();
   initGridGpuLayer();
-  drawSettlementLabels();
+  drawMapBaseLayer();
 
-  map.on("zoomstart", () => {
-    isMapMoving = true;
-    setGridCanvasVisible(false);
-    clearGridLayerForZoom();
-  });
   map.on("movestart", () => {
     isMapMoving = true;
   });
   map.on("move", () => {
+    drawMapBaseLayer();
     requestGridPanRender();
-    requestMvtSync();
   });
   map.on("zoomend moveend", () => {
     isMapMoving = false;
     setGridCanvasVisible(true);
     updateZoomBadge();
-    syncMvtMap();
+    drawMapBaseLayer();
     scheduleGridUpdate();
   });
   map.on("resize", () => {
+    syncMapTilesCanvas();
     syncGridGpuCanvas();
-    if (mvtMap) mvtMap.resize();
-    syncMvtMap();
+    drawMapBaseLayer();
     scheduleGridUpdate();
   });
   map.on("click", selectCellAtMapPoint);
   setupShiftSelection();
   setTimeout(() => {
     map.invalidateSize();
-    map.fitBounds(boundaryLayer.getBounds(), { padding: [18, 18] });
+    map.fitBounds(mathBounds(MAP_BOUNDS), { padding: [18, 18] });
     updateZoomBadge();
+    drawMapBaseLayer();
     updateGrid();
   }, 180);
   clearInterval(marketTimer);
@@ -581,53 +541,23 @@ async function initMap() {
 }
 
 function addMapQuickActionsControl() {
-  if (!clusterSelectButton || !newsButton || !globalThis.L) return;
-  const QuickActions = L.Control.extend({
-    options: { position: "topleft" },
-    onAdd() {
-      const container = L.DomUtil.create("div", "leaflet-control map-quick-actions-control");
-      container.append(clusterSelectButton, newsButton);
-      L.DomEvent.disableClickPropagation(container);
-      L.DomEvent.disableScrollPropagation(container);
-      return container;
-    }
-  });
-  new QuickActions().addTo(map);
+  if (!clusterSelectButton || !newsButton || !mapBoard) return;
+  const container = document.createElement("div");
+  container.className = "map-quick-actions-control";
+  container.append(clusterSelectButton, newsButton);
+  mapBoard.appendChild(container);
 }
 
 async function initSplashMap() {
   const splashMap = document.querySelector("#splashMap");
-  if (!splashMap || !globalThis.L) return;
-
-  const preview = L.map(splashMap, {
-    zoomControl: false,
-    attributionControl: false,
-    dragging: false,
-    scrollWheelZoom: false,
-    doubleClickZoom: false,
-    boxZoom: false,
-    keyboard: false,
-    tap: false
-  }).setView([49.02, 31.25], 6);
-
-  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-    maxZoom: 8,
-    updateWhenIdle: true
-  }).addTo(preview);
+  if (!splashMap) return;
 
   try {
     const geojson = await fetch("/ukraine-boundary.geojson").then((response) => response.json());
-    const layer = L.geoJSON(geojson, {
-      style: {
-        color: "#9ee85f",
-        weight: 2,
-        fillColor: "#35c982",
-        fillOpacity: 0.16
-      }
-    }).addTo(preview);
-    preview.fitBounds(layer.getBounds(), { padding: [18, 18] });
+    const polygons = extractPolygonsFromGeoJson(geojson);
+    drawStaticUkrainePreview(splashMap, polygons);
   } catch {
-    preview.setView([49.02, 31.25], 6);
+    drawStaticUkrainePreview(splashMap, fallbackUkrainePolygon);
   }
 }
 
@@ -665,7 +595,7 @@ async function refreshMarket() {
     }
     syncOwnedMarketLand();
     reconcileLocalLandWithMarket();
-    if (map && gridMarkerLayer) {
+    if (map) {
       if (marketChanged && !isMapMoving) scheduleGridUpdate();
       render();
     }
@@ -796,46 +726,305 @@ function extractPolygonsFromGeoJson(geojson) {
   return polygons.length ? polygons : fallbackUkrainePolygon;
 }
 
-function drawUkraineMask() {
-  if (boundaryLayer) boundaryLayer.remove();
-  if (maskLayer) maskLayer.remove();
-
-  boundaryLayer = L.geoJSON({
-    type: "FeatureCollection",
-    features: ukrainePolygons.map((polygon) => ({
-      type: "Feature",
-      properties: {},
-      geometry: { type: "Polygon", coordinates: polygon }
-    }))
-  }, {
-    pane: "countryMaskPane",
-    interactive: false,
-    style: {
-      color: "#18231d",
-      weight: 3,
-      fillOpacity: 0
+function mathBounds(bounds) {
+  return {
+    getSouth: () => bounds.south,
+    getNorth: () => bounds.north,
+    getWest: () => bounds.west,
+    getEast: () => bounds.east,
+    pad(amount = 0) {
+      const latPad = (bounds.north - bounds.south) * amount;
+      const lngPad = (bounds.east - bounds.west) * amount;
+      return mathBounds({
+        south: bounds.south - latPad,
+        north: bounds.north + latPad,
+        west: bounds.west - lngPad,
+        east: bounds.east + lngPad
+      });
     }
-  }).addTo(map);
+  };
+}
 
-  boundaryLayer.bringToFront();
+function createMathMap(container, options = {}) {
+  const listeners = new Map();
+  const state = {
+    center: { lat: options.center?.[0] || 49.02, lng: options.center?.[1] || 31.25 },
+    zoom: options.zoom || 6,
+    minZoom: options.minZoom || 4,
+    maxZoom: options.maxZoom || 13
+  };
+  const api = {
+    on(type, handler) {
+      if (!listeners.has(type)) listeners.set(type, new Set());
+      listeners.get(type).add(handler);
+      return api;
+    },
+    emit(type, payload = {}) {
+      listeners.get(type)?.forEach((handler) => handler(payload));
+      return api;
+    },
+    getZoom: () => state.zoom,
+    getMaxZoom: () => state.maxZoom,
+    getCenter: () => ({ ...state.center }),
+    getBounds: () => viewportBounds(state.center, state.zoom),
+    getSize: () => {
+      const rect = container.getBoundingClientRect();
+      return { x: rect.width, y: rect.height };
+    },
+    latLngToContainerPoint(latlng) {
+      const lat = Array.isArray(latlng) ? latlng[0] : latlng.lat;
+      const lng = Array.isArray(latlng) ? latlng[1] : latlng.lng;
+      return latLngToPoint(lat, lng, state.center, state.zoom, container);
+    },
+    containerPointToLatLng(point) {
+      const x = Array.isArray(point) ? point[0] : point.x;
+      const y = Array.isArray(point) ? point[1] : point.y;
+      return pointToLatLng(x, y, state.center, state.zoom, container);
+    },
+    setView(center, zoom = state.zoom) {
+      state.center = clampCenter({ lat: Array.isArray(center) ? center[0] : center.lat, lng: Array.isArray(center) ? center[1] : center.lng });
+      state.zoom = clampZoom(zoom, state.minZoom, state.maxZoom);
+      api.emit("move");
+      api.emit("moveend");
+      api.emit("zoomend");
+      return api;
+    },
+    fitBounds(bounds) {
+      state.center = clampCenter({
+        lat: (bounds.getSouth() + bounds.getNorth()) / 2,
+        lng: (bounds.getWest() + bounds.getEast()) / 2
+      });
+      state.zoom = 6;
+      api.emit("move");
+      api.emit("moveend");
+      api.emit("zoomend");
+      return api;
+    },
+    invalidateSize() {
+      api.emit("resize");
+      return api;
+    },
+    dragging: {
+      _enabled: true,
+      disable() { this._enabled = false; },
+      enable() { this._enabled = true; }
+    }
+  };
+  setupMathMapInput(container, api, state);
+  return api;
+}
+
+function setupMathMapInput(container, api, state) {
+  container.addEventListener("wheel", (event) => {
+    event.preventDefault();
+    const nextZoom = clampZoom(state.zoom + (event.deltaY < 0 ? 1 : -1), state.minZoom, state.maxZoom);
+    if (nextZoom === state.zoom) return;
+    state.zoom = nextZoom;
+    api.emit("move");
+    api.emit("zoomend");
+    api.emit("moveend");
+  }, { passive: false });
+
+  container.addEventListener("pointerdown", (event) => {
+    if (event.shiftKey || clusterSelectionMode) return;
+    if (!api.dragging._enabled || event.button !== 0 || event.target.closest("button, input, textarea, select, .modal")) return;
+    mapPointerState = { x: event.clientX, y: event.clientY, center: { ...state.center }, moved: false };
+    container.setPointerCapture?.(event.pointerId);
+    api.emit("movestart");
+  });
+  container.addEventListener("pointermove", (event) => {
+    if (!mapPointerState || !api.dragging._enabled) return;
+    const scale = mapScale(state.zoom);
+    const dx = event.clientX - mapPointerState.x;
+    const dy = event.clientY - mapPointerState.y;
+    if (Math.abs(dx) + Math.abs(dy) > 3) mapPointerState.moved = true;
+    state.center = clampCenter({
+      lat: mapPointerState.center.lat + dy / scale,
+      lng: mapPointerState.center.lng - dx / scale
+    });
+    api.emit("move");
+  });
+  container.addEventListener("pointerup", (event) => {
+    const pointer = mapPointerState;
+    mapPointerState = null;
+    container.releasePointerCapture?.(event.pointerId);
+    api.emit("moveend");
+    if (!pointer?.moved) {
+      const rect = container.getBoundingClientRect();
+      const latlng = api.containerPointToLatLng([event.clientX - rect.left, event.clientY - rect.top]);
+      api.emit("click", { latlng, originalEvent: event });
+    }
+  });
+  window.addEventListener("resize", () => api.emit("resize"));
+}
+
+function clampZoom(zoom, minZoom, maxZoom) {
+  return Math.max(minZoom, Math.min(maxZoom, Math.round(Number(zoom) || minZoom)));
+}
+
+function clampCenter(center) {
+  return {
+    lat: Math.max(MAP_BOUNDS.south, Math.min(MAP_BOUNDS.north, center.lat)),
+    lng: Math.max(MAP_BOUNDS.west, Math.min(MAP_BOUNDS.east, center.lng))
+  };
+}
+
+function mapScale(zoom) {
+  return 26 * 2 ** Math.max(0, zoom - 4);
+}
+
+function latLngToPoint(lat, lng, center, zoom, container = mapBoard) {
+  const rect = container.getBoundingClientRect();
+  const scale = mapScale(zoom);
+  return {
+    x: rect.width / 2 + (lng - center.lng) * scale,
+    y: rect.height / 2 - (lat - center.lat) * scale
+  };
+}
+
+function pointToLatLng(x, y, center, zoom, container = mapBoard) {
+  const rect = container.getBoundingClientRect();
+  const scale = mapScale(zoom);
+  return {
+    lat: center.lat - (y - rect.height / 2) / scale,
+    lng: center.lng + (x - rect.width / 2) / scale
+  };
+}
+
+function viewportBounds(center, zoom) {
+  const rect = mapBoard.getBoundingClientRect();
+  const scale = mapScale(zoom);
+  return mathBounds({
+    south: center.lat - rect.height / 2 / scale,
+    north: center.lat + rect.height / 2 / scale,
+    west: center.lng - rect.width / 2 / scale,
+    east: center.lng + rect.width / 2 / scale
+  });
+}
+
+function initMapTilesCanvas() {
+  if (mapTilesCanvas || !mapBoard) return;
+  mapTilesCanvas = document.createElement("canvas");
+  mapTilesCanvas.className = "math-map-canvas";
+  mapTilesCanvas.setAttribute("aria-hidden", "true");
+  mapBoard.prepend(mapTilesCanvas);
+  syncMapTilesCanvas();
+}
+
+function syncMapTilesCanvas() {
+  if (!mapTilesCanvas || !mapBoard) return;
+  const ratio = Math.min(1.5, window.devicePixelRatio || 1);
+  const rect = mapBoard.getBoundingClientRect();
+  mapTilesCanvas.width = Math.max(1, Math.round(rect.width * ratio));
+  mapTilesCanvas.height = Math.max(1, Math.round(rect.height * ratio));
+  mapTilesCanvas.style.width = rect.width + "px";
+  mapTilesCanvas.style.height = rect.height + "px";
+}
+
+function drawStaticUkrainePreview(container, polygons) {
+  container.innerHTML = "";
+  const canvas = document.createElement("canvas");
+  container.appendChild(canvas);
+  const rect = container.getBoundingClientRect();
+  canvas.width = Math.max(1, Math.round(rect.width || 640));
+  canvas.height = Math.max(1, Math.round(rect.height || 360));
+  canvas.style.width = "100%";
+  canvas.style.height = "100%";
+  const context = canvas.getContext("2d");
+  drawUkrainePolygons(context, polygons, canvas.width, canvas.height, mathBounds(MAP_BOUNDS), true);
+}
+
+function drawMapBaseLayer() {
+  if (!mapTilesCanvas || !map) return;
+  syncMapTilesCanvas();
+  const context = mapTilesCanvas.getContext("2d");
+  const width = mapTilesCanvas.width;
+  const height = mapTilesCanvas.height;
+  context.clearRect(0, 0, width, height);
+  context.fillStyle = "#eef4dc";
+  context.fillRect(0, 0, width, height);
+  drawProceduralMapTexture(context, width, height);
+  drawUkrainePolygons(context, ukrainePolygons, width, height, map.getBounds(), false);
+  drawSettlementLabelsOnCanvas(context, width, height);
+}
+
+function drawProceduralMapTexture(context, width, height) {
+  const zoom = map?.getZoom?.() || 6;
+  const bounds = map?.getBounds?.() || mathBounds(MAP_BOUNDS);
+  const step = Math.max(34, Math.round(96 - zoom * 4));
+  context.save();
+  context.globalAlpha = 0.28;
+  context.strokeStyle = "#8abd7b";
+  context.lineWidth = 1;
+  for (let x = -step; x < width + step; x += step) {
+    const wobble = Math.sin((x + bounds.getWest() * 31) * 0.03) * 16;
+    context.beginPath();
+    context.moveTo(x, 0);
+    context.lineTo(x + wobble, height);
+    context.stroke();
+  }
+  context.globalAlpha = 0.2;
+  context.strokeStyle = "#74a5c7";
+  for (let y = step / 2; y < height; y += step * 1.7) {
+    context.beginPath();
+    context.moveTo(0, y);
+    for (let x = 0; x <= width; x += 48) {
+      context.lineTo(x, y + Math.sin((x + y) * 0.015) * 15);
+    }
+    context.stroke();
+  }
+  context.restore();
+}
+
+function drawUkrainePolygons(context, polygons, width, height, bounds, staticPreview) {
+  context.save();
+  context.lineJoin = "round";
+  context.lineCap = "round";
+  polygons.forEach((polygon) => {
+    const rings = polygon.map((ring) => ring.map(([lng, lat]) => {
+      if (staticPreview) {
+        return {
+          x: (lng - MAP_BOUNDS.west) / (MAP_BOUNDS.east - MAP_BOUNDS.west) * width,
+          y: (MAP_BOUNDS.north - lat) / (MAP_BOUNDS.north - MAP_BOUNDS.south) * height
+        };
+      }
+      return map.latLngToContainerPoint([lat, lng]);
+    }));
+    context.beginPath();
+    rings.forEach((ring) => {
+      ring.forEach((point, index) => {
+        if (index === 0) context.moveTo(point.x, point.y);
+        else context.lineTo(point.x, point.y);
+      });
+      context.closePath();
+    });
+    context.fillStyle = staticPreview ? "rgba(53, 201, 130, 0.16)" : "rgba(53, 201, 130, 0.06)";
+    context.strokeStyle = staticPreview ? "#9ee85f" : "#18231d";
+    context.lineWidth = staticPreview ? 2 : 3;
+    context.fill("evenodd");
+    context.stroke();
+  });
+  context.restore();
+}
+
+function drawSettlementLabelsOnCanvas(context) {
+  const zoom = map?.getZoom?.() || 6;
+  context.save();
+  context.font = "700 13px system-ui, sans-serif";
+  context.fillStyle = "rgba(20, 31, 24, 0.82)";
+  context.strokeStyle = "rgba(255, 255, 255, 0.88)";
+  context.lineWidth = 3;
+  cityLabels.forEach(([name, lat, lng, minZoom]) => {
+    if (zoom < minZoom) return;
+    const point = map.latLngToContainerPoint([lat, lng]);
+    context.strokeText(name, point.x, point.y);
+    context.fillText(name, point.x, point.y);
+  });
+  context.restore();
 }
 
 function drawSettlementLabels() {
-  labelLayer.clearLayers();
-  cityLabels.forEach(([name, lat, lng, minZoom]) => {
-    const marker = L.marker([lat, lng], {
-      pane: "labelPane",
-      interactive: false,
-      icon: L.divIcon({
-        className: `settlement-label settlement-z${minZoom}`,
-        html: name,
-        iconSize: [120, 24],
-        iconAnchor: [60, 12]
-      })
-    });
-    marker.options.minZoom = minZoom;
-    marker.addTo(labelLayer);
-  });
+  drawMapBaseLayer();
 }
 
 function initGridGpuLayer() {
@@ -890,108 +1079,9 @@ function compileShader(gl, type, source) {
   return shader;
 }
 
-function initMvtLandMap() {
-  if (mvtMap || !mapBoard || !window.maplibregl) return;
-  const container = document.createElement("div");
-  container.className = "mvt-land-map";
-  container.setAttribute("aria-hidden", "true");
-  mapBoard.appendChild(container);
-  const center = map.getCenter();
-  mvtMap = new maplibregl.Map({
-    container,
-    attributionControl: false,
-    interactive: false,
-    fadeDuration: 0,
-    center: [center.lng, center.lat],
-    zoom: map.getZoom(),
-    style: {
-      version: 8,
-      sources: {
-        land: {
-          type: "vector",
-          tiles: [`${location.origin}/tiles/land/{z}/{x}/{y}.mvt`],
-          minzoom: 0,
-          maxzoom: 16
-        }
-      },
-      layers: [
-        {
-          id: "owned-land-fill",
-          type: "fill",
-          source: "land",
-          "source-layer": "land",
-          paint: {
-            "fill-color": ["coalesce", ["get", "ownerColor"], "#35c982"],
-            "fill-opacity": 0.42
-          }
-        },
-        {
-          id: "owned-land-line",
-          type: "line",
-          source: "land",
-          "source-layer": "land",
-          paint: {
-            "line-color": ["coalesce", ["get", "ownerColor"], "#1b6f43"],
-            "line-opacity": 0.58,
-            "line-width": ["interpolate", ["linear"], ["zoom"], 7, 0.45, 11, 0.75, 14, 1.1]
-          }
-        }
-      ]
-    }
-  });
-  mvtMap.on("load", () => {
-    syncMvtMap();
-    connectMvtSocket();
-  });
-}
-
-function syncMvtMap() {
-  if (!mvtMap || !map || mvtSyncing) return;
-  const center = map.getCenter();
-  mvtSyncing = true;
-  mvtMap.jumpTo({
-    center: [center.lng, center.lat],
-    zoom: map.getZoom(),
-    bearing: 0,
-    pitch: 0
-  });
-  mvtSyncing = false;
-}
-
-function requestMvtSync() {
-  if (!mvtMap || mvtSyncFrame) return;
-  mvtSyncFrame = requestAnimationFrame(() => {
-    mvtSyncFrame = null;
-    syncMvtMap();
-  });
-}
-
 function refreshMvtTiles() {
-  if (!mvtMap || !mvtMap.isStyleLoaded()) return;
-  const source = mvtMap.getSource("land");
-  if (source?.setTiles) {
-    source.setTiles([`${location.origin}/tiles/land/{z}/{x}/{y}.mvt?v=${Date.now()}`]);
-  } else if (source?.reload) {
-    source.reload();
-  } else {
-    mvtMap.triggerRepaint();
-  }
-}
-
-function connectMvtSocket() {
-  if (mvtSocket || !("WebSocket" in window)) return;
-  const protocol = location.protocol === "https:" ? "wss:" : "ws:";
-  mvtSocket = new WebSocket(`${protocol}//${location.host}/ws`);
-  mvtSocket.addEventListener("message", (event) => {
-    try {
-      const payload = JSON.parse(event.data);
-      if (payload.type === "tiles-invalidated") refreshMvtTiles();
-    } catch {}
-  });
-  mvtSocket.addEventListener("close", () => {
-    mvtSocket = null;
-    setTimeout(connectMvtSocket, 3000);
-  });
+  drawMapBaseLayer();
+  renderGridGpuLayer();
 }
 
 function syncGridGpuCanvas() {
@@ -1033,14 +1123,15 @@ function clearGridGpuLayer() {
 }
 
 function renderGridGpuLayer() {
-  if (!gridGl || !gridProgram || !gridBuffer || !map || isOverviewZoom()) {
+  if (!gridGl || !gridProgram || !gridBuffer || !map) {
     clearGridGpuLayer();
     return;
   }
   const rect = mapBoard.getBoundingClientRect();
   const strokeVertices = [];
   const fillVertices = [];
-  visibleCells.forEach((cell) => appendCellVertices(strokeVertices, fillVertices, cell, rect.width, rect.height));
+  const cellsToDraw = visibleCells.length ? visibleCells : gridCellsInView(map.getBounds().pad(0.02), gridCellLimitForZoom());
+  cellsToDraw.forEach((cell) => appendCellVertices(strokeVertices, fillVertices, cell, rect.width, rect.height));
   const vertices = strokeVertices.concat(fillVertices);
   gridGl.viewport(0, 0, gridCanvas.width, gridCanvas.height);
   gridGl.clearColor(0, 0, 0, 0);
@@ -1062,7 +1153,7 @@ function renderGridGpuLayer() {
 }
 
 function requestGridPanRender() {
-  if (!gridCanvas || isOverviewZoom() || !visibleCells.length) return;
+  if (!gridCanvas) return;
   if (gridPanFrame) return;
   gridPanFrame = requestAnimationFrame(() => {
     gridPanFrame = null;
@@ -1078,15 +1169,15 @@ function appendCellVertices(strokeVertices, fillVertices, cell, width, height) {
   const fill = gridCellColor(cell.id);
   const stroke = gridCellStrokeColor(cell.id);
   const selected = selectedCellIds.has(cell.id) || cell.id === selectedCellId;
-  const edgeScale = selected ? 0.86 : 0.955;
+  const edgeScale = selected ? 0.92 : 0.985;
   const points = boundary.map(([lat, lng]) => map.latLngToContainerPoint([lat, lng]));
-  for (let index = 0; index < 6; index += 1) {
-    appendLineQuad(strokeVertices, points[index], points[(index + 1) % 6], selected ? 2.7 : 0.9, stroke, width, height);
+  for (let index = 0; index < points.length; index += 1) {
+    appendLineQuad(strokeVertices, points[index], points[(index + 1) % points.length], selected ? 2.2 : 0.65, stroke, width, height);
   }
   if (fill[3] <= 0) return;
-  for (let index = 0; index < 6; index += 1) {
+  for (let index = 0; index < points.length; index += 1) {
     const a = scaledClipPoint(points[index], centerPoint, edgeScale, width, height);
-    const b = scaledClipPoint(points[(index + 1) % 6], centerPoint, edgeScale, width, height);
+    const b = scaledClipPoint(points[(index + 1) % points.length], centerPoint, edgeScale, width, height);
     fillVertices.push(center.x, center.y, ...fill, a.x, a.y, ...fill, b.x, b.y, ...fill);
   }
 }
@@ -1117,13 +1208,20 @@ function scaledClipPoint(point, center, scale, width, height) {
 
 function gridCellColor(id) {
   const selected = selectedCellIds.has(id) || id === selectedCellId;
+  const owner = getOwner(id);
+  if (selected) return [1, 0.69, 0, 0.44];
+  if (owner === "player") return colorToFloats(state.color, 0.48);
+  if (owner === "rival") return colorToFloats(marketState?.land?.[id]?.ownerColor || "#ef7669", 0.38);
   return selected ? [1, 0.69, 0, 0.42] : [1, 1, 1, 0];
 }
 
 function gridCellStrokeColor(id) {
   const selected = selectedCellIds.has(id) || id === selectedCellId;
   if (selected) return [1, 0.69, 0, 1];
-  return [0.07, 0.07, 0.07, 0.62];
+  const owner = getOwner(id);
+  if (owner === "player") return colorToFloats(state.color, 0.5);
+  if (owner === "rival") return colorToFloats(marketState?.land?.[id]?.ownerColor || "#ef7669", 0.42);
+  return [0.07, 0.07, 0.07, map.getZoom() >= detailZoomStart() ? 0.26 : 0];
 }
 
 function colorToFloats(hex, alpha) {
@@ -1133,17 +1231,16 @@ function colorToFloats(hex, alpha) {
 }
 
 async function updateGrid() {
-  if (!map || !gridMarkerLayer) return;
+  if (!map) return;
   cancelPendingGridRender();
   gridRenderJob += 1;
   const renderJob = gridRenderJob;
-  gridMarkerLayer.clearLayers();
   cellLayerById = new Map();
   detailedMapMarkerCount = 0;
   clearGridGpuLayer();
   if (isOverviewZoom()) {
-    visibleCells = [];
-    renderOverviewGridLayer();
+    visibleCells = gridCellsInView(map.getBounds().pad(0.02), gridCellLimitForZoom());
+    renderGridGpuLayer();
     updateSettlementLabelVisibility();
     renderSelectedCell();
     return;
@@ -1172,38 +1269,15 @@ async function updateGrid() {
 }
 
 function clearGridLayerForZoom() {
-  if (!gridMarkerLayer) return;
   cancelPendingGridRender();
   gridRenderJob += 1;
-  gridMarkerLayer.clearLayers();
   cellLayerById = new Map();
   detailedMapMarkerCount = 0;
   clearGridGpuLayer();
 }
 
 function showTouchTooltip(cell, owner, latlng) {
-  if (!isTouchDevice()) return;
-  clearTimeout(touchTooltipTimer);
-  if (touchTooltip) {
-    map.removeLayer(touchTooltip);
-    touchTooltip = null;
-  }
-  touchTooltip = L.tooltip({
-    direction: "top",
-    className: "cell-tooltip touch-cell-tooltip",
-    interactive: false,
-    permanent: true,
-    opacity: 1
-  })
-    .setLatLng(latlng)
-    .setContent(cellTooltip(cell, owner))
-    .addTo(map);
-  touchTooltipTimer = window.setTimeout(() => {
-    if (touchTooltip) {
-      map.removeLayer(touchTooltip);
-      touchTooltip = null;
-    }
-  }, 3000);
+  return;
 }
 
 function isTouchDevice() {
@@ -1248,38 +1322,11 @@ function overviewClusterKey(cell, precision = 0.45) {
 }
 
 function renderOverviewGridLayer() {
-  const selectedIds = (selectedCellIds.size ? [...selectedCellIds] : selectedCellId ? [selectedCellId] : []).filter(isRegularHexId);
-  addAggregateCells(selectedIds, "selected");
+  renderGridGpuLayer();
 }
 
 function addAggregateCells(ids, kind) {
-  const bounds = map.getBounds().pad(0.12);
-  const zoom = map.getZoom();
-  const precision = zoom <= 6 ? 0.85 : zoom < detailZoomStart() - 1 ? 0.36 : 0.16;
-  const groups = new Map();
-  ids.forEach((id) => {
-    if (!isRegularHexId(id)) return;
-    const cell = getCell(id);
-    if (!cell || !pointInBounds(cell.lat, cell.lng, bounds)) return;
-    const key = overviewClusterKey(cell, precision);
-    if (!groups.has(key)) groups.set(key, { qSum: 0, rSum: 0, count: 0 });
-    const group = groups.get(key);
-    const axial = parseHexId(id);
-    group.qSum += axial.q;
-    group.rSum += axial.r;
-    group.count += 1;
-  });
-  [...groups.values()].slice(0, isLowPowerDevice() ? 100 : 180).forEach((group) => {
-    const q = Math.round(group.qSum / group.count);
-    const r = Math.round(group.rSum / group.count);
-    const cell = makeVisibleCell(hexId(q, r));
-    L.polygon(cell.boundary, aggregateCellStyle(kind, group.count))
-      .on("click", () => {
-        map.setView([cell.lat, cell.lng], detailZoomStart());
-        showGameMessage("Наблизьте карту, щоб обирати окремі земельні ділянки.");
-      })
-      .addTo(gridMarkerLayer);
-  });
+  return;
 }
 
 function aggregateCellStyle(kind, count = 1) {
@@ -1309,7 +1356,7 @@ function cancelPendingGridRender() {
 }
 
 function refreshVisibleCellLayers(cellIds = null) {
-  if (!map || !gridMarkerLayer) return;
+  if (!map) return;
   if (isOverviewZoom()) {
     scheduleGridUpdate();
     return;
@@ -1321,8 +1368,6 @@ function refreshVisibleCellLayers(cellIds = null) {
 }
 
 function setupShiftSelection() {
-  L.DomEvent.disableClickPropagation(mapBoard);
-
   mapBoard.addEventListener("pointerdown", (event) => {
     if ((!clusterSelectionMode && !event.shiftKey) || event.button !== 0) return;
     event.preventDefault();
@@ -1436,100 +1481,31 @@ function selectCellAtMapPoint(event) {
 }
 
 function hexId(q, r) {
-  return "hex-" + q + "-" + r;
+  return "cell-" + q + "-" + r;
 }
 
 function isRegularHexId(id) {
-  return /^hex--?\d+--?\d+$/.test(String(id || ""));
+  return /^cell--?\d+--?\d+$/.test(String(id || ""));
 }
 
 function parseHexId(id) {
-  const match = String(id || "").match(/^hex-(-?\d+)-(-?\d+)$/);
+  const match = String(id || "").match(/^cell-(-?\d+)-(-?\d+)$/);
   return { q: match ? Number(match[1]) : 0, r: match ? Number(match[2]) : 0 };
 }
 
-function latLngToWorldMeters(lat, lng) {
-  const radius = 6378137;
-  const limitedLat = Math.max(-85.05112878, Math.min(85.05112878, lat));
-  return {
-    x: radius * lng * Math.PI / 180,
-    y: radius * Math.log(Math.tan(Math.PI / 4 + limitedLat * Math.PI / 360))
-  };
-}
-
-function worldMetersToLatLng(x, y) {
-  const radius = 6378137;
-  return {
-    lng: x / radius * 180 / Math.PI,
-    lat: (2 * Math.atan(Math.exp(y / radius)) - Math.PI / 2) * 180 / Math.PI
-  };
-}
-
-function axialFromWorld(x, y) {
-  const q = (2 / 3 * x) / REGULAR_HEX_RADIUS_METERS;
-  const r = (-1 / 3 * x + Math.sqrt(3) / 3 * y) / REGULAR_HEX_RADIUS_METERS;
-  return axialRound(q, r);
-}
-
-function axialRound(q, r) {
-  let x = q;
-  let z = r;
-  let y = -x - z;
-  let rx = Math.round(x);
-  let ry = Math.round(y);
-  let rz = Math.round(z);
-  const xDiff = Math.abs(rx - x);
-  const yDiff = Math.abs(ry - y);
-  const zDiff = Math.abs(rz - z);
-  if (xDiff > yDiff && xDiff > zDiff) rx = -ry - rz;
-  else if (yDiff > zDiff) ry = -rx - rz;
-  else rz = -rx - ry;
-  return { q: rx, r: rz };
-}
-
-function worldFromAxial(q, r) {
-  return {
-    x: REGULAR_HEX_RADIUS_METERS * 1.5 * q,
-    y: REGULAR_HEX_RADIUS_METERS * Math.sqrt(3) * (r + q / 2)
-  };
-}
-
-function regularHexBoundaryLatLng(q, r) {
-  const center = worldFromAxial(q, r);
-  const points = [];
-  for (let index = 0; index < 6; index += 1) {
-    const angle = Math.PI / 180 * (60 * index);
-    const point = worldMetersToLatLng(
-      center.x + REGULAR_HEX_RADIUS_METERS * Math.cos(angle),
-      center.y + REGULAR_HEX_RADIUS_METERS * Math.sin(angle)
-    );
-    points.push([point.lat, point.lng]);
-  }
-  return points;
-}
-
 function cellFromLatLng(lat, lng) {
-  const point = latLngToWorldMeters(lat, lng);
-  const axial = axialFromWorld(point.x, point.y);
-  const cell = makeCell(hexId(axial.q, axial.r));
+  const q = Math.floor((lng - MAP_BOUNDS.west) / RECT_CELL_WIDTH_DEGREES);
+  const r = Math.floor((MAP_BOUNDS.north - lat) / RECT_CELL_HEIGHT_DEGREES);
+  const cell = makeCell(hexId(q, r));
   return pointInUkraine([cell.lng, cell.lat]) ? cell : null;
 }
 
 function gridCellsInView(bounds = map.getBounds().pad(0.04), limit = gridCellLimitForZoom()) {
   gridSkippedForDensity = false;
-  const corners = [
-    latLngToWorldMeters(bounds.getSouth(), bounds.getWest()),
-    latLngToWorldMeters(bounds.getSouth(), bounds.getEast()),
-    latLngToWorldMeters(bounds.getNorth(), bounds.getEast()),
-    latLngToWorldMeters(bounds.getNorth(), bounds.getWest())
-  ];
-  const axialCorners = corners.map((point) => axialFromWorld(point.x, point.y));
-  const qValues = axialCorners.map((point) => point.q);
-  const rValues = axialCorners.map((point) => point.r);
-  const minQ = Math.floor(Math.min(...qValues)) - 3;
-  const maxQ = Math.ceil(Math.max(...qValues)) + 3;
-  const minR = Math.floor(Math.min(...rValues)) - 3;
-  const maxR = Math.ceil(Math.max(...rValues)) + 3;
+  const minQ = Math.floor((bounds.getWest() - MAP_BOUNDS.west) / RECT_CELL_WIDTH_DEGREES) - 1;
+  const maxQ = Math.ceil((bounds.getEast() - MAP_BOUNDS.west) / RECT_CELL_WIDTH_DEGREES) + 1;
+  const minR = Math.floor((MAP_BOUNDS.north - bounds.getNorth()) / RECT_CELL_HEIGHT_DEGREES) - 1;
+  const maxR = Math.ceil((MAP_BOUNDS.north - bounds.getSouth()) / RECT_CELL_HEIGHT_DEGREES) + 1;
   const candidateCount = Math.max(0, maxQ - minQ + 1) * Math.max(0, maxR - minR + 1);
   if (candidateCount > Math.max(limit * 5, 18000)) {
     gridSkippedForDensity = true;
@@ -1539,8 +1515,7 @@ function gridCellsInView(bounds = map.getBounds().pad(0.04), limit = gridCellLim
   const cells = [];
   for (let q = minQ; q <= maxQ; q += 1) {
     for (let r = minR; r <= maxR; r += 1) {
-      const center = worldFromAxial(q, r);
-      const { lat, lng } = worldMetersToLatLng(center.x, center.y);
+      const { lat, lng } = cellCenterFromGrid(q, r);
       if (!pointInBounds(lat, lng, bounds)) continue;
       if (!pointInUkraine([lng, lat])) continue;
       const cell = makeVisibleCell(hexId(q, r));
@@ -1563,9 +1538,9 @@ function notifyGridTooDense() {
 }
 
 function ukrainePlayableCellIds() {
-  const key = "regular-hex-v1";
+  const key = "regular-rect-v1";
   if (ukraineCellCache.has(key)) return ukraineCellCache.get(key);
-  const bounds = boundaryLayer?.getBounds?.() || L.latLngBounds([[43.2, 21.0], [53.0, 41.2]]);
+  const bounds = mathBounds(MAP_BOUNDS);
   const ids = gridCellsInView(bounds.pad(0.08), MAX_VISIBLE_GRID_CELLS).map((cell) => cell.id);
   ukraineCellCache.set(key, ids);
   return ids;
@@ -1580,9 +1555,8 @@ function gridCellLimitForZoom() {
 
 function makeVisibleCell(id) {
   const { q, r } = parseHexId(id);
-  const center = worldFromAxial(q, r);
-  const { lat, lng } = worldMetersToLatLng(center.x, center.y);
-  const cell = { id, code: id, lat, lng, boundary: regularHexBoundaryLatLng(q, r) };
+  const { lat, lng } = cellCenterFromGrid(q, r);
+  const cell = { id, code: id, lat, lng, boundary: rectBoundaryLatLng(q, r) };
   rememberCell(id, cell);
   return cell;
 }
@@ -1591,8 +1565,7 @@ function makeCell(id) {
   if (cellCache.has(id)) return cellCache.get(id);
   if (!isRegularHexId(id)) return null;
   const { q, r } = parseHexId(id);
-  const center = worldFromAxial(q, r);
-  const { lat, lng } = worldMetersToLatLng(center.x, center.y);
+  const { lat, lng } = cellCenterFromGrid(q, r);
   const basePrice = basePriceForCellId(id);
   const income = incomeForCellId(id);
   const settlement = nearestSettlement(lat, lng);
@@ -1606,10 +1579,25 @@ function makeCell(id) {
     basePrice,
     price: priceForCellId(id),
     income,
-    boundary: regularHexBoundaryLatLng(q, r)
+    boundary: rectBoundaryLatLng(q, r)
   };
   rememberCell(id, cell);
   return cell;
+}
+
+function cellCenterFromGrid(q, r) {
+  return {
+    lng: MAP_BOUNDS.west + (q + 0.5) * RECT_CELL_WIDTH_DEGREES,
+    lat: MAP_BOUNDS.north - (r + 0.5) * RECT_CELL_HEIGHT_DEGREES
+  };
+}
+
+function rectBoundaryLatLng(q, r) {
+  const west = MAP_BOUNDS.west + q * RECT_CELL_WIDTH_DEGREES;
+  const east = west + RECT_CELL_WIDTH_DEGREES;
+  const north = MAP_BOUNDS.north - r * RECT_CELL_HEIGHT_DEGREES;
+  const south = north - RECT_CELL_HEIGHT_DEGREES;
+  return [[north, west], [north, east], [south, east], [south, west]];
 }
 
 function rememberCell(id, cell) {
@@ -1652,15 +1640,6 @@ function rangedSettingValue(minValue, spreadValue, fallback, seed) {
   const base = Number.isFinite(minValue) ? minValue : fallback;
   const spread = Number.isFinite(spreadValue) ? Math.max(0, Math.floor(spreadValue)) : 0;
   return Math.round(base + (spread > 0 ? Math.abs(seed) % spread : 0));
-}
-
-function hexagonLatLng(lat, lng, radius) {
-  return Array.from({ length: 6 }, (_, index) => {
-    const angle = (Math.PI / 180) * (60 * index + 30);
-    const cellLat = lat + Math.sin(angle) * radius;
-    const cellLng = lng + Math.cos(angle) * radius / Math.cos((lat * Math.PI) / 180);
-    return [cellLat, cellLng];
-  });
 }
 
 function hashString(value) {
@@ -1879,9 +1858,7 @@ function neighborIdsWithinRadius(id, radius = 1) {
   const ids = [];
   const distance = Math.max(1, Math.floor(radius));
   for (let dq = -distance; dq <= distance; dq += 1) {
-    const minR = Math.max(-distance, -dq - distance);
-    const maxR = Math.min(distance, -dq + distance);
-    for (let dr = minR; dr <= maxR; dr += 1) {
+    for (let dr = -distance; dr <= distance; dr += 1) {
       if (dq === 0 && dr === 0) continue;
       ids.push(hexId(q + dq, r + dr));
     }
@@ -3730,9 +3707,8 @@ function renderAdminStats(summary, users = []) {
 }
 
 function totalPlayableLandCount() {
-  const radiusKm = REGULAR_HEX_RADIUS_METERS / 1000;
-  const areaKm2 = (3 * Math.sqrt(3) / 2) * radiusKm * radiusKm;
-  return Math.round(603700 / areaKm2);
+  return Math.round((MAP_BOUNDS.east - MAP_BOUNDS.west) / RECT_CELL_WIDTH_DEGREES)
+    * Math.round((MAP_BOUNDS.north - MAP_BOUNDS.south) / RECT_CELL_HEIGHT_DEGREES);
 }
 
 function renderAdminUsers(users) {
@@ -4137,10 +4113,7 @@ async function resetAllLand() {
     state = normalizeState(payload.farm || { ...state, land: {} });
     selectedCellIds = new Set();
     selectedCellId = null;
-    if (gridMarkerLayer) {
-      gridMarkerLayer.clearLayers();
-      cellLayerById = new Map();
-    }
+    cellLayerById = new Map();
     scheduleGridUpdate();
     refreshLeaderboard();
     render();
