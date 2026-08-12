@@ -33,9 +33,9 @@ const fallbackUkrainePolygon = [[[
 ]]];
 
 const rivalOwners = ["Інший гравець"];
-const REGULAR_HEX_RADIUS_METERS = 1700;
-const DETAIL_ZOOM_LEVEL_COUNT = 3;
-let MAX_VISIBLE_GRID_CELLS = 9000;
+const REGULAR_HEX_RADIUS_METERS = 760;
+const DETAIL_ZOOM_LEVEL_COUNT = 4;
+let MAX_VISIBLE_GRID_CELLS = 18000;
 const SETTLEMENT_GRID_SIZE = 0.25;
 let DETAIL_ZOOM_MIN = 11;
 let CLAIM_BATCH_SIZE = 1000;
@@ -349,7 +349,7 @@ function applyGameSettings(settings) {
   gameSettings = settings || gameSettings;
   const economy = gameSettings?.economy || {};
   const upgrades = gameSettings?.upgrades || {};
-  MAX_VISIBLE_GRID_CELLS = Number.isFinite(economy.maxVisibleCells) ? Math.max(600, Math.min(9000, economy.maxVisibleCells)) : MAX_VISIBLE_GRID_CELLS;
+  MAX_VISIBLE_GRID_CELLS = Number.isFinite(economy.maxVisibleCells) ? Math.max(600, Math.min(24000, economy.maxVisibleCells)) : MAX_VISIBLE_GRID_CELLS;
   DETAIL_ZOOM_MIN = Number.isFinite(economy.detailZoomMin) ? Math.max(4, economy.detailZoomMin) : DETAIL_ZOOM_MIN;
   CLAIM_BATCH_SIZE = Number.isFinite(economy.claimBatchSize) ? economy.claimBatchSize : CLAIM_BATCH_SIZE;
   SELL_REFUND_RATE = Number.isFinite(economy.sellRefundPercent) ? economy.sellRefundPercent / 100 : SELL_REFUND_RATE;
@@ -957,7 +957,7 @@ function appendCellVertices(strokeVertices, fillVertices, cell, width, height) {
   const edgeScale = selected ? 0.86 : 0.955;
   const points = boundary.map(([lat, lng]) => map.latLngToContainerPoint([lat, lng]));
   for (let index = 0; index < 6; index += 1) {
-    appendLineQuad(strokeVertices, points[index], points[(index + 1) % 6], selected ? 3.4 : 1.45, stroke, width, height);
+    appendLineQuad(strokeVertices, points[index], points[(index + 1) % 6], selected ? 2.7 : 0.9, stroke, width, height);
   }
   if (fill[3] <= 0) return;
   for (let index = 0; index < 6; index += 1) {
@@ -1003,9 +1003,9 @@ function gridCellStrokeColor(id) {
   const selected = selectedCellIds.has(id) || id === selectedCellId;
   const owner = getOwner(id);
   if (selected) return [1, 0.69, 0, 1];
-  if (owner === "player") return [0.18, 0.49, 0.3, 0.9];
-  if (owner === "rival") return [0.48, 0.22, 0.18, 0.9];
-  return [0.07, 0.07, 0.07, 0.88];
+  if (owner === "player") return [0.18, 0.49, 0.3, 0.55];
+  if (owner === "rival") return [0.48, 0.22, 0.18, 0.55];
+  return [0.07, 0.07, 0.07, 0.62];
 }
 
 function colorToFloats(hex, alpha) {
@@ -1143,7 +1143,8 @@ function renderOverviewGridLayer() {
 
 function addAggregateCells(ids, kind) {
   const bounds = map.getBounds().pad(0.12);
-  const precision = map.getZoom() <= 6 ? 0.85 : 0.42;
+  const zoom = map.getZoom();
+  const precision = zoom <= 6 ? 0.85 : zoom < detailZoomStart() - 1 ? 0.36 : 0.16;
   const groups = new Map();
   ids.forEach((id) => {
     if (!isRegularHexId(id)) return;
@@ -1172,9 +1173,9 @@ function addAggregateCells(ids, kind) {
 
 function aggregateCellStyle(kind, count = 1) {
   const styles = {
-    rival: { color: "#7a382f", fillColor: "#ef7669", fillOpacity: 0.22, weight: 1.8 },
-    owned: { color: state.color || "#35c982", fillColor: state.color || "#35c982", fillOpacity: 0.36, weight: 2 },
-    selected: { color: "#ffb000", fillColor: "#ffdf43", fillOpacity: 0.44, weight: 2.6 }
+    rival: { color: "#7a382f", fillColor: "#ef7669", fillOpacity: 0.22, weight: 1 },
+    owned: { color: state.color || "#35c982", fillColor: state.color || "#35c982", fillOpacity: 0.36, weight: 1.15 },
+    selected: { color: "#ffb000", fillColor: "#ffdf43", fillOpacity: 0.44, weight: 1.7 }
   };
   return { pane: "gridMarkerPane", renderer: gridMarkerRenderer, className: "grid-aggregate " + kind, ...styles[kind] };
 }
@@ -1419,7 +1420,7 @@ function gridCellsInView(bounds = map.getBounds().pad(0.04), limit = gridCellLim
   const minR = Math.floor(Math.min(...rValues)) - 3;
   const maxR = Math.ceil(Math.max(...rValues)) + 3;
   const candidateCount = Math.max(0, maxQ - minQ + 1) * Math.max(0, maxR - minR + 1);
-  if (candidateCount > Math.max(limit * 4, 14000)) {
+  if (candidateCount > Math.max(limit * 5, 18000)) {
     gridSkippedForDensity = true;
     notifyGridTooDense();
     return [];
@@ -1462,7 +1463,7 @@ function ukrainePlayableCellIds() {
 function gridCellLimitForZoom() {
   const zoom = map?.getZoom?.() || DETAIL_ZOOM_MIN;
   const lowPower = isLowPowerDevice();
-  const zoomLimit = zoom >= 13 ? (lowPower ? 4200 : 9000) : (lowPower ? 2500 : 7000);
+  const zoomLimit = zoom >= 13 ? (lowPower ? 7000 : 18000) : (lowPower ? 4200 : 12000);
   return Math.min(MAX_VISIBLE_GRID_CELLS, zoomLimit);
 }
 
