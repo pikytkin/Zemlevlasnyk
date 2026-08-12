@@ -33,7 +33,7 @@ const fallbackUkrainePolygon = [[[
 ]]];
 
 const rivalOwners = ["Інший гравець"];
-const REGULAR_HEX_RADIUS_METERS = 760;
+const REGULAR_HEX_RADIUS_METERS = 340;
 const DETAIL_ZOOM_LEVEL_COUNT = 4;
 let MAX_VISIBLE_GRID_CELLS = 18000;
 const SETTLEMENT_GRID_SIZE = 0.25;
@@ -69,6 +69,7 @@ const coinCount = document.querySelector("#coinCount");
 const incomeButton = document.querySelector("#incomeButton");
 const dayCount = document.querySelector("#dayCount");
 const mapBoard = document.querySelector("#mapBoard");
+const zoomBadge = document.querySelector("#zoomBadge");
 const mapStage = document.querySelector(".map-stage");
 const cellInfoPanel = document.querySelector("#cellInfoPanel");
 const selectionPopup = document.querySelector("#selectionPopup");
@@ -545,6 +546,7 @@ async function initMap() {
   map.on("zoomend moveend", () => {
     isMapMoving = false;
     setGridCanvasVisible(true);
+    updateZoomBadge();
     scheduleGridUpdate();
   });
   map.on("resize", () => {
@@ -556,6 +558,7 @@ async function initMap() {
   setTimeout(() => {
     map.invalidateSize();
     map.fitBounds(boundaryLayer.getBounds(), { padding: [18, 18] });
+    updateZoomBadge();
     updateGrid();
   }, 180);
   clearInterval(marketTimer);
@@ -893,6 +896,11 @@ function syncGridGpuCanvas() {
 function setGridCanvasVisible(visible) {
   if (!gridCanvas) return;
   gridCanvas.style.visibility = visible ? "visible" : "hidden";
+}
+
+function updateZoomBadge() {
+  if (!zoomBadge || !map) return;
+  zoomBadge.textContent = `Zoom ${map.getZoom()}`;
 }
 
 function updateGridGpuLayer(cells = visibleCells) {
