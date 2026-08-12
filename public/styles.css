@@ -1359,6 +1359,20 @@ dd {
   font-size: 0.76rem;
 }
 
+.admin-settings-grid .settings-checkbox {
+  display: grid;
+  align-content: center;
+  grid-template-columns: auto 1fr;
+  gap: 10px;
+  min-height: 52px;
+}
+
+.settings-checkbox input {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--green);
+}
+
 .admin-settings-grid textarea {
   min-height: 96px;
   resize: vertical;

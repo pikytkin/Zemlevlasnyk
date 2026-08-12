@@ -51,7 +51,8 @@ const DEFAULT_SETTINGS = {
     sellRefundPercent: 62,
     maxVisibleCells: 120000,
     detailZoomMin: 11,
-    claimBatchSize: 1000
+    claimBatchSize: 1000,
+    drawGrid: true
   },
   upgrades: {
     landMaxLevel: 5,
@@ -248,7 +249,8 @@ function sanitizeSettings(settings) {
       sellRefundPercent: numberIn(Number(economy.sellRefundPercent), defaults.economy.sellRefundPercent, 0, 100),
       maxVisibleCells: intIn(economy.maxVisibleCells, defaults.economy.maxVisibleCells, 1000, 120000),
       detailZoomMin: intIn(economy.detailZoomMin, defaults.economy.detailZoomMin, 4, 13),
-      claimBatchSize: intIn(economy.claimBatchSize, defaults.economy.claimBatchSize, 1, 3000)
+      claimBatchSize: intIn(economy.claimBatchSize, defaults.economy.claimBatchSize, 1, 3000),
+      drawGrid: typeof economy.drawGrid === "boolean" ? economy.drawGrid : defaults.economy.drawGrid
     },
     upgrades: {
       landMaxLevel: intIn(upgrades.landMaxLevel, defaults.upgrades.landMaxLevel, 1, 10),

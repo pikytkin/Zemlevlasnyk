@@ -39,9 +39,11 @@ const MAP_BOUNDS = { south: 43.2, west: 21.0, north: 53.0, east: 41.2 };
 const TILE_SIZE = 256;
 const OSM_TILE_URL = "https://tile.openstreetmap.org";
 const DETAIL_ZOOM_LEVEL_COUNT = 4;
+const MAP_ZOOM_LEVELS = [4, 7, 10, 13];
 let MAX_VISIBLE_GRID_CELLS = 18000;
 const SETTLEMENT_GRID_SIZE = 0.25;
 let DETAIL_ZOOM_MIN = 11;
+let DRAW_GRID = true;
 let CLAIM_BATCH_SIZE = 1000;
 let SELL_REFUND_RATE = 0.62;
 let LAND_LEVELS = [
@@ -354,6 +356,7 @@ function applyGameSettings(settings) {
   const upgrades = gameSettings?.upgrades || {};
   MAX_VISIBLE_GRID_CELLS = Number.isFinite(economy.maxVisibleCells) ? Math.max(600, Math.min(24000, economy.maxVisibleCells)) : MAX_VISIBLE_GRID_CELLS;
   DETAIL_ZOOM_MIN = Number.isFinite(economy.detailZoomMin) ? Math.max(4, economy.detailZoomMin) : DETAIL_ZOOM_MIN;
+  DRAW_GRID = economy.drawGrid !== false;
   CLAIM_BATCH_SIZE = Number.isFinite(economy.claimBatchSize) ? economy.claimBatchSize : CLAIM_BATCH_SIZE;
   SELL_REFUND_RATE = Number.isFinite(economy.sellRefundPercent) ? economy.sellRefundPercent / 100 : SELL_REFUND_RATE;
   LAND_LEVELS = Array.isArray(upgrades.landLevels) && upgrades.landLevels.length ? upgrades.landLevels : LAND_LEVELS;
@@ -379,6 +382,10 @@ function applyGameSettings(settings) {
   if (state?.inventory) state.inventory = normalizeMachineryInventory(state.inventory, state.currentDay || 1);
   cellCache = new Map();
   landClusterCacheKey = "";
+  if (!DRAW_GRID) {
+    visibleCells = [];
+    clearGridGpuLayer();
+  }
 }
 
 async function loadGameSettings() {
@@ -493,13 +500,13 @@ async function initMap() {
 
   map = L.map(mapBoard, {
     zoomControl: true,
-    minZoom: 4,
-    maxZoom: 13,
-    zoomSnap: 1,
-    zoomDelta: 1,
+    minZoom: MAP_ZOOM_LEVELS[0],
+    maxZoom: MAP_ZOOM_LEVELS[MAP_ZOOM_LEVELS.length - 1],
+    zoomSnap: 3,
+    zoomDelta: 3,
     boxZoom: false,
     wheelDebounceTime: 75,
-    wheelPxPerZoomLevel: 165,
+    wheelPxPerZoomLevel: 260,
     maxBounds: [[MAP_BOUNDS.south, MAP_BOUNDS.west], [MAP_BOUNDS.north, MAP_BOUNDS.east]],
     maxBoundsViscosity: 0.9
   }).setView([49.02, 31.25], 6);
@@ -1127,6 +1134,11 @@ function updateZoomBadge() {
 }
 
 function updateGridGpuLayer(cells = visibleCells) {
+  if (!DRAW_GRID) {
+    visibleCells = [];
+    clearGridGpuLayer();
+    return false;
+  }
   visibleCells = Array.isArray(cells) ? cells : visibleCells;
   renderGridGpuLayer();
   return true;
@@ -1140,7 +1152,7 @@ function clearGridGpuLayer() {
 }
 
 function renderGridGpuLayer() {
-  if (!gridGl || !gridProgram || !gridBuffer || !map) {
+  if (!gridGl || !gridProgram || !gridBuffer || !map || !DRAW_GRID) {
     clearGridGpuLayer();
     return;
   }
@@ -1170,7 +1182,7 @@ function renderGridGpuLayer() {
 }
 
 function requestGridPanRender() {
-  if (!gridCanvas) return;
+  if (!gridCanvas || !DRAW_GRID) return;
   if (gridPanFrame) return;
   gridPanFrame = requestAnimationFrame(() => {
     gridPanFrame = null;
@@ -1255,6 +1267,12 @@ async function updateGrid() {
   cellLayerById = new Map();
   detailedMapMarkerCount = 0;
   clearGridGpuLayer();
+  if (!DRAW_GRID) {
+    visibleCells = [];
+    updateSettlementLabelVisibility();
+    renderSelectedCell();
+    return;
+  }
   if (isOverviewZoom()) {
     visibleCells = [];
     renderOverviewGridLayer();
@@ -1331,7 +1349,8 @@ function isOverviewZoom() {
 function detailZoomStart() {
   const maxZoom = map?.getMaxZoom?.() || 13;
   const minForThreeLevels = Math.max(4, maxZoom - DETAIL_ZOOM_LEVEL_COUNT + 1);
-  return Math.min(DETAIL_ZOOM_MIN, minForThreeLevels);
+  const requested = Math.min(DETAIL_ZOOM_MIN, minForThreeLevels);
+  return MAP_ZOOM_LEVELS.find((zoom) => zoom >= requested) || MAP_ZOOM_LEVELS[MAP_ZOOM_LEVELS.length - 1];
 }
 
 function overviewClusterKey(cell, precision = 0.45) {
@@ -3505,6 +3524,10 @@ function renderAdminSettings(settings) {
   adminSettingsFields.innerHTML = fields.map(([name, label, value, group, type = "number"]) => `
     <label title="${escapeHtml(tips[`${group}.${name}`] || "")}">${label}<input name="${group}.${name}" type="${type}" step="0.01" value="${escapeHtml(value == null ? "" : value)}"></label>
   `).join("") + `
+    <label class="settings-checkbox" title="Діагностика продуктивності: вимкніть, щоб бачити тільки карту без шару комірок.">
+      <input name="economy.drawGrid" type="checkbox" ${economy.drawGrid !== false ? "checked" : ""}>
+      <span>Малювати сітку</span>
+    </label>
     ${renderLandLevelEditor(settings?.upgrades?.landLevels || LAND_LEVELS)}
     ${renderAssetEditor("machineryItems", "Техніка", settings?.assets?.machineryItems || [], tips.machineryItems)}
     ${renderAssetEditor("elevatorItems", "Побудови", settings?.assets?.elevatorItems || [], tips.elevatorItems)}
@@ -3675,9 +3698,12 @@ function settingsFromForm(form) {
   data.forEach((value, key) => {
     const [group, name] = key.split(".");
     if (!group || !name) return;
+    if (key === "economy.drawGrid") return;
     if (!next[group]) next[group] = {};
     next[group][name] = Number(value);
   });
+  next.economy = next.economy || {};
+  next.economy.drawGrid = form.querySelector('[name="economy.drawGrid"]')?.checked !== false;
   next.assets = next.assets || {};
   next.upgrades = next.upgrades || {};
   next.upgrades.landLevels = collectSettingsCards("landLevels").map((item) => ({
