@@ -38,7 +38,8 @@ const RECT_CELL_HEIGHT_DEGREES = 0.012;
 const MAP_BOUNDS = { south: 43.2, west: 21.0, north: 53.0, east: 41.2 };
 const TILE_SIZE = 256;
 const DETAIL_ZOOM_LEVEL_COUNT = 4;
-const MAP_ZOOM_LEVELS = [7, 10, 12, 14];
+const MAP_ZOOM_LEVELS = [5, 8, 11, 14];
+const DISPLAY_ZOOM_LEVELS = [7, 10, 12, 14];
 let MAX_VISIBLE_GRID_CELLS = 18000;
 const SETTLEMENT_GRID_SIZE = 0.25;
 let DETAIL_ZOOM_MIN = 12;
@@ -199,6 +200,7 @@ let gridRenderFrame = null;
 let gridPanFrame = null;
 let mapBaseRenderFrame = null;
 let isMapMoving = false;
+let lastWheelZoomAt = 0;
 let gridTooDenseNotifiedAt = 0;
 let gridSkippedForDensity = false;
 let detailedMapMarkerCount = 0;
@@ -516,20 +518,23 @@ async function initMap() {
     attributionControl: false
   });
   installMapLibreAdapter(map);
-  map.addControl(new maplibregl.NavigationControl({ showCompass: false, visualizePitch: false }), "top-left");
+  map.scrollZoom.disable();
   map.addControl(new maplibregl.AttributionControl({ customAttribution: "© OpenStreetMap contributors" }), "bottom-right");
   globalThis.agroMap = map;
   document.agroMap = map;
+  addMapZoomControl();
   addMapQuickActionsControl();
 
   await new Promise((resolve) => map.once("load", resolve));
 
   await loadUkraineBoundary();
-  await loadSettlements();
+  useFallbackSettlements();
   updateSettlementMapSource();
+  requestIdleWork(loadSettlementsInBackground);
   await refreshMarket();
   await refreshLeaderboard();
   await refreshNews();
+  requestIdleWork(addDeferredRayonLayer);
 
   initMapTilesCanvas();
   initGridGpuLayer();
@@ -540,7 +545,6 @@ async function initMap() {
   });
   map.on("move", () => {
     requestMapBaseRender();
-    requestGridPanRender();
   });
   const handleSettledMapChange = () => {
     isMapMoving = false;
@@ -589,15 +593,44 @@ function addMapQuickActionsControl() {
   mapBoard.appendChild(container);
 }
 
+function addMapZoomControl() {
+  if (!mapBoard) return;
+  const container = document.createElement("div");
+  container.className = "map-zoom-control";
+  const zoomIn = document.createElement("button");
+  const zoomOut = document.createElement("button");
+  zoomIn.type = "button";
+  zoomOut.type = "button";
+  zoomIn.textContent = "+";
+  zoomOut.textContent = "−";
+  zoomIn.addEventListener("click", () => stepMapZoom(1));
+  zoomOut.addEventListener("click", () => stepMapZoom(-1));
+  container.append(zoomIn, zoomOut);
+  mapBoard.appendChild(container);
+  mapBoard.addEventListener("wheel", (event) => {
+    if (!event.ctrlKey) event.preventDefault();
+    const now = Date.now();
+    if (now - lastWheelZoomAt < 260) return;
+    lastWheelZoomAt = now;
+    stepMapZoom(event.deltaY < 0 ? 1 : -1);
+  }, { passive: false });
+}
+
+function stepMapZoom(direction) {
+  if (!map) return;
+  const current = snapZoom(map.getZoom());
+  const index = MAP_ZOOM_LEVELS.indexOf(current);
+  const nextIndex = Math.max(0, Math.min(MAP_ZOOM_LEVELS.length - 1, index + direction));
+  if (nextIndex === index) return;
+  map.easeTo({ zoom: MAP_ZOOM_LEVELS[nextIndex], duration: 220 });
+}
+
 function createUkraineVectorStyle() {
   return {
     version: 8,
-    glyphs: "https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf",
     sources: {
       ukraine: { type: "geojson", data: "/ukraine-boundary.geojson" },
-      oblasts: { type: "geojson", data: "/ukraine-adm1.geojson" },
-      rayons: { type: "geojson", data: "/ukraine-adm2.geojson" },
-      settlements: { type: "geojson", data: { type: "FeatureCollection", features: [] } }
+      oblasts: { type: "geojson", data: "/ukraine-adm1.geojson" }
     },
     layers: [
       { id: "background", type: "background", paint: { "background-color": "#f7f8f4" } },
@@ -620,16 +653,6 @@ function createUkraineVectorStyle() {
         }
       },
       {
-        id: "rayon-lines",
-        type: "line",
-        source: "rayons",
-        minzoom: 10,
-        paint: {
-          "line-color": "rgba(67, 115, 78, 0.24)",
-          "line-width": ["interpolate", ["linear"], ["zoom"], 10, 0.45, 14, 1]
-        }
-      },
-      {
         id: "ukraine-outline",
         type: "line",
         source: "ukraine",
@@ -638,26 +661,23 @@ function createUkraineVectorStyle() {
           "line-width": ["interpolate", ["linear"], ["zoom"], 7, 1.6, 14, 2.6]
         }
       },
-      {
-        id: "settlement-labels",
-        type: "symbol",
-        source: "settlements",
-        layout: {
-          "text-field": ["get", "name"],
-          "text-font": ["Open Sans Regular"],
-          "text-size": ["interpolate", ["linear"], ["zoom"], 7, 11, 14, 14],
-          "text-anchor": "center",
-          "text-allow-overlap": false,
-          "text-ignore-placement": false
-        },
-        paint: {
-          "text-color": "#26362c",
-          "text-halo-color": "rgba(247, 248, 244, 0.92)",
-          "text-halo-width": 1.6
-        }
-      }
     ]
   };
+}
+
+function addDeferredRayonLayer() {
+  if (!map || map.getSource("rayons")) return;
+  map.addSource("rayons", { type: "geojson", data: "/ukraine-adm2.geojson" });
+  map.addLayer({
+    id: "rayon-lines",
+    type: "line",
+    source: "rayons",
+    minzoom: MAP_ZOOM_LEVELS[1],
+    paint: {
+      "line-color": "rgba(67, 115, 78, 0.22)",
+      "line-width": ["interpolate", ["linear"], ["zoom"], MAP_ZOOM_LEVELS[1], 0.45, MAP_ZOOM_LEVELS[3], 1]
+    }
+  }, "ukraine-outline");
 }
 
 function installMapLibreAdapter(instance) {
@@ -706,6 +726,17 @@ function snapZoom(zoom) {
   return MAP_ZOOM_LEVELS.reduce((closest, level) => (
     Math.abs(level - zoom) < Math.abs(closest - zoom) ? level : closest
   ), MAP_ZOOM_LEVELS[0]);
+}
+
+function displayZoomForMapZoom(zoom) {
+  const snapped = snapZoom(zoom);
+  const index = MAP_ZOOM_LEVELS.indexOf(snapped);
+  return DISPLAY_ZOOM_LEVELS[index >= 0 ? index : 0];
+}
+
+function mapZoomForDisplayZoom(displayZoom) {
+  const index = DISPLAY_ZOOM_LEVELS.findIndex((zoom) => zoom >= displayZoom);
+  return MAP_ZOOM_LEVELS[index >= 0 ? index : MAP_ZOOM_LEVELS.length - 1];
 }
 
 function enforceDiscreteZoom() {
@@ -766,30 +797,31 @@ async function loadSettlements() {
   }
 }
 
+function useFallbackSettlements() {
+  settlementPlaces = cityLabels.map(([n, lat, lng, minZoom]) => ({ n, lat, lng, p: minZoom <= 7 ? 250000 : 20000, f: "PPL" }));
+  settlementGrid = buildSettlementGrid(settlementPlaces);
+}
+
+async function loadSettlementsInBackground() {
+  try {
+    await loadSettlements();
+    updateSettlementMapSource();
+  } catch {
+    useFallbackSettlements();
+    updateSettlementMapSource();
+  }
+}
+
+function requestIdleWork(callback) {
+  if ("requestIdleCallback" in window) {
+    window.requestIdleCallback(callback, { timeout: 2500 });
+  } else {
+    window.setTimeout(callback, 1200);
+  }
+}
+
 function updateSettlementMapSource() {
-  const source = map?.getSource?.("settlements");
-  if (!source || !settlementPlaces.length) return;
-  const zoom = map.getZoom();
-  const bounds = map.getBounds().pad(0.2);
-  const lowPower = isLowPowerDevice();
-  const limit = zoom >= 14 ? (lowPower ? 450 : 900) : zoom >= 12 ? (lowPower ? 220 : 420) : zoom >= 10 ? 120 : 42;
-  const minPopulation = zoom >= 14 ? 0 : zoom >= 12 ? 3500 : zoom >= 10 ? 20000 : 120000;
-  const features = settlementPlaces
-    .filter((place) => {
-      const lat = Number(place.lat);
-      const lng = Number(place.lng);
-      if (!Number.isFinite(lat) || !Number.isFinite(lng)) return false;
-      if (!pointInBounds(lat, lng, bounds)) return false;
-      return Number(place.p || place.population || 0) >= minPopulation || zoom >= 14;
-    })
-    .sort((a, b) => Number(b.p || b.population || 0) - Number(a.p || a.population || 0))
-    .slice(0, limit)
-    .map((place) => ({
-      type: "Feature",
-      geometry: { type: "Point", coordinates: [Number(place.lng), Number(place.lat)] },
-      properties: { name: place.n || place.name || place.asciiname || place.toponymName || "населений пункт" }
-    }));
-  source.setData({ type: "FeatureCollection", features });
+  requestMapBaseRender();
 }
 
 async function refreshMarket() {
@@ -802,7 +834,7 @@ async function refreshMarket() {
     marketState = nextMarket;
     marketCellCount = nextMarketCellCount;
     marketSignature = nextMarketSignature;
-    if (marketChanged) refreshCanvasMapLayers();
+    if (marketChanged && !isMapMoving) scheduleGridUpdate();
     if (resetChanged) {
       state.land = {};
       state.lastAdminResetAt = nextMarket.resetAt;
@@ -1176,6 +1208,7 @@ function drawMapBaseLayer() {
   const height = rect.height;
   context.setTransform(ratio, 0, 0, ratio, 0, 0);
   context.clearRect(0, 0, width, height);
+  if (!isMapMoving) drawSettlementLabelsOnCanvas(context);
 }
 
 function requestMapBaseRender() {
@@ -1215,14 +1248,31 @@ function drawUkrainePolygons(context, polygons, width, height, bounds, staticPre
 }
 
 function drawSettlementLabelsOnCanvas(context) {
-  const zoom = map?.getZoom?.() || 6;
+  const zoom = map?.getZoom?.() || MAP_ZOOM_LEVELS[0];
+  const bounds = map.getBounds().pad(0.08);
+  const lowPower = isLowPowerDevice();
+  const limit = zoom >= MAP_ZOOM_LEVELS[3] ? (lowPower ? 180 : 360) : zoom >= MAP_ZOOM_LEVELS[2] ? 140 : 42;
+  const minPopulation = zoom >= MAP_ZOOM_LEVELS[3] ? 0 : zoom >= MAP_ZOOM_LEVELS[2] ? 3500 : 120000;
+  const labels = settlementPlaces
+    .filter((place) => {
+      const lat = Number(place.lat);
+      const lng = Number(place.lng);
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) return false;
+      if (!pointInBounds(lat, lng, bounds)) return false;
+      return Number(place.p || place.population || 0) >= minPopulation || zoom >= MAP_ZOOM_LEVELS[3];
+    })
+    .sort((a, b) => Number(b.p || b.population || 0) - Number(a.p || a.population || 0))
+    .slice(0, limit);
+
   context.save();
-  context.font = "700 13px system-ui, sans-serif";
+  context.font = "600 13px system-ui, sans-serif";
   context.fillStyle = "rgba(20, 31, 24, 0.82)";
   context.strokeStyle = "rgba(255, 255, 255, 0.88)";
   context.lineWidth = 3;
-  cityLabels.forEach(([name, lat, lng, minZoom]) => {
-    if (zoom < minZoom) return;
+  labels.forEach((place) => {
+    const lat = Number(place.lat);
+    const lng = Number(place.lng);
+    const name = place.n || place.name || place.asciiname || place.toponymName || "населений пункт";
     const point = map.latLngToContainerPoint([lat, lng]);
     context.strokeText(name, point.x, point.y);
     context.fillText(name, point.x, point.y);
@@ -1231,7 +1281,7 @@ function drawSettlementLabelsOnCanvas(context) {
 }
 
 function drawSettlementLabels() {
-  updateSettlementMapSource();
+  requestMapBaseRender();
 }
 
 function initGridGpuLayer() {
@@ -1313,7 +1363,7 @@ function setGridCanvasVisible(visible) {
 
 function updateZoomBadge() {
   if (!zoomBadge || !map) return;
-  zoomBadge.textContent = `Zoom ${map.getZoom()}`;
+  zoomBadge.textContent = `Zoom ${displayZoomForMapZoom(map.getZoom())}`;
 }
 
 function updateGridGpuLayer(cells = visibleCells) {
@@ -1530,10 +1580,11 @@ function isOverviewZoom() {
 }
 
 function detailZoomStart() {
-  const maxZoom = map?.getMaxZoom?.() || 13;
-  const minForThreeLevels = Math.max(4, maxZoom - DETAIL_ZOOM_LEVEL_COUNT + 1);
-  const requested = Math.min(DETAIL_ZOOM_MIN, minForThreeLevels);
-  return MAP_ZOOM_LEVELS.find((zoom) => zoom >= requested) || MAP_ZOOM_LEVELS[MAP_ZOOM_LEVELS.length - 1];
+  const maxIndex = MAP_ZOOM_LEVELS.length - 1;
+  const firstDetailIndex = Math.max(0, maxIndex - DETAIL_ZOOM_LEVEL_COUNT + 1);
+  const requestedIndex = DISPLAY_ZOOM_LEVELS.findIndex((zoom) => zoom >= DETAIL_ZOOM_MIN);
+  const index = Math.max(firstDetailIndex, requestedIndex >= 0 ? requestedIndex : maxIndex);
+  return MAP_ZOOM_LEVELS[index] || MAP_ZOOM_LEVELS[maxIndex];
 }
 
 function overviewClusterKey(cell, precision = 0.45) {
@@ -1622,7 +1673,7 @@ function scheduleGridUpdate() {
   gridUpdateTimer = setTimeout(() => {
     gridUpdateTimer = null;
     updateGrid();
-  }, isLowPowerDevice() ? 260 : 180);
+  }, isLowPowerDevice() ? 420 : 300);
 }
 
 function cancelPendingGridRender() {
@@ -3333,7 +3384,7 @@ function focusNewsTarget(cellId) {
 
 function returnToNews() {
   if (newsReturnState?.center && map) {
-    map.setView(newsReturnState.center, newsReturnState.zoom || map.getZoom());
+    map.setView(newsReturnState.center, snapZoom(newsReturnState.zoom || map.getZoom()));
   }
   if (Number.isFinite(newsReturnState?.scrollY)) {
     window.scrollTo({ top: newsReturnState.scrollY, behavior: "smooth" });

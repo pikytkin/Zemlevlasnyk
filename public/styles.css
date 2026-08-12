@@ -695,6 +695,34 @@ dd {
   display: none;
 }
 
+.map-zoom-control {
+  position: absolute;
+  z-index: 850;
+  top: 12px;
+  left: 12px;
+  display: grid;
+  overflow: hidden;
+  border-radius: 6px;
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.18);
+}
+
+.map-zoom-control button {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border: 0;
+  border-bottom: 1px solid rgba(20, 31, 24, 0.14);
+  background: rgba(255, 255, 255, 0.94);
+  color: #18231d;
+  font: 700 1.2rem/1 system-ui, sans-serif;
+  cursor: pointer;
+}
+
+.map-zoom-control button:last-child {
+  border-bottom: 0;
+}
+
 .map-quick-actions-control {
   clear: none !important;
   display: flex;
