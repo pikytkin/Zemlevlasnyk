@@ -37,12 +37,11 @@ const RECT_CELL_WIDTH_DEGREES = 0.018;
 const RECT_CELL_HEIGHT_DEGREES = 0.012;
 const MAP_BOUNDS = { south: 43.2, west: 21.0, north: 53.0, east: 41.2 };
 const TILE_SIZE = 256;
-const OSM_TILE_URL = "https://tile.openstreetmap.org";
 const DETAIL_ZOOM_LEVEL_COUNT = 4;
-const MAP_ZOOM_LEVELS = [4, 7, 10, 13];
+const MAP_ZOOM_LEVELS = [7, 10, 12, 14];
 let MAX_VISIBLE_GRID_CELLS = 18000;
 const SETTLEMENT_GRID_SIZE = 0.25;
-let DETAIL_ZOOM_MIN = 11;
+let DETAIL_ZOOM_MIN = 12;
 let DRAW_GRID = true;
 let CLAIM_BATCH_SIZE = 1000;
 let SELL_REFUND_RATE = 0.62;
@@ -355,7 +354,7 @@ function applyGameSettings(settings) {
   const economy = gameSettings?.economy || {};
   const upgrades = gameSettings?.upgrades || {};
   MAX_VISIBLE_GRID_CELLS = Number.isFinite(economy.maxVisibleCells) ? Math.max(600, Math.min(24000, economy.maxVisibleCells)) : MAX_VISIBLE_GRID_CELLS;
-  DETAIL_ZOOM_MIN = Number.isFinite(economy.detailZoomMin) ? Math.max(4, economy.detailZoomMin) : DETAIL_ZOOM_MIN;
+  DETAIL_ZOOM_MIN = Number.isFinite(economy.detailZoomMin) ? Math.max(7, Math.min(14, economy.detailZoomMin)) : DETAIL_ZOOM_MIN;
   DRAW_GRID = economy.drawGrid !== false;
   CLAIM_BATCH_SIZE = Number.isFinite(economy.claimBatchSize) ? economy.claimBatchSize : CLAIM_BATCH_SIZE;
   SELL_REFUND_RATE = Number.isFinite(economy.sellRefundPercent) ? economy.sellRefundPercent / 100 : SELL_REFUND_RATE;
@@ -498,33 +497,36 @@ async function saveState() {
 async function initMap() {
   if (map) return;
 
-  map = L.map(mapBoard, {
-    zoomControl: true,
+  if (!globalThis.maplibregl) {
+    showGameMessage("MapLibre GL JS не завантажився. Перевірте підключення до інтернету.");
+    return;
+  }
+
+  map = new maplibregl.Map({
+    container: mapBoard,
+    style: createUkraineVectorStyle(),
+    center: [31.25, 49.02],
+    zoom: MAP_ZOOM_LEVELS[0],
     minZoom: MAP_ZOOM_LEVELS[0],
     maxZoom: MAP_ZOOM_LEVELS[MAP_ZOOM_LEVELS.length - 1],
-    zoomSnap: 3,
-    zoomDelta: 3,
-    boxZoom: false,
-    wheelDebounceTime: 75,
-    wheelPxPerZoomLevel: 260,
-    maxBounds: [[MAP_BOUNDS.south, MAP_BOUNDS.west], [MAP_BOUNDS.north, MAP_BOUNDS.east]],
-    maxBoundsViscosity: 0.9
-  }).setView([49.02, 31.25], 6);
+    maxBounds: [[MAP_BOUNDS.west, MAP_BOUNDS.south], [MAP_BOUNDS.east, MAP_BOUNDS.north]],
+    renderWorldCopies: false,
+    dragRotate: false,
+    pitchWithRotate: false,
+    attributionControl: false
+  });
+  installMapLibreAdapter(map);
+  map.addControl(new maplibregl.NavigationControl({ showCompass: false, visualizePitch: false }), "top-left");
+  map.addControl(new maplibregl.AttributionControl({ customAttribution: "© OpenStreetMap contributors" }), "bottom-right");
   globalThis.agroMap = map;
   document.agroMap = map;
   addMapQuickActionsControl();
 
-  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-    maxZoom: 19,
-    updateWhenIdle: true,
-    updateWhenZooming: false,
-    updateInterval: 180,
-    keepBuffer: 3,
-    attribution: "&copy; OpenStreetMap"
-  }).addTo(map);
+  await new Promise((resolve) => map.once("load", resolve));
 
   await loadUkraineBoundary();
   await loadSettlements();
+  updateSettlementMapSource();
   await refreshMarket();
   await refreshLeaderboard();
   await refreshNews();
@@ -542,8 +544,10 @@ async function initMap() {
   });
   const handleSettledMapChange = () => {
     isMapMoving = false;
+    if (enforceDiscreteZoom()) return;
     setGridCanvasVisible(true);
     updateZoomBadge();
+    updateSettlementMapSource();
     requestMapBaseRender();
     scheduleGridUpdate();
   };
@@ -555,7 +559,12 @@ async function initMap() {
     requestMapBaseRender();
     scheduleGridUpdate();
   });
-  map.on("click", selectCellAtMapPoint);
+  map.on("click", (event) => {
+    selectCellAtMapPoint({
+      latlng: { lat: event.lngLat.lat, lng: event.lngLat.lng },
+      originalEvent: event.originalEvent || event
+    });
+  });
   setupShiftSelection();
   setTimeout(() => {
     map.invalidateSize();
@@ -578,6 +587,156 @@ function addMapQuickActionsControl() {
   container.className = "map-quick-actions-control";
   container.append(clusterSelectButton, newsButton);
   mapBoard.appendChild(container);
+}
+
+function createUkraineVectorStyle() {
+  return {
+    version: 8,
+    glyphs: "https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf",
+    sources: {
+      ukraine: { type: "geojson", data: "/ukraine-boundary.geojson" },
+      oblasts: { type: "geojson", data: "/ukraine-adm1.geojson" },
+      rayons: { type: "geojson", data: "/ukraine-adm2.geojson" },
+      settlements: { type: "geojson", data: { type: "FeatureCollection", features: [] } }
+    },
+    layers: [
+      { id: "background", type: "background", paint: { "background-color": "#f7f8f4" } },
+      {
+        id: "ukraine-fill",
+        type: "fill",
+        source: "ukraine",
+        paint: {
+          "fill-color": "#edf6df",
+          "fill-opacity": 1
+        }
+      },
+      {
+        id: "oblast-lines",
+        type: "line",
+        source: "oblasts",
+        paint: {
+          "line-color": "rgba(45, 86, 58, 0.36)",
+          "line-width": ["interpolate", ["linear"], ["zoom"], 7, 0.7, 14, 1.4]
+        }
+      },
+      {
+        id: "rayon-lines",
+        type: "line",
+        source: "rayons",
+        minzoom: 10,
+        paint: {
+          "line-color": "rgba(67, 115, 78, 0.24)",
+          "line-width": ["interpolate", ["linear"], ["zoom"], 10, 0.45, 14, 1]
+        }
+      },
+      {
+        id: "ukraine-outline",
+        type: "line",
+        source: "ukraine",
+        paint: {
+          "line-color": "#18231d",
+          "line-width": ["interpolate", ["linear"], ["zoom"], 7, 1.6, 14, 2.6]
+        }
+      },
+      {
+        id: "settlement-labels",
+        type: "symbol",
+        source: "settlements",
+        layout: {
+          "text-field": ["get", "name"],
+          "text-font": ["Open Sans Regular"],
+          "text-size": ["interpolate", ["linear"], ["zoom"], 7, 11, 14, 14],
+          "text-anchor": "center",
+          "text-allow-overlap": false,
+          "text-ignore-placement": false
+        },
+        paint: {
+          "text-color": "#26362c",
+          "text-halo-color": "rgba(247, 248, 244, 0.92)",
+          "text-halo-width": 1.6
+        }
+      }
+    ]
+  };
+}
+
+function installMapLibreAdapter(instance) {
+  const nativeGetBounds = instance.getBounds.bind(instance);
+  const nativeFitBounds = instance.fitBounds.bind(instance);
+  const nativeSetMaxZoom = instance.setMaxZoom?.bind(instance);
+  instance.getBounds = () => mapLibreBoundsAdapter(nativeGetBounds());
+  instance.latLngToContainerPoint = (latlng) => {
+    const lat = Array.isArray(latlng) ? latlng[0] : latlng.lat;
+    const lng = Array.isArray(latlng) ? latlng[1] : (latlng.lng ?? latlng.lon);
+    const point = instance.project([lng, lat]);
+    return { x: point.x, y: point.y };
+  };
+  instance.containerPointToLatLng = (point) => {
+    const x = Array.isArray(point) ? point[0] : point.x;
+    const y = Array.isArray(point) ? point[1] : point.y;
+    const lngLat = instance.unproject([x, y]);
+    return { lat: lngLat.lat, lng: lngLat.lng };
+  };
+  instance.setView = (center, zoom = instance.getZoom()) => {
+    const lat = Array.isArray(center) ? center[0] : center.lat;
+    const lng = Array.isArray(center) ? center[1] : center.lng;
+    instance.easeTo({ center: [lng, lat], zoom: snapZoom(zoom), duration: 180 });
+    return instance;
+  };
+  instance.fitBounds = (bounds, options = {}) => {
+    const converted = Array.isArray(bounds)
+      ? [[bounds[0][1], bounds[0][0]], [bounds[1][1], bounds[1][0]]]
+      : [[bounds.getWest(), bounds.getSouth()], [bounds.getEast(), bounds.getNorth()]];
+    nativeFitBounds(converted, { padding: options.padding?.[0] || options.padding || 18, duration: 0 });
+    return instance;
+  };
+  instance.invalidateSize = () => {
+    instance.resize();
+    return instance;
+  };
+  instance.dragging = {
+    disable: () => instance.dragPan.disable(),
+    enable: () => instance.dragPan.enable()
+  };
+  instance.scrollZoom.setWheelZoomRate?.(1 / 260);
+  if (nativeSetMaxZoom) nativeSetMaxZoom(MAP_ZOOM_LEVELS[MAP_ZOOM_LEVELS.length - 1]);
+}
+
+function snapZoom(zoom) {
+  return MAP_ZOOM_LEVELS.reduce((closest, level) => (
+    Math.abs(level - zoom) < Math.abs(closest - zoom) ? level : closest
+  ), MAP_ZOOM_LEVELS[0]);
+}
+
+function enforceDiscreteZoom() {
+  if (!map) return false;
+  const snapped = snapZoom(map.getZoom());
+  if (Math.abs(snapped - map.getZoom()) < 0.02) return false;
+  map.jumpTo({ zoom: snapped });
+  return true;
+}
+
+function mapLibreBoundsAdapter(bounds) {
+  return {
+    getWest: () => bounds.getWest(),
+    getEast: () => bounds.getEast(),
+    getSouth: () => bounds.getSouth(),
+    getNorth: () => bounds.getNorth(),
+    pad(ratio = 0) {
+      const west = bounds.getWest();
+      const east = bounds.getEast();
+      const south = bounds.getSouth();
+      const north = bounds.getNorth();
+      const lngPad = (east - west) * ratio;
+      const latPad = (north - south) * ratio;
+      return mathBounds({
+        west: west - lngPad,
+        east: east + lngPad,
+        south: south - latPad,
+        north: north + latPad
+      });
+    }
+  };
 }
 
 async function initSplashMap() {
@@ -605,6 +764,32 @@ async function loadSettlements() {
     settlementPlaces = cityLabels.map(([n, lat, lng]) => ({ n, lat, lng, p: 0, f: "PPL" }));
     settlementGrid = buildSettlementGrid(settlementPlaces);
   }
+}
+
+function updateSettlementMapSource() {
+  const source = map?.getSource?.("settlements");
+  if (!source || !settlementPlaces.length) return;
+  const zoom = map.getZoom();
+  const bounds = map.getBounds().pad(0.2);
+  const lowPower = isLowPowerDevice();
+  const limit = zoom >= 14 ? (lowPower ? 450 : 900) : zoom >= 12 ? (lowPower ? 220 : 420) : zoom >= 10 ? 120 : 42;
+  const minPopulation = zoom >= 14 ? 0 : zoom >= 12 ? 3500 : zoom >= 10 ? 20000 : 120000;
+  const features = settlementPlaces
+    .filter((place) => {
+      const lat = Number(place.lat);
+      const lng = Number(place.lng);
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) return false;
+      if (!pointInBounds(lat, lng, bounds)) return false;
+      return Number(place.p || place.population || 0) >= minPopulation || zoom >= 14;
+    })
+    .sort((a, b) => Number(b.p || b.population || 0) - Number(a.p || a.population || 0))
+    .slice(0, limit)
+    .map((place) => ({
+      type: "Feature",
+      geometry: { type: "Point", coordinates: [Number(place.lng), Number(place.lat)] },
+      properties: { name: place.n || place.name || place.asciiname || place.toponymName || "населений пункт" }
+    }));
+  source.setData({ type: "FeatureCollection", features });
 }
 
 async function refreshMarket() {
@@ -991,8 +1176,6 @@ function drawMapBaseLayer() {
   const height = rect.height;
   context.setTransform(ratio, 0, 0, ratio, 0, 0);
   context.clearRect(0, 0, width, height);
-  drawUkrainePolygons(context, ukrainePolygons, width, height, map.getBounds(), false);
-  drawSettlementLabelsOnCanvas(context, width, height);
 }
 
 function requestMapBaseRender() {
@@ -1048,7 +1231,7 @@ function drawSettlementLabelsOnCanvas(context) {
 }
 
 function drawSettlementLabels() {
-  requestMapBaseRender();
+  updateSettlementMapSource();
 }
 
 function initGridGpuLayer() {
