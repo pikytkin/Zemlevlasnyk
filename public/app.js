@@ -37,12 +37,12 @@ const RECT_CELL_WIDTH_DEGREES = 0.018;
 const RECT_CELL_HEIGHT_DEGREES = 0.012;
 const MAP_BOUNDS = { south: 43.2, west: 21.0, north: 53.0, east: 41.2 };
 const TILE_SIZE = 256;
-const DETAIL_ZOOM_LEVEL_COUNT = 4;
+const DETAIL_ZOOM_LEVEL_COUNT = 2;
 const MAP_ZOOM_LEVELS = [5, 8, 11, 14];
 const DISPLAY_ZOOM_LEVELS = [7, 10, 12, 14];
 let MAX_VISIBLE_GRID_CELLS = 5000;
 const SETTLEMENT_GRID_SIZE = 0.25;
-let DETAIL_ZOOM_MIN = 12;
+let DETAIL_ZOOM_MIN = 14;
 let DRAW_GRID = true;
 let CLAIM_BATCH_SIZE = 1000;
 let SELL_REFUND_RATE = 0.62;
@@ -367,7 +367,7 @@ function applyGameSettings(settings) {
   MAX_VISIBLE_GRID_CELLS = Number.isFinite(economy.maxVisibleCells)
     ? Math.max(600, Math.min(5000, economy.maxVisibleCells))
     : (isLowPowerDevice() ? 2800 : 5000);
-  DETAIL_ZOOM_MIN = Number.isFinite(economy.detailZoomMin) ? Math.max(7, Math.min(14, economy.detailZoomMin)) : DETAIL_ZOOM_MIN;
+  DETAIL_ZOOM_MIN = Number.isFinite(economy.detailZoomMin) ? Math.max(12, Math.min(14, economy.detailZoomMin)) : DETAIL_ZOOM_MIN;
   DRAW_GRID = economy.drawGrid !== false;
   CLAIM_BATCH_SIZE = Number.isFinite(economy.claimBatchSize) ? economy.claimBatchSize : CLAIM_BATCH_SIZE;
   SELL_REFUND_RATE = Number.isFinite(economy.sellRefundPercent) ? economy.sellRefundPercent / 100 : SELL_REFUND_RATE;
@@ -557,6 +557,8 @@ async function initMap() {
 
   map.on("movestart", () => {
     isMapMoving = true;
+    setGridCanvasVisible(false);
+    clearGridGpuLayer();
   });
   map.on("move", () => {
     requestMapBaseRender();
@@ -574,6 +576,7 @@ async function initMap() {
   map.on("zoomend", handleSettledMapChange);
   map.on("moveend", handleSettledMapChange);
   map.on("resize", () => {
+    setGridCanvasVisible(false);
     syncMapTilesCanvas();
     syncGridGpuCanvas();
     requestMapBaseRender();
@@ -1524,12 +1527,16 @@ function buildGridGeometry(cellsToDraw, rect) {
 }
 
 function renderGridGpuLayer() {
-  if (!gridGl || !gridProgram || !gridFillBuffer || !map || !DRAW_GRID) {
+  if (!gridGl || !gridProgram || !gridFillBuffer || !map || !DRAW_GRID || isMapMoving) {
     clearGridGpuLayer();
     return;
   }
   const rect = mapBoard.getBoundingClientRect();
-  const cellsToDraw = visibleCells.length ? visibleCells : gridCellsInView(map.getBounds().pad(0.02), gridCellLimitForZoom());
+  const cellsToDraw = visibleCells;
+  if (!cellsToDraw.length) {
+    clearGridGpuLayer();
+    return;
+  }
   const cacheKey = gridGeometryCacheKey(cellsToDraw, rect);
   if (!gridGeometryCache || gridGeometryCache.key !== cacheKey) {
     gridGeometryCache = { key: cacheKey, ...buildGridGeometry(cellsToDraw, rect) };
@@ -1567,7 +1574,7 @@ function renderGridGpuLayer() {
 }
 
 function requestGridPanRender() {
-  if (!gridCanvas || !DRAW_GRID) return;
+  if (!gridCanvas || !DRAW_GRID || isMapMoving) return;
   if (gridPanFrame) return;
   gridPanFrame = requestAnimationFrame(() => {
     gridPanFrame = null;
@@ -1697,9 +1704,9 @@ async function updateGrid() {
     renderSelectedCell();
     return;
   }
-  if (visibleCells.length && (!selectedCellId || !visibleCells.some((cell) => cell.id === selectedCellId))) {
-    selectedCellId = visibleCells[0].id;
-    selectedCellIds = new Set([selectedCellId]);
+  if (selectedCellId && !visibleCells.some((cell) => cell.id === selectedCellId)) {
+    selectedCellId = null;
+    selectedCellIds = new Set();
   }
   updateSettlementLabelVisibility();
   updateGridGpuLayer(visibleCells);
