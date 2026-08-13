@@ -639,14 +639,14 @@ function rectBoundaryLatLngRangeServer(minQ, maxQ, minR, maxR) {
 
 function overviewGridStepForZoomServer(zoom) {
   if (zoom <= 7) return 512;
-  if (zoom <= 10) return 256;
+  if (zoom <= 11) return 256;
   if (zoom <= 12) return 128;
   return 32;
 }
 
 function chunkLevelForZoom(zoom) {
   if (zoom <= 7) return 1;
-  if (zoom <= 10) return 2;
+  if (zoom <= 11) return 2;
   if (zoom <= 12) return 3;
   return 4;
 }

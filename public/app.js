@@ -38,8 +38,8 @@ const RECT_CELL_HEIGHT_DEGREES = 0.012;
 const MAP_BOUNDS = { south: 43.2, west: 21.0, north: 53.0, east: 41.2 };
 const TILE_SIZE = 256;
 const DETAIL_ZOOM_LEVEL_COUNT = 2;
-const MAP_ZOOM_LEVELS = [5, 8, 11, 14];
-const DISPLAY_ZOOM_LEVELS = [7, 10, 12, 14];
+const MAP_ZOOM_LEVELS = [5, 9, 11, 14];
+const DISPLAY_ZOOM_LEVELS = [7, 11, 12, 14];
 let MAX_VISIBLE_GRID_CELLS = 5000;
 const SETTLEMENT_GRID_SIZE = 0.25;
 let DETAIL_ZOOM_MIN = 14;
@@ -559,6 +559,10 @@ async function initMap() {
   drawMapBaseLayer();
 
   map.on("movestart", () => {
+    visibleLandRequestId += 1;
+    cancelPendingGridRender();
+    invalidateGridGeometryCache();
+    visibleCells = [];
     isMapMoving = true;
     setGridCanvasVisible(false);
     clearGridGpuLayer();
@@ -570,11 +574,13 @@ async function initMap() {
     isMapMoving = false;
     if (enforceDiscreteZoom()) return;
     setGridCanvasVisible(true);
+    syncGridGpuCanvas();
+    invalidateGridGeometryCache();
     updateZoomBadge();
     updateSettlementMapSource();
     requestMapBaseRender();
-    scheduleVisibleLandRefresh();
-    scheduleGridUpdate();
+    scheduleVisibleLandRefresh(true);
+    scheduleGridUpdate(true);
   };
   map.on("zoomend", handleSettledMapChange);
   map.on("moveend", handleSettledMapChange);
@@ -582,8 +588,10 @@ async function initMap() {
     setGridCanvasVisible(false);
     syncMapTilesCanvas();
     syncGridGpuCanvas();
+    invalidateGridGeometryCache();
     requestMapBaseRender();
-    scheduleGridUpdate();
+    scheduleVisibleLandRefresh(true);
+    scheduleGridUpdate(true);
   });
   map.on("click", (event) => {
     selectCellAtMapPoint({
@@ -631,21 +639,34 @@ function addMapZoomControl() {
   container.append(zoomIn, zoomOut);
   mapBoard.appendChild(container);
   mapBoard.addEventListener("wheel", (event) => {
-    if (!event.ctrlKey) event.preventDefault();
+    event.preventDefault();
     const now = Date.now();
-    if (now - lastWheelZoomAt < 260) return;
+    if (now - lastWheelZoomAt < 180) return;
     lastWheelZoomAt = now;
-    stepMapZoom(event.deltaY < 0 ? 1 : -1);
+    stepMapZoom(event.deltaY < 0 ? 1 : -1, mapCursorLngLat(event));
   }, { passive: false });
 }
 
-function stepMapZoom(direction) {
+function mapCursorLngLat(event) {
+  if (!map || !mapBoard || typeof map.unproject !== "function") return null;
+  const rect = mapBoard.getBoundingClientRect();
+  const x = event.clientX - rect.left;
+  const y = event.clientY - rect.top;
+  if (x < 0 || y < 0 || x > rect.width || y > rect.height) return null;
+  const point = map.unproject([x, y]);
+  if (!point || !Number.isFinite(point.lng) || !Number.isFinite(point.lat)) return null;
+  return [point.lng, point.lat];
+}
+
+function stepMapZoom(direction, around = null) {
   if (!map) return;
   const current = snapZoom(map.getZoom());
   const index = MAP_ZOOM_LEVELS.indexOf(current);
   const nextIndex = Math.max(0, Math.min(MAP_ZOOM_LEVELS.length - 1, index + direction));
   if (nextIndex === index) return;
-  map.easeTo({ zoom: MAP_ZOOM_LEVELS[nextIndex], duration: 220 });
+  const options = { zoom: MAP_ZOOM_LEVELS[nextIndex], duration: 220 };
+  if (Array.isArray(around)) options.around = around;
+  map.easeTo(options);
 }
 
 function createUkraineVectorStyle() {
@@ -904,7 +925,7 @@ function mapViewportQuery() {
 function currentChunkLevel() {
   const zoom = Math.round(displayZoomForMapZoom(map?.getZoom?.() || 7));
   if (zoom <= 7) return 1;
-  if (zoom <= 10) return 2;
+  if (zoom <= 11) return 2;
   if (zoom <= 12) return 3;
   return 4;
 }
@@ -944,6 +965,7 @@ function invalidateChunkCache() {
 
 async function refreshVisibleLand() {
   if (!map) return;
+  const requestId = ++visibleLandRequestId;
   try {
     const mode = currentLandRenderMode();
     resetLandLayerForMode(mode);
@@ -953,6 +975,7 @@ async function refreshVisibleLand() {
       const cacheKey = chunkCacheKey(currentChunkLevel(), query);
       const cached = getChunkCache(cacheKey);
       const payload = cached || await requestJson(`/api/map/overview?z=${query.get("zoom")}&${query.toString()}`);
+      if (requestId !== visibleLandRequestId || currentLandRenderMode() !== "overview") return;
       if (payload?.notModified) return;
       if (!cached) setChunkCache(cacheKey, payload);
       overviewTerritories = Array.isArray(payload.territories) ? payload.territories : [];
@@ -966,7 +989,6 @@ async function refreshVisibleLand() {
     if (!query) return;
     const boundsKey = chunkCacheKey(4, query);
     if (boundsKey === visibleLandBoundsKey && visibleLandVersion === marketVersion) return;
-    const requestId = ++visibleLandRequestId;
     const cached = getChunkCache(boundsKey);
     const payload = cached || await requestJson(`/api/map/cells?${query.toString()}`);
     if (requestId !== visibleLandRequestId) return;
@@ -1547,10 +1569,10 @@ function gridGeometryCacheKey(cellsToDraw, rect) {
     visibleLandState.version,
     marketVersion,
     zoom,
-    bounds.getWest().toFixed(4),
-    bounds.getEast().toFixed(4),
-    bounds.getSouth().toFixed(4),
-    bounds.getNorth().toFixed(4),
+    bounds.getWest().toFixed(6),
+    bounds.getEast().toFixed(6),
+    bounds.getSouth().toFixed(6),
+    bounds.getNorth().toFixed(6),
     rect.width,
     rect.height,
     cellsToDraw.length,
@@ -1892,12 +1914,12 @@ function overviewGridStepForZoom(zoom) {
   return 12;
 }
 
-function scheduleGridUpdate() {
+function scheduleGridUpdate(immediate = false) {
   clearTimeout(gridUpdateTimer);
   gridUpdateTimer = setTimeout(() => {
     gridUpdateTimer = null;
     updateGrid();
-  }, isLowPowerDevice() ? 420 : 300);
+  }, immediate ? 0 : isLowPowerDevice() ? 420 : 300);
 }
 
 function cancelPendingGridRender() {
