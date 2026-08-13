@@ -659,10 +659,10 @@ function chunkCellSpanForLevel(level) {
 }
 
 function overviewGroupSpanForLevel(level) {
-  if (level <= 1) return 96;
-  if (level === 2) return 48;
-  if (level === 3) return 24;
-  return 16;
+  if (level <= 1) return 24;
+  if (level === 2) return 12;
+  if (level === 3) return 6;
+  return 4;
 }
 
 function chunkBoundsForRange(bounds, span, preload = 1) {
@@ -732,7 +732,7 @@ function mapOverviewTerritories(bounds, zoom, playerId = "") {
   const chunkSpan = chunkCellSpanForLevel(level);
   const groupSpan = overviewGroupSpanForLevel(level);
   const chunkRange = chunkBoundsForRange(bounds, chunkSpan, 1);
-  const groups = new Map();
+  const rows = new Map();
 
   Object.entries(market.land || {}).forEach(([id, entry]) => {
     if (!isPlayableLandId(id)) return;
@@ -745,9 +745,9 @@ function mapOverviewTerritories(bounds, zoom, playerId = "") {
     const groupQ = Math.floor(q / groupSpan) * groupSpan;
     const groupR = Math.floor(r / groupSpan) * groupSpan;
     const color = entry.ownerColor || "#ef7669";
-    const key = `${ownerId}:${color}:${groupQ}:${groupR}`;
-    if (!groups.has(key)) {
-      groups.set(key, {
+    const key = `${ownerId}:${color}:${groupQ}:${groupR}:${r}`;
+    if (!rows.has(key)) {
+      rows.set(key, {
         ownerId,
         ownerKind: playerId && ownerId === playerId ? "player" : "rival",
         color,
@@ -755,34 +755,50 @@ function mapOverviewTerritories(bounds, zoom, playerId = "") {
         parentR,
         groupQ,
         groupR,
-        minQ: q,
-        maxQ: q,
-        minR: r,
-        maxR: r,
-        cellCount: 0
+        r,
+        qs: []
       });
     }
-    const group = groups.get(key);
-    group.minQ = Math.min(group.minQ, q);
-    group.maxQ = Math.max(group.maxQ, q);
-    group.minR = Math.min(group.minR, r);
-    group.maxR = Math.max(group.maxR, r);
-    group.cellCount += 1;
+    rows.get(key).qs.push(q);
   });
 
-  const maxGroups = level === 1 ? 900 : level === 2 ? 1500 : 2400;
-  const territories = [...groups.values()]
+  const rowRuns = [];
+  rows.forEach((row) => {
+    const qs = [...new Set(row.qs)].sort((a, b) => a - b);
+    let start = null;
+    let previous = null;
+    qs.forEach((q) => {
+      if (start === null) {
+        start = q;
+        previous = q;
+        return;
+      }
+      if (q === previous + 1) {
+        previous = q;
+        return;
+      }
+      rowRuns.push({ ...row, minQ: start, maxQ: previous, cellCount: previous - start + 1 });
+      start = q;
+      previous = q;
+    });
+    if (start !== null) {
+      rowRuns.push({ ...row, minQ: start, maxQ: previous, cellCount: previous - start + 1 });
+    }
+  });
+
+  const maxGroups = level === 1 ? 4800 : level === 2 ? 6400 : 7800;
+  const territories = rowRuns
     .sort((a, b) => b.cellCount - a.cellCount)
     .slice(0, maxGroups)
     .map((group) => {
-      const center = cellCenterFromGrid((group.minQ + group.maxQ) / 2, (group.minR + group.maxR) / 2);
+      const center = cellCenterFromGrid((group.minQ + group.maxQ) / 2, group.r);
       return {
         ownerId: group.ownerId,
         ownerKind: group.ownerKind,
-        chunkId: `z${level}:${group.groupQ / groupSpan}:${group.groupR / groupSpan}:${group.ownerId}`,
-        polygon: rectBoundaryLatLngRangeServer(group.minQ, group.maxQ, group.minR, group.maxR),
+        chunkId: `z${level}:${group.groupQ / groupSpan}:${group.groupR / groupSpan}:${group.r}:${group.minQ}:${group.maxQ}:${group.ownerId}`,
+        polygon: rectBoundaryLatLngRangeServer(group.minQ, group.maxQ, group.r, group.r),
         cellCount: group.cellCount,
-        occupied: Math.min(1, group.cellCount / ((group.maxQ - group.minQ + 1) * (group.maxR - group.minR + 1))),
+        occupied: 1,
         color: group.color,
         lat: center.lat,
         lng: center.lng
