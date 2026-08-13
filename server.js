@@ -629,6 +629,14 @@ function rectBoundaryLatLngBlockServer(q, r, step) {
   return [[north, west], [north, east], [south, east], [south, west]];
 }
 
+function rectBoundaryLatLngRangeServer(minQ, maxQ, minR, maxR) {
+  const west = MAP_BOUNDS.west + minQ * RECT_CELL_WIDTH_DEGREES;
+  const east = MAP_BOUNDS.west + (maxQ + 1) * RECT_CELL_WIDTH_DEGREES;
+  const north = MAP_BOUNDS.north - minR * RECT_CELL_HEIGHT_DEGREES;
+  const south = MAP_BOUNDS.north - (maxR + 1) * RECT_CELL_HEIGHT_DEGREES;
+  return [[north, west], [north, east], [south, east], [south, west]];
+}
+
 function overviewGridStepForZoomServer(zoom) {
   if (zoom <= 7) return 512;
   if (zoom <= 10) return 256;
@@ -735,10 +743,18 @@ function mapOverviewTerritories(bounds, zoom, playerId = "") {
         color,
         parentQ,
         parentR,
+        minQ: q,
+        maxQ: q,
+        minR: r,
+        maxR: r,
         cellCount: 0
       });
     }
     const group = groups.get(key);
+    group.minQ = Math.min(group.minQ, q);
+    group.maxQ = Math.max(group.maxQ, q);
+    group.minR = Math.min(group.minR, r);
+    group.maxR = Math.max(group.maxR, r);
     group.cellCount += 1;
   });
 
@@ -747,14 +763,14 @@ function mapOverviewTerritories(bounds, zoom, playerId = "") {
     .sort((a, b) => b.cellCount - a.cellCount)
     .slice(0, maxGroups)
     .map((group) => {
-      const center = cellCenterFromGrid(group.parentQ + step / 2, group.parentR + step / 2);
+      const center = cellCenterFromGrid((group.minQ + group.maxQ) / 2, (group.minR + group.maxR) / 2);
       return {
         ownerId: group.ownerId,
         ownerKind: group.ownerKind,
         chunkId: `z${level}:${group.parentQ / step}:${group.parentR / step}`,
-        polygon: rectBoundaryLatLngBlockServer(group.parentQ, group.parentR, step),
+        polygon: rectBoundaryLatLngRangeServer(group.minQ, group.maxQ, group.minR, group.maxR),
         cellCount: group.cellCount,
-        occupied: Math.min(1, group.cellCount / (step * step)),
+        occupied: Math.min(1, group.cellCount / ((group.maxQ - group.minQ + 1) * (group.maxR - group.minR + 1))),
         color: group.color,
         lat: center.lat,
         lng: center.lng

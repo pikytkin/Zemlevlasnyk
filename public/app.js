@@ -194,6 +194,7 @@ let activeChatLoading = false;
 let newsRows = [];
 let newsTimer = null;
 let visibleCells = [];
+let landRenderMode = null;
 let cellLayerById = new Map();
 let selectedCellIds = new Set();
 let purchaseInProgress = false;
@@ -944,7 +945,9 @@ function invalidateChunkCache() {
 async function refreshVisibleLand() {
   if (!map) return;
   try {
-    if (isOverviewZoom()) {
+    const mode = currentLandRenderMode();
+    resetLandLayerForMode(mode);
+    if (mode === "overview") {
       const query = mapViewportQuery();
       if (!query) return;
       const cacheKey = chunkCacheKey(currentChunkLevel(), query);
@@ -958,6 +961,7 @@ async function refreshVisibleLand() {
       return;
     }
 
+    overviewTerritories = [];
     const query = mapViewportQuery();
     if (!query) return;
     const boundsKey = chunkCacheKey(4, query);
@@ -1534,7 +1538,12 @@ function gridGeometryCacheKey(cellsToDraw, rect) {
   const zoom = snapZoom(map.getZoom());
   const selectionKey = selectedCellId || "";
   const selectionSize = selectedCellIds.size;
+  const firstCell = cellsToDraw[0]?.id || "";
+  const middleCell = cellsToDraw[Math.floor(cellsToDraw.length / 2)]?.id || "";
+  const lastCell = cellsToDraw[cellsToDraw.length - 1]?.id || "";
+  const cellKey = `${firstCell}:${middleCell}:${lastCell}`;
   return [
+    currentLandRenderMode(),
     visibleLandState.version,
     marketVersion,
     zoom,
@@ -1545,6 +1554,7 @@ function gridGeometryCacheKey(cellsToDraw, rect) {
     rect.width,
     rect.height,
     cellsToDraw.length,
+    cellKey,
     selectionKey,
     selectionSize,
     shouldDrawCellBorders() ? "cell-borders" : shouldDrawTerritoryBorders() ? "territory-borders" : "no-borders"
@@ -1552,12 +1562,11 @@ function gridGeometryCacheKey(cellsToDraw, rect) {
 }
 
 function shouldDrawCellBorders() {
-  return map && map.getZoom() >= 14;
+  return map && !isOverviewZoom() && map.getZoom() >= detailZoomStart();
 }
 
 function shouldDrawTerritoryBorders() {
-  const zoom = map?.getZoom?.() || 0;
-  return zoom >= 11 && zoom < 14;
+  return map && isOverviewZoom();
 }
 
 function buildGridGeometry(cellsToDraw, rect) {
@@ -1724,6 +1733,8 @@ async function updateGrid() {
   cancelPendingGridRender();
   gridRenderJob += 1;
   const renderJob = gridRenderJob;
+  const mode = currentLandRenderMode();
+  resetLandLayerForMode(mode);
   cellLayerById = new Map();
   detailedMapMarkerCount = 0;
   clearGridGpuLayer();
@@ -1733,7 +1744,7 @@ async function updateGrid() {
     renderSelectedCell();
     return;
   }
-  if (isOverviewZoom()) {
+  if (mode === "overview") {
     visibleCells = [];
     renderOverviewGridLayer();
     updateSettlementLabelVisibility();
@@ -1741,10 +1752,10 @@ async function updateGrid() {
     return;
   }
   visibleCells = gridCellsInView();
-  if (renderJob !== gridRenderJob || isOverviewZoom()) return;
+  if (renderJob !== gridRenderJob || currentLandRenderMode() !== "detail") return;
   if (gridSkippedForDensity) {
     visibleCells = [];
-    renderOverviewGridLayer();
+    clearGridGpuLayer();
     updateSettlementLabelVisibility();
     renderSelectedCell();
     return;
@@ -1806,6 +1817,19 @@ function isOverviewZoom() {
   return map.getZoom() < detailZoomStart();
 }
 
+function currentLandRenderMode() {
+  return isOverviewZoom() ? "overview" : "detail";
+}
+
+function resetLandLayerForMode(nextMode) {
+  if (landRenderMode === nextMode) return;
+  landRenderMode = nextMode;
+  visibleCells = [];
+  invalidateGridGeometryCache();
+  clearGridGpuLayer();
+  if (nextMode === "detail") overviewTerritories = [];
+}
+
 function detailZoomStart() {
   const maxIndex = MAP_ZOOM_LEVELS.length - 1;
   const firstDetailIndex = Math.max(0, maxIndex - DETAIL_ZOOM_LEVEL_COUNT + 1);
@@ -1831,8 +1855,17 @@ function overviewCellStrokeColor(cell) {
 }
 
 function renderOverviewGridLayer() {
+  if (!isOverviewZoom()) {
+    visibleCells = [];
+    clearGridGpuLayer();
+    return;
+  }
   const cells = overviewTerritoryCells();
-  if (!cells.length) return;
+  if (!cells.length) {
+    visibleCells = [];
+    clearGridGpuLayer();
+    return;
+  }
   visibleCells = cells;
   renderGridGpuLayer();
 }
