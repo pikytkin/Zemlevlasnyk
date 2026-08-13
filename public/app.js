@@ -165,8 +165,6 @@ let gridGeometryCache = null;
 let mapPointerState = null;
 let ukrainePolygons = fallbackUkrainePolygon;
 let ukraineCellCache = new Map();
-let playableCellSet = null;
-let playableCellSetReady = false;
 let cellCache = new Map();
 let settlementPlaces = [];
 let settlementGrid = new Map();
@@ -442,7 +440,10 @@ function startGame(nextPlayer, nextState) {
   authScreen.classList.add("is-hidden");
   gameScreen.classList.remove("is-hidden");
   renderPlayerHeader();
-  loadGameSettings().then(() => initMap());
+  loadGameSettings().then(() => initMap().catch((error) => {
+    console.error("initMap failed:", error);
+    showGameMessage(error?.message || "Не вдалося завантажити карту.");
+  }));
   render();
   showGameMessage("Карту володінь завантажено.");
   refreshMessageSummary();
@@ -840,6 +841,9 @@ async function refreshGlobalMarket() {
     const nextMarket = await requestJson(`/api/market?version=${encodeURIComponent(marketVersion || 0)}`);
     if (nextMarket?.notModified) return;
     const nextOwnedCount = Number(nextMarket?.stats?.ownedCells) || 0;
+    if (nextMarket?.resetAt && !state.lastAdminResetAt) {
+      state.lastAdminResetAt = nextMarket.resetAt;
+    }
     const resetChanged = nextMarket?.resetAt && state.lastAdminResetAt !== nextMarket.resetAt;
     const marketChanged = nextOwnedCount !== marketOwnedCellCount
       || Number(nextMarket?.version) !== marketVersion
@@ -1025,7 +1029,6 @@ async function loadUkraineBoundary() {
     ukrainePolygons = fallbackUkrainePolygon;
     showGameMessage("Не вдалося завантажити локальний кордон, використано резервний контур України.");
   }
-  requestIdleWork(buildPlayableCellSetInBackground);
 }
 
 function extractPolygonsFromGeoJson(geojson) {
@@ -2010,26 +2013,8 @@ function notifyGridTooDense() {
 }
 
 function isPlayableGridCell(q, r) {
-  if (playableCellSetReady) return playableCellSet.has(`${q}:${r}`);
   const { lng, lat } = cellCenterFromGrid(q, r);
   return pointInUkraine([lng, lat]);
-}
-
-function buildPlayableCellSetInBackground() {
-  if (playableCellSetReady || !ukrainePolygons.length) return;
-  const set = new Set();
-  const minQ = Math.floor((MAP_BOUNDS.west - MAP_BOUNDS.west) / RECT_CELL_WIDTH_DEGREES);
-  const maxQ = Math.ceil((MAP_BOUNDS.east - MAP_BOUNDS.west) / RECT_CELL_WIDTH_DEGREES);
-  const minR = Math.floor((MAP_BOUNDS.north - MAP_BOUNDS.north) / RECT_CELL_HEIGHT_DEGREES);
-  const maxR = Math.ceil((MAP_BOUNDS.north - MAP_BOUNDS.south) / RECT_CELL_HEIGHT_DEGREES);
-  for (let q = minQ; q <= maxQ; q += 1) {
-    for (let r = minR; r <= maxR; r += 1) {
-      const { lng, lat } = cellCenterFromGrid(q, r);
-      if (pointInUkraine([lng, lat])) set.add(`${q}:${r}`);
-    }
-  }
-  playableCellSet = set;
-  playableCellSetReady = true;
 }
 
 function gridCellLimitForZoom() {
