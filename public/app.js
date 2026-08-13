@@ -37,12 +37,12 @@ const RECT_CELL_WIDTH_DEGREES = 0.018;
 const RECT_CELL_HEIGHT_DEGREES = 0.012;
 const MAP_BOUNDS = { south: 43.2, west: 21.0, north: 53.0, east: 41.2 };
 const TILE_SIZE = 256;
-const DETAIL_ZOOM_LEVEL_COUNT = 2;
-const MAP_ZOOM_LEVELS = [7, 9, 11, 13];
-const DISPLAY_ZOOM_LEVELS = [7, 9, 11, 13];
-let MAX_VISIBLE_GRID_CELLS = 5000;
+const DETAIL_ZOOM_LEVEL_COUNT = 3;
+const MAP_ZOOM_LEVELS = [5, 9.55, 10.55, 11.55, 12.45];
+const DISPLAY_ZOOM_LEVELS = [7, 9, 11, 12, 13];
+let MAX_VISIBLE_GRID_CELLS = 20000;
 const SETTLEMENT_GRID_SIZE = 0.25;
-let DETAIL_ZOOM_MIN = 13;
+let DETAIL_ZOOM_MIN = 11;
 let DRAW_GRID = true;
 let CLAIM_BATCH_SIZE = 1000;
 let SELL_REFUND_RATE = 0.62;
@@ -198,6 +198,7 @@ let landRenderMode = null;
 let cellLayerById = new Map();
 let selectedCellIds = new Set();
 let purchaseInProgress = false;
+let landOperationOverlay = null;
 let selectionDrag = null;
 let clusterSelectionMode = false;
 let suppressMapClick = false;
@@ -368,9 +369,9 @@ function applyGameSettings(settings) {
   const economy = gameSettings?.economy || {};
   const upgrades = gameSettings?.upgrades || {};
   MAX_VISIBLE_GRID_CELLS = Number.isFinite(economy.maxVisibleCells)
-    ? Math.max(600, Math.min(5000, economy.maxVisibleCells))
-    : (isLowPowerDevice() ? 2800 : 5000);
-  DETAIL_ZOOM_MIN = Number.isFinite(economy.detailZoomMin) ? Math.max(11, Math.min(13, economy.detailZoomMin)) : DETAIL_ZOOM_MIN;
+    ? Math.max(12000, Math.min(20000, economy.maxVisibleCells))
+    : (isLowPowerDevice() ? 9000 : 18000);
+  DETAIL_ZOOM_MIN = 11;
   DRAW_GRID = economy.drawGrid !== false;
   CLAIM_BATCH_SIZE = Number.isFinite(economy.claimBatchSize) ? economy.claimBatchSize : CLAIM_BATCH_SIZE;
   SELL_REFUND_RATE = Number.isFinite(economy.sellRefundPercent) ? economy.sellRefundPercent / 100 : SELL_REFUND_RATE;
@@ -547,7 +548,7 @@ async function initMap() {
   await loadUkraineBoundary();
   useFallbackSettlements();
   updateSettlementMapSource();
-  requestIdleWork(loadSettlementsInBackground);
+  loadSettlementsInBackground();
   await refreshGlobalMarket();
   await refreshVisibleLand();
   await refreshLeaderboard();
@@ -562,13 +563,13 @@ async function initMap() {
     visibleLandRequestId += 1;
     cancelPendingGridRender();
     invalidateGridGeometryCache();
-    visibleCells = [];
     isMapMoving = true;
-    setGridCanvasVisible(false);
-    clearGridGpuLayer();
+    syncGridGpuCanvas();
   });
   map.on("move", () => {
+    invalidateGridGeometryCache();
     requestMapBaseRender();
+    requestGridPanRender();
   });
   const handleSettledMapChange = () => {
     isMapMoving = false;
@@ -585,7 +586,6 @@ async function initMap() {
   map.on("zoomend", handleSettledMapChange);
   map.on("moveend", handleSettledMapChange);
   map.on("resize", () => {
-    setGridCanvasVisible(false);
     syncMapTilesCanvas();
     syncGridGpuCanvas();
     invalidateGridGeometryCache();
@@ -693,7 +693,7 @@ function createUkraineVectorStyle() {
         source: "oblasts",
         paint: {
           "line-color": "rgba(45, 86, 58, 0.36)",
-          "line-width": ["interpolate", ["linear"], ["zoom"], 7, 0.7, 13, 1.4]
+          "line-width": ["interpolate", ["linear"], ["zoom"], MAP_ZOOM_LEVELS[0], 0.7, MAP_ZOOM_LEVELS[MAP_ZOOM_LEVELS.length - 1], 1.4]
         }
       },
       {
@@ -702,7 +702,7 @@ function createUkraineVectorStyle() {
         source: "ukraine",
         paint: {
           "line-color": "#18231d",
-          "line-width": ["interpolate", ["linear"], ["zoom"], 7, 1.6, 13, 2.6]
+          "line-width": ["interpolate", ["linear"], ["zoom"], MAP_ZOOM_LEVELS[0], 1.6, MAP_ZOOM_LEVELS[MAP_ZOOM_LEVELS.length - 1], 2.6]
         }
       },
     ]
@@ -827,33 +827,95 @@ async function initSplashMap() {
   }
 }
 
+function settlementWeightForType(type) {
+  if (type === "oblast") return 900000;
+  if (type === "rayon") return 280000;
+  if (type === "city") return 160000;
+  if (type === "town") return 42000;
+  return 9000;
+}
+
+function curatedSettlementLabels() {
+  const labels = [
+    ["Київська область", 50.45, 30.52, 7, "oblast"],
+    ["Львівська область", 49.84, 24.03, 7, "oblast"],
+    ["Одеська область", 46.48, 30.72, 7, "oblast"],
+    ["Харківська область", 49.99, 36.23, 7, "oblast"],
+    ["Дніпропетровська область", 48.46, 35.05, 7, "oblast"],
+    ["Запорізька область", 47.84, 35.14, 7, "oblast"],
+    ["Полтавська область", 49.59, 34.55, 7, "oblast"],
+    ["Вінницька область", 49.23, 28.47, 7, "oblast"],
+    ["Черкаська область", 49.44, 32.06, 7, "oblast"],
+    ["Кіровоградська область", 48.51, 32.26, 7, "oblast"],
+    ["Чернігівська область", 51.50, 31.29, 7, "oblast"],
+    ["Сумська область", 50.91, 34.80, 7, "oblast"],
+    ["Житомирська область", 50.25, 28.66, 7, "oblast"],
+    ["Рівненська область", 50.62, 26.25, 7, "oblast"],
+    ["Волинська область", 50.75, 25.33, 7, "oblast"],
+    ["Тернопільська область", 49.55, 25.59, 7, "oblast"],
+    ["Хмельницька область", 49.42, 26.99, 7, "oblast"],
+    ["Чернівецька область", 48.29, 25.94, 7, "oblast"],
+    ["Івано-Франківська область", 48.92, 24.71, 7, "oblast"],
+    ["Закарпатська область", 48.62, 22.29, 7, "oblast"],
+    ["Миколаївська область", 46.98, 31.99, 7, "oblast"],
+    ["Херсонська область", 46.64, 32.62, 7, "oblast"],
+    ["Донецька область", 48.02, 37.80, 7, "oblast"],
+    ["Луганська область", 48.57, 39.31, 7, "oblast"],
+    ["Автономна Республіка Крим", 44.95, 34.10, 7, "oblast"],
+    ["Кропивницький район", 48.51, 32.26, 9, "rayon"],
+    ["Олександрійський район", 48.67, 33.12, 9, "rayon"],
+    ["Голованівський район", 48.39, 30.45, 9, "rayon"],
+    ["Новоукраїнський район", 48.33, 31.53, 9, "rayon"],
+    ["Полтавський район", 49.59, 34.55, 9, "rayon"],
+    ["Кременчуцький район", 49.07, 33.42, 9, "rayon"],
+    ["Уманський район", 48.75, 30.22, 9, "rayon"],
+    ["Черкаський район", 49.44, 32.06, 9, "rayon"],
+    ["Білоцерківський район", 49.80, 30.12, 9, "rayon"],
+    ["Львівський район", 49.84, 24.03, 9, "rayon"],
+    ["Тернопільський район", 49.55, 25.59, 9, "rayon"],
+    ["Київ", 50.45, 30.52, 11, "city"],
+    ["Львів", 49.84, 24.03, 11, "city"],
+    ["Одеса", 46.48, 30.72, 11, "city"],
+    ["Харків", 49.99, 36.23, 11, "city"],
+    ["Дніпро", 48.46, 35.05, 11, "city"],
+    ["Кропивницький", 48.51, 32.26, 11, "city"],
+    ["Полтава", 49.59, 34.55, 11, "city"],
+    ["Черкаси", 49.44, 32.06, 11, "city"],
+    ["Вінниця", 49.23, 28.47, 11, "city"],
+    ["Кременчук", 49.07, 33.42, 11, "city"],
+    ["Умань", 48.75, 30.22, 11, "city"],
+    ["Олександрія", 48.67, 33.12, 11, "city"],
+    ["Знам'янка", 48.71, 32.66, 12, "town"],
+    ["Новоукраїнка", 48.33, 31.53, 12, "town"],
+    ["Долинська", 48.11, 32.76, 12, "town"],
+    ["Світловодськ", 49.05, 33.25, 12, "town"],
+    ["Гайворон", 48.34, 29.86, 12, "town"],
+    ["Миргород", 49.97, 33.61, 12, "town"],
+    ["Решетилівка", 49.57, 34.08, 12, "town"],
+    ["Пантаївка", 48.67, 32.88, 13, "village"],
+    ["Суботці", 48.66, 32.52, 13, "village"],
+    ["Дмитрівка", 48.77, 32.72, 13, "village"],
+    ["Нова Прага", 48.57, 32.90, 13, "village"],
+    ["Чорний Ліс", 48.70, 32.48, 13, "village"],
+    ["Велика Виска", 48.37, 31.97, 13, "village"],
+    ["Аджамка", 48.54, 32.54, 13, "village"],
+    ["Мала Виска", 48.64, 31.64, 13, "village"]
+  ];
+  return labels.map(([n, lat, lng, z, type]) => ({ n, lat, lng, z, type, p: settlementWeightForType(type), f: "PPL" }));
+}
+
 async function loadSettlements() {
-  try {
-    const places = await fetch("/settlements.json").then((response) => {
-      if (!response.ok) throw new Error("Settlements unavailable.");
-      return response.json();
-    });
-    settlementPlaces = Array.isArray(places) ? places : [];
-    settlementGrid = buildSettlementGrid(settlementPlaces);
-  } catch {
-    settlementPlaces = cityLabels.map(([n, lat, lng]) => ({ n, lat, lng, p: 0, f: "PPL" }));
-    settlementGrid = buildSettlementGrid(settlementPlaces);
-  }
+  useFallbackSettlements();
 }
 
 function useFallbackSettlements() {
-  settlementPlaces = cityLabels.map(([n, lat, lng, minZoom]) => ({ n, lat, lng, p: minZoom <= 7 ? 250000 : 20000, f: "PPL" }));
+  settlementPlaces = curatedSettlementLabels();
   settlementGrid = buildSettlementGrid(settlementPlaces);
 }
 
 async function loadSettlementsInBackground() {
-  try {
-    await loadSettlements();
-    updateSettlementMapSource();
-  } catch {
-    useFallbackSettlements();
-    updateSettlementMapSource();
-  }
+  useFallbackSettlements();
+  updateSettlementMapSource();
 }
 
 function requestIdleWork(callback) {
@@ -927,6 +989,7 @@ function currentChunkLevel() {
   if (zoom <= 7) return 1;
   if (zoom <= 9) return 2;
   if (zoom <= 11) return 3;
+  if (zoom <= 12) return 4;
   return 4;
 }
 
@@ -1377,7 +1440,7 @@ function drawMapBaseLayer() {
   const height = rect.height;
   context.setTransform(ratio, 0, 0, ratio, 0, 0);
   context.clearRect(0, 0, width, height);
-  if (!isMapMoving) drawSettlementLabelsOnCanvas(context);
+  drawSettlementLabelsOnCanvas(context);
 }
 
 function requestMapBaseRender() {
@@ -1417,24 +1480,26 @@ function drawUkrainePolygons(context, polygons, width, height, bounds, staticPre
 }
 
 function drawSettlementLabelsOnCanvas(context) {
-  const zoom = map?.getZoom?.() || MAP_ZOOM_LEVELS[0];
+  const zoom = displayZoomForMapZoom(map?.getZoom?.() || MAP_ZOOM_LEVELS[0]);
   const bounds = map.getBounds().pad(0.08);
   const lowPower = isLowPowerDevice();
-  const limit = zoom >= MAP_ZOOM_LEVELS[3] ? (lowPower ? 180 : 360) : zoom >= MAP_ZOOM_LEVELS[2] ? 140 : 42;
-  const minPopulation = zoom >= MAP_ZOOM_LEVELS[3] ? 0 : zoom >= MAP_ZOOM_LEVELS[2] ? 3500 : 120000;
+  const limit = zoom >= 13 ? (lowPower ? 120 : 220)
+    : zoom >= 12 ? (lowPower ? 90 : 160)
+      : zoom >= 11 ? (lowPower ? 70 : 120)
+        : zoom >= 9 ? (lowPower ? 42 : 72)
+          : 28;
   const labels = settlementPlaces
     .filter((place) => {
       const lat = Number(place.lat);
       const lng = Number(place.lng);
       if (!Number.isFinite(lat) || !Number.isFinite(lng)) return false;
       if (!pointInBounds(lat, lng, bounds)) return false;
-      return Number(place.p || place.population || 0) >= minPopulation || zoom >= MAP_ZOOM_LEVELS[3];
+      return zoom >= Number(place.z || 13);
     })
-    .sort((a, b) => Number(b.p || b.population || 0) - Number(a.p || a.population || 0))
+    .sort((a, b) => Number(a.z || 13) - Number(b.z || 13) || Number(b.p || b.population || 0) - Number(a.p || a.population || 0))
     .slice(0, limit);
 
   context.save();
-  context.font = "600 13px system-ui, sans-serif";
   context.fillStyle = "rgba(20, 31, 24, 0.82)";
   context.strokeStyle = "rgba(255, 255, 255, 0.88)";
   context.lineWidth = 3;
@@ -1443,6 +1508,8 @@ function drawSettlementLabelsOnCanvas(context) {
     const lng = Number(place.lng);
     const name = place.n || place.name || place.asciiname || place.toponymName || "населений пункт";
     const point = map.latLngToContainerPoint([lat, lng]);
+    const fontSize = place.type === "oblast" ? 13 : place.type === "rayon" ? 12 : place.type === "city" ? 13 : 11;
+    context.font = `600 ${fontSize}px system-ui, sans-serif`;
     context.strokeText(name, point.x, point.y);
     context.fillText(name, point.x, point.y);
   });
@@ -1608,7 +1675,7 @@ function buildGridGeometry(cellsToDraw, rect) {
 }
 
 function renderGridGpuLayer() {
-  if (!gridGl || !gridProgram || !gridFillBuffer || !map || !DRAW_GRID || isMapMoving) {
+  if (!gridGl || !gridProgram || !gridFillBuffer || !map || !DRAW_GRID) {
     clearGridGpuLayer();
     return;
   }
@@ -1655,7 +1722,7 @@ function renderGridGpuLayer() {
 }
 
 function requestGridPanRender() {
-  if (!gridCanvas || !DRAW_GRID || isMapMoving) return;
+  if (!gridCanvas || !DRAW_GRID) return;
   if (gridPanFrame) return;
   gridPanFrame = requestAnimationFrame(() => {
     gridPanFrame = null;
@@ -1908,9 +1975,10 @@ function overviewTerritoryCells() {
 }
 
 function overviewGridStepForZoom(zoom) {
-  if (zoom <= 5) return 96;
   if (zoom <= 7) return 48;
   if (zoom <= 9) return 24;
+  if (zoom <= 11) return 12;
+  if (zoom <= 12) return 6;
   return 12;
 }
 
@@ -2120,9 +2188,12 @@ function isPlayableGridCell(q, r) {
 }
 
 function gridCellLimitForZoom() {
-  const zoom = map?.getZoom?.() || DETAIL_ZOOM_MIN;
+  const zoom = displayZoomForMapZoom(map?.getZoom?.() || detailZoomStart());
   const lowPower = isLowPowerDevice();
-  const zoomLimit = zoom >= 13 ? (lowPower ? 2800 : 5000) : zoom >= 11 ? (lowPower ? 2200 : 4200) : (lowPower ? 1500 : 3000);
+  const zoomLimit = zoom >= 13 ? (lowPower ? 10000 : 18000)
+    : zoom >= 12 ? (lowPower ? 9000 : 16000)
+      : zoom >= 11 ? (lowPower ? 8000 : 14000)
+        : (lowPower ? 2400 : 4200);
   return Math.min(MAX_VISIBLE_GRID_CELLS, zoomLimit);
 }
 
@@ -2774,6 +2845,33 @@ function setSavingButton(button, isSaving, savedText = "Збережено") {
   };
 }
 
+function ensureLandOperationOverlay() {
+  if (landOperationOverlay) return landOperationOverlay;
+  landOperationOverlay = document.createElement("div");
+  landOperationOverlay.className = "land-operation-overlay is-hidden";
+  landOperationOverlay.innerHTML = `
+    <div class="land-operation-panel" role="status" aria-live="polite">
+      <div class="land-operation-spinner"></div>
+      <strong>Йде реєстрація права власності</strong>
+      <p>Перевіряємо ділянки, готуємо документи та вносимо запис у земельний реєстр.</p>
+      <small id="landOperationCount"></small>
+    </div>
+  `;
+  document.body.appendChild(landOperationOverlay);
+  return landOperationOverlay;
+}
+
+function showLandOperationOverlay(count = 1) {
+  const overlay = ensureLandOperationOverlay();
+  const counter = overlay.querySelector("#landOperationCount");
+  if (counter) counter.textContent = count > 1 ? `У пакеті: ${count} ділянок` : "Одна ділянка";
+  overlay.classList.remove("is-hidden");
+}
+
+function hideLandOperationOverlay() {
+  landOperationOverlay?.classList.add("is-hidden");
+}
+
 async function buySelectedCell() {
   if (purchaseInProgress) return;
   const cells = freeSelectedCells();
@@ -2786,6 +2884,7 @@ async function buySelectedCell() {
 
   purchaseInProgress = true;
   buyButton.disabled = true;
+  showLandOperationOverlay(cells.length);
   try {
     const claimedIds = new Set();
     for (let index = 0; index < cells.length; index += CLAIM_BATCH_SIZE) {
@@ -2825,6 +2924,7 @@ async function buySelectedCell() {
   } finally {
     purchaseInProgress = false;
     buyButton.disabled = false;
+    hideLandOperationOverlay();
   }
 
   const finalPrice = cells.reduce((sum, cell) => sum + cell.price, 0);
@@ -3445,6 +3545,27 @@ function renderSelectedCell() {
     buildingButton.disabled = true;
     machineryButton.disabled = true;
     sellButton.disabled = true;
+    return;
+  }
+
+  if (isOverviewZoom()) {
+    const cell = getCell(selectedCellId);
+    cellTitle.textContent = cell ? "Огляд території" : "Оберіть ділянку";
+    cellDetails.innerHTML = `<div><dt>Масштаб</dt><dd>Для операцій із землею наблизьте карту до рівня 150, 75 або 40 комірок по ширині.</dd></div>`;
+    setActionButton(buyButton, "Купити землю", "Доступно на 3 найближчих масштабах");
+    setActionButton(contactOwnerButton, "Зв'язатися з власником", "Наблизьте карту до ділянки");
+    setActionButton(upgradeButton, "Інвестиції в добрива", "Доступно на 3 найближчих масштабах");
+    setActionButton(buildingButton, "Побудувати", "Доступно на 3 найближчих масштабах");
+    setActionButton(machineryButton, "Купити техніку", "Доступно на 3 найближчих масштабах");
+    setActionButton(sellButton, "Продати землю", "Доступно на 3 найближчих масштабах");
+    buyButton.disabled = true;
+    if (contactOwnerButton) contactOwnerButton.disabled = true;
+    upgradeButton.disabled = true;
+    buildingButton.disabled = true;
+    machineryButton.disabled = true;
+    sellButton.disabled = true;
+    showSelectionPopup("Наблизьте карту, щоб працювати з окремими ділянками.");
+    if (cellInfoOpen) cellInfoPanel?.classList.remove("is-hidden");
     return;
   }
 

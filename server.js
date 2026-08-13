@@ -49,8 +49,8 @@ const DEFAULT_SETTINGS = {
     nearbyPriceGrowthPercent: 8,
     nearbyPriceRadius: 2,
     sellRefundPercent: 62,
-    maxVisibleCells: 5000,
-    detailZoomMin: 13,
+    maxVisibleCells: 18000,
+    detailZoomMin: 11,
     claimBatchSize: 1000,
     drawGrid: true
   },
@@ -641,6 +641,7 @@ function overviewGridStepForZoomServer(zoom) {
   if (zoom <= 7) return 512;
   if (zoom <= 9) return 256;
   if (zoom <= 11) return 128;
+  if (zoom <= 12) return 64;
   return 32;
 }
 
@@ -648,6 +649,7 @@ function chunkLevelForZoom(zoom) {
   if (zoom <= 7) return 1;
   if (zoom <= 9) return 2;
   if (zoom <= 11) return 3;
+  if (zoom <= 12) return 4;
   return 4;
 }
 
