@@ -38,11 +38,11 @@ const RECT_CELL_HEIGHT_DEGREES = 0.012;
 const MAP_BOUNDS = { south: 43.2, west: 21.0, north: 53.0, east: 41.2 };
 const TILE_SIZE = 256;
 const DETAIL_ZOOM_LEVEL_COUNT = 2;
-const MAP_ZOOM_LEVELS = [5, 9, 11, 14];
-const DISPLAY_ZOOM_LEVELS = [7, 11, 12, 14];
+const MAP_ZOOM_LEVELS = [7, 9, 11, 13];
+const DISPLAY_ZOOM_LEVELS = [7, 9, 11, 13];
 let MAX_VISIBLE_GRID_CELLS = 5000;
 const SETTLEMENT_GRID_SIZE = 0.25;
-let DETAIL_ZOOM_MIN = 14;
+let DETAIL_ZOOM_MIN = 13;
 let DRAW_GRID = true;
 let CLAIM_BATCH_SIZE = 1000;
 let SELL_REFUND_RATE = 0.62;
@@ -370,7 +370,7 @@ function applyGameSettings(settings) {
   MAX_VISIBLE_GRID_CELLS = Number.isFinite(economy.maxVisibleCells)
     ? Math.max(600, Math.min(5000, economy.maxVisibleCells))
     : (isLowPowerDevice() ? 2800 : 5000);
-  DETAIL_ZOOM_MIN = Number.isFinite(economy.detailZoomMin) ? Math.max(12, Math.min(14, economy.detailZoomMin)) : DETAIL_ZOOM_MIN;
+  DETAIL_ZOOM_MIN = Number.isFinite(economy.detailZoomMin) ? Math.max(11, Math.min(13, economy.detailZoomMin)) : DETAIL_ZOOM_MIN;
   DRAW_GRID = economy.drawGrid !== false;
   CLAIM_BATCH_SIZE = Number.isFinite(economy.claimBatchSize) ? economy.claimBatchSize : CLAIM_BATCH_SIZE;
   SELL_REFUND_RATE = Number.isFinite(economy.sellRefundPercent) ? economy.sellRefundPercent / 100 : SELL_REFUND_RATE;
@@ -693,7 +693,7 @@ function createUkraineVectorStyle() {
         source: "oblasts",
         paint: {
           "line-color": "rgba(45, 86, 58, 0.36)",
-          "line-width": ["interpolate", ["linear"], ["zoom"], 7, 0.7, 14, 1.4]
+          "line-width": ["interpolate", ["linear"], ["zoom"], 7, 0.7, 13, 1.4]
         }
       },
       {
@@ -702,7 +702,7 @@ function createUkraineVectorStyle() {
         source: "ukraine",
         paint: {
           "line-color": "#18231d",
-          "line-width": ["interpolate", ["linear"], ["zoom"], 7, 1.6, 14, 2.6]
+          "line-width": ["interpolate", ["linear"], ["zoom"], 7, 1.6, 13, 2.6]
         }
       },
     ]
@@ -925,8 +925,8 @@ function mapViewportQuery() {
 function currentChunkLevel() {
   const zoom = Math.round(displayZoomForMapZoom(map?.getZoom?.() || 7));
   if (zoom <= 7) return 1;
-  if (zoom <= 11) return 2;
-  if (zoom <= 12) return 3;
+  if (zoom <= 9) return 2;
+  if (zoom <= 11) return 3;
   return 4;
 }
 
@@ -1737,7 +1737,7 @@ function gridCellColor(id) {
 function gridCellStrokeColor(id) {
   const selected = selectedCellIds.has(id) || id === selectedCellId;
   if (selected) return [1, 0.69, 0, 1];
-  if (displayZoomForMapZoom(map.getZoom()) < 14) return [0.07, 0.07, 0.07, 0];
+  if (displayZoomForMapZoom(map.getZoom()) < 13) return [0.07, 0.07, 0.07, 0];
   const owner = getOwner(id);
   if (owner === "player") return colorToFloats(state.color, 0.5);
   if (owner === "rival") return colorToFloats(rivalColorForCell(id), 0.42);
@@ -2122,7 +2122,7 @@ function isPlayableGridCell(q, r) {
 function gridCellLimitForZoom() {
   const zoom = map?.getZoom?.() || DETAIL_ZOOM_MIN;
   const lowPower = isLowPowerDevice();
-  const zoomLimit = zoom >= 14 ? (lowPower ? 2800 : 5000) : zoom >= 11 ? (lowPower ? 2200 : 4200) : (lowPower ? 1500 : 3000);
+  const zoomLimit = zoom >= 13 ? (lowPower ? 2800 : 5000) : zoom >= 11 ? (lowPower ? 2200 : 4200) : (lowPower ? 1500 : 3000);
   return Math.min(MAX_VISIBLE_GRID_CELLS, zoomLimit);
 }
 

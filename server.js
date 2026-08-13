@@ -50,7 +50,7 @@ const DEFAULT_SETTINGS = {
     nearbyPriceRadius: 2,
     sellRefundPercent: 62,
     maxVisibleCells: 5000,
-    detailZoomMin: 12,
+    detailZoomMin: 13,
     claimBatchSize: 1000,
     drawGrid: true
   },
@@ -254,7 +254,7 @@ function sanitizeSettings(settings) {
       nearbyPriceRadius: intIn(economy.nearbyPriceRadius, defaults.economy.nearbyPriceRadius, 1, 5),
       sellRefundPercent: numberIn(Number(economy.sellRefundPercent), defaults.economy.sellRefundPercent, 0, 100),
       maxVisibleCells: intIn(economy.maxVisibleCells, defaults.economy.maxVisibleCells, 1000, 120000),
-      detailZoomMin: intIn(economy.detailZoomMin, defaults.economy.detailZoomMin, 7, 14),
+      detailZoomMin: intIn(economy.detailZoomMin, defaults.economy.detailZoomMin, 7, 13),
       claimBatchSize: intIn(economy.claimBatchSize, defaults.economy.claimBatchSize, 1, 3000),
       drawGrid: typeof economy.drawGrid === "boolean" ? economy.drawGrid : defaults.economy.drawGrid
     },
@@ -639,15 +639,15 @@ function rectBoundaryLatLngRangeServer(minQ, maxQ, minR, maxR) {
 
 function overviewGridStepForZoomServer(zoom) {
   if (zoom <= 7) return 512;
-  if (zoom <= 11) return 256;
-  if (zoom <= 12) return 128;
+  if (zoom <= 9) return 256;
+  if (zoom <= 11) return 128;
   return 32;
 }
 
 function chunkLevelForZoom(zoom) {
   if (zoom <= 7) return 1;
-  if (zoom <= 11) return 2;
-  if (zoom <= 12) return 3;
+  if (zoom <= 9) return 2;
+  if (zoom <= 11) return 3;
   return 4;
 }
 
@@ -693,7 +693,7 @@ function parseMapBoundsQuery(searchParams) {
   return { west, east, south, north };
 }
 
-function mapCellsInViewport(bounds, zoom = 14, limit = MAX_VIEWPORT_MARKET_CELLS) {
+function mapCellsInViewport(bounds, zoom = 13, limit = MAX_VIEWPORT_MARKET_CELLS) {
   const market = readMarket();
   const owners = {};
   const cells = [];
@@ -1489,7 +1489,7 @@ async function handleApi(req, res) {
         sendJson(res, 400, { error: "Потрібні параметри west, east, south, north." });
         return;
       }
-      const zoom = intIn(Number(url.searchParams.get("zoom")), 14, 1, 20);
+      const zoom = intIn(Number(url.searchParams.get("zoom")), 13, 1, 20);
       sendJson(res, 200, mapCellsInViewport(bounds, zoom));
       return;
     }
