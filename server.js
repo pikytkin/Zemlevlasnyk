@@ -658,6 +658,13 @@ function chunkCellSpanForLevel(level) {
   return 32;
 }
 
+function overviewGroupSpanForLevel(level) {
+  if (level <= 1) return 96;
+  if (level === 2) return 48;
+  if (level === 3) return 24;
+  return 16;
+}
+
 function chunkBoundsForRange(bounds, span, preload = 1) {
   const range = gridRangeForBounds(bounds.west, bounds.east, bounds.south, bounds.north, 0);
   return {
@@ -722,20 +729,23 @@ function mapCellsInViewport(bounds, zoom = 14, limit = MAX_VIEWPORT_MARKET_CELLS
 function mapOverviewTerritories(bounds, zoom, playerId = "") {
   const market = readMarket();
   const level = Math.min(3, chunkLevelForZoom(zoom));
-  const step = chunkCellSpanForLevel(level);
-  const chunkRange = chunkBoundsForRange(bounds, step, 1);
+  const chunkSpan = chunkCellSpanForLevel(level);
+  const groupSpan = overviewGroupSpanForLevel(level);
+  const chunkRange = chunkBoundsForRange(bounds, chunkSpan, 1);
   const groups = new Map();
 
   Object.entries(market.land || {}).forEach(([id, entry]) => {
     if (!isPlayableLandId(id)) return;
     const { q, r } = parseCellGridId(id);
-    if (!cellInsideChunkRange(q, r, chunkRange, step)) return;
+    if (!cellInsideChunkRange(q, r, chunkRange, chunkSpan)) return;
     const ownerId = String(entry.ownerId || "");
     if (!ownerId) return;
-    const parentQ = Math.floor(q / step) * step;
-    const parentR = Math.floor(r / step) * step;
+    const parentQ = Math.floor(q / chunkSpan) * chunkSpan;
+    const parentR = Math.floor(r / chunkSpan) * chunkSpan;
+    const groupQ = Math.floor(q / groupSpan) * groupSpan;
+    const groupR = Math.floor(r / groupSpan) * groupSpan;
     const color = entry.ownerColor || "#ef7669";
-    const key = `${ownerId}:${color}:${parentQ}:${parentR}`;
+    const key = `${ownerId}:${color}:${groupQ}:${groupR}`;
     if (!groups.has(key)) {
       groups.set(key, {
         ownerId,
@@ -743,6 +753,8 @@ function mapOverviewTerritories(bounds, zoom, playerId = "") {
         color,
         parentQ,
         parentR,
+        groupQ,
+        groupR,
         minQ: q,
         maxQ: q,
         minR: r,
@@ -758,7 +770,7 @@ function mapOverviewTerritories(bounds, zoom, playerId = "") {
     group.cellCount += 1;
   });
 
-  const maxGroups = level === 1 ? 240 : level === 2 ? 520 : 1100;
+  const maxGroups = level === 1 ? 900 : level === 2 ? 1500 : 2400;
   const territories = [...groups.values()]
     .sort((a, b) => b.cellCount - a.cellCount)
     .slice(0, maxGroups)
@@ -767,7 +779,7 @@ function mapOverviewTerritories(bounds, zoom, playerId = "") {
       return {
         ownerId: group.ownerId,
         ownerKind: group.ownerKind,
-        chunkId: `z${level}:${group.parentQ / step}:${group.parentR / step}`,
+        chunkId: `z${level}:${group.groupQ / groupSpan}:${group.groupR / groupSpan}:${group.ownerId}`,
         polygon: rectBoundaryLatLngRangeServer(group.minQ, group.maxQ, group.minR, group.maxR),
         cellCount: group.cellCount,
         occupied: Math.min(1, group.cellCount / ((group.maxQ - group.minQ + 1) * (group.maxR - group.minR + 1))),
@@ -777,7 +789,7 @@ function mapOverviewTerritories(bounds, zoom, playerId = "") {
       };
     });
 
-  return { version: marketVersion, zoom, level, span: step, territories };
+  return { version: marketVersion, zoom, level, span: groupSpan, territories };
 }
 
 function writeMarket(market) {

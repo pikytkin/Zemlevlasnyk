@@ -1814,7 +1814,8 @@ function updateSettlementLabelVisibility() {
 }
 
 function isOverviewZoom() {
-  return map.getZoom() < detailZoomStart();
+  if (!map) return true;
+  return snapZoom(map.getZoom()) < detailZoomStart();
 }
 
 function currentLandRenderMode() {
