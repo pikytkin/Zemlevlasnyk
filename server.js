@@ -49,7 +49,7 @@ const DEFAULT_SETTINGS = {
     nearbyPriceGrowthPercent: 8,
     nearbyPriceRadius: 2,
     sellRefundPercent: 62,
-    maxVisibleCells: 120000,
+    maxVisibleCells: 5000,
     detailZoomMin: 12,
     claimBatchSize: 1000,
     drawGrid: true
@@ -527,6 +527,221 @@ function readMarket() {
 
 function marketResponse(market = readMarket()) {
   return { ...market, version: marketVersion };
+}
+
+function globalMarketPayload() {
+  const market = readMarket();
+  return {
+    version: marketVersion,
+    resetAt: market.resetAt || null,
+    stats: {
+      ownedCells: Object.keys(market.land || {}).length
+    }
+  };
+}
+
+function marketVersionPayload() {
+  return { version: marketVersion, resetAt: readMarket().resetAt || null };
+}
+
+const MAP_BOUNDS = { south: 43.2, west: 21.0, north: 53.0, east: 41.2 };
+const RECT_CELL_WIDTH_DEGREES = 0.018;
+const RECT_CELL_HEIGHT_DEGREES = 0.012;
+const MAP_CELLS_MAX = 5000;
+
+let ukrainePolygonsCache = null;
+
+function loadUkrainePolygons() {
+  if (ukrainePolygonsCache) return ukrainePolygonsCache;
+  const fallback = [[[
+    [23.72, 52.34], [25.12, 51.85], [26.85, 51.72], [30.18, 52.28], [31.82, 51.58],
+    [33.74, 52.18], [35.32, 51.36], [37.18, 50.62], [39.92, 50.24], [40.14, 49.12],
+    [39.22, 48.34], [38.12, 47.88], [37.8, 47.1], [36.22, 46.72], [35.28, 46.02],
+    [35.0, 45.44], [36.42, 45.18], [36.02, 44.62], [34.38, 44.42], [33.18, 45.0],
+    [32.22, 45.28], [30.78, 45.38], [30.08, 46.0], [29.24, 45.38], [28.42, 45.48],
+    [28.0, 46.2], [29.62, 46.38], [29.16, 46.82], [27.92, 47.58], [26.72, 48.2],
+    [24.86, 47.78], [22.18, 48.34], [22.42, 49.34], [23.56, 50.42], [23.64, 51.18],
+    [23.72, 52.34]
+  ]]];
+  try {
+    const filePath = path.join(PUBLIC_DIR, "ukraine-boundary.geojson");
+    const raw = JSON.parse(fs.readFileSync(filePath, "utf8"));
+    const features = Array.isArray(raw?.features) ? raw.features : [raw];
+    ukrainePolygonsCache = features.flatMap((feature) => {
+      const geometry = feature?.geometry;
+      if (!geometry) return [];
+      if (geometry.type === "Polygon") return [geometry.coordinates];
+      if (geometry.type === "MultiPolygon") return geometry.coordinates;
+      return [];
+    });
+    if (!ukrainePolygonsCache.length) ukrainePolygonsCache = fallback;
+  } catch {
+    ukrainePolygonsCache = fallback;
+  }
+  return ukrainePolygonsCache;
+}
+
+function pointInPolygonMap(point, polygon) {
+  const [x, y] = point;
+  let inside = false;
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i, i += 1) {
+    const [xi, yi] = polygon[i];
+    const [xj, yj] = polygon[j];
+    const intersect = yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi;
+    if (intersect) inside = !inside;
+  }
+  return inside;
+}
+
+function pointInUkraineMap(lng, lat) {
+  const polygons = loadUkrainePolygons();
+  return polygons.some((polygon) => {
+    if (!pointInPolygonMap([lng, lat], polygon[0])) return false;
+    return !polygon.slice(1).some((hole) => pointInPolygonMap([lng, lat], hole));
+  });
+}
+
+function parseCellGridId(id) {
+  const match = String(id || "").match(/^cell-(-?\d+)-(-?\d+)$/);
+  return { q: match ? Number(match[1]) : 0, r: match ? Number(match[2]) : 0 };
+}
+
+function cellCenterFromGrid(q, r) {
+  return {
+    lng: MAP_BOUNDS.west + (q + 0.5) * RECT_CELL_WIDTH_DEGREES,
+    lat: MAP_BOUNDS.north - (r + 0.5) * RECT_CELL_HEIGHT_DEGREES
+  };
+}
+
+function gridRangeForBounds(west, east, south, north, pad = 1) {
+  return {
+    minQ: Math.floor((west - MAP_BOUNDS.west) / RECT_CELL_WIDTH_DEGREES) - pad,
+    maxQ: Math.ceil((east - MAP_BOUNDS.west) / RECT_CELL_WIDTH_DEGREES) + pad,
+    minR: Math.floor((MAP_BOUNDS.north - north) / RECT_CELL_HEIGHT_DEGREES) - pad,
+    maxR: Math.ceil((MAP_BOUNDS.north - south) / RECT_CELL_HEIGHT_DEGREES) + pad
+  };
+}
+
+function rectBoundaryLatLngBlockServer(q, r, step) {
+  const west = MAP_BOUNDS.west + q * RECT_CELL_WIDTH_DEGREES;
+  const east = MAP_BOUNDS.west + (q + step) * RECT_CELL_WIDTH_DEGREES;
+  const north = MAP_BOUNDS.north - r * RECT_CELL_HEIGHT_DEGREES;
+  const south = MAP_BOUNDS.north - (r + step) * RECT_CELL_HEIGHT_DEGREES;
+  return [[north, west], [north, east], [south, east], [south, west]];
+}
+
+function overviewGridStepForZoomServer(zoom) {
+  if (zoom <= 5) return 96;
+  if (zoom <= 7) return 48;
+  if (zoom <= 9) return 24;
+  return 12;
+}
+
+function parseMapBoundsQuery(searchParams) {
+  const west = Number(searchParams.get("west"));
+  const east = Number(searchParams.get("east"));
+  const south = Number(searchParams.get("south"));
+  const north = Number(searchParams.get("north"));
+  if (![west, east, south, north].every(Number.isFinite)) return null;
+  return { west, east, south, north };
+}
+
+function cellInBounds(lng, lat, bounds) {
+  return lat >= bounds.south && lat <= bounds.north && lng >= bounds.west && lng <= bounds.east;
+}
+
+function mapCellsInViewport(bounds, zoom = 14, limit = MAP_CELLS_MAX) {
+  const market = readMarket();
+  const owners = {};
+  const cells = [];
+  const padded = {
+    west: bounds.west - (bounds.east - bounds.west) * 0.02,
+    east: bounds.east + (bounds.east - bounds.west) * 0.02,
+    south: bounds.south - (bounds.north - bounds.south) * 0.02,
+    north: bounds.north + (bounds.north - bounds.south) * 0.02
+  };
+
+  Object.entries(market.land || {}).forEach(([id, entry]) => {
+    if (!isPlayableLandId(id)) return;
+    const { q, r } = parseCellGridId(id);
+    const { lng, lat } = cellCenterFromGrid(q, r);
+    if (!cellInBounds(lng, lat, padded)) return;
+    if (!pointInUkraineMap(lng, lat)) return;
+    const ownerId = String(entry.ownerId || "");
+    if (!ownerId) return;
+    if (!owners[ownerId]) {
+      owners[ownerId] = {
+        color: entry.ownerColor || "#ef7669",
+        name: entry.ownerName || "Гравець"
+      };
+    }
+    cells.push({
+      id,
+      o: ownerId,
+      l: Number.isFinite(entry.level) ? entry.level : 1
+    });
+  });
+
+  if (cells.length > limit) cells.length = limit;
+  return { version: marketVersion, zoom, owners, cells };
+}
+
+function mapOverviewTerritories(bounds, zoom, playerId = "") {
+  const market = readMarket();
+  const step = overviewGridStepForZoomServer(zoom);
+  const padRatio = 0.16;
+  const padded = {
+    west: bounds.west - (bounds.east - bounds.west) * padRatio,
+    east: bounds.east + (bounds.east - bounds.west) * padRatio,
+    south: bounds.south - (bounds.north - bounds.south) * padRatio,
+    north: bounds.north + (bounds.north - bounds.south) * padRatio
+  };
+  const groups = new Map();
+
+  Object.entries(market.land || {}).forEach(([id, entry]) => {
+    if (!isPlayableLandId(id)) return;
+    const { q, r } = parseCellGridId(id);
+    const { lng, lat } = cellCenterFromGrid(q, r);
+    if (!cellInBounds(lng, lat, padded)) return;
+    const ownerId = String(entry.ownerId || "");
+    if (!ownerId) return;
+    const parentQ = Math.floor(q / step) * step;
+    const parentR = Math.floor(r / step) * step;
+    const color = entry.ownerColor || "#ef7669";
+    const key = `${ownerId}:${color}:${parentQ}:${parentR}`;
+    if (!groups.has(key)) {
+      groups.set(key, {
+        ownerId,
+        ownerKind: playerId && ownerId === playerId ? "player" : "rival",
+        color,
+        parentQ,
+        parentR,
+        cellCount: 0,
+        latSum: 0,
+        lngSum: 0
+      });
+    }
+    const group = groups.get(key);
+    group.cellCount += 1;
+    group.latSum += lat;
+    group.lngSum += lng;
+  });
+
+  const maxGroups = zoom <= 7 ? 900 : 1800;
+  const territories = [...groups.values()]
+    .sort((a, b) => b.cellCount - a.cellCount)
+    .slice(0, maxGroups)
+    .map((group) => ({
+      ownerId: group.ownerId,
+      ownerKind: group.ownerKind,
+      polygon: rectBoundaryLatLngBlockServer(group.parentQ, group.parentR, step),
+      cellCount: group.cellCount,
+      color: group.color,
+      lat: group.latSum / group.cellCount,
+      lng: group.lngSum / group.cellCount
+    }));
+
+  return { version: marketVersion, zoom, territories };
 }
 
 function writeMarket(market) {
@@ -1199,8 +1414,42 @@ async function handleApi(req, res) {
         sendJson(res, 200, { ok: true, notModified: true, version: marketVersion });
         return;
       }
-      const market = readMarket();
-      sendJson(res, 200, conditionalVersionPayload(req, marketResponse(market), marketVersion));
+      sendJson(res, 200, conditionalVersionPayload(req, globalMarketPayload(), marketVersion));
+      return;
+    }
+
+    if (req.method === "GET" && req.url.startsWith("/api/map/cells")) {
+      const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
+      const bounds = parseMapBoundsQuery(url.searchParams);
+      if (!bounds) {
+        sendJson(res, 400, { error: "Потрібні параметри west, east, south, north." });
+        return;
+      }
+      const zoom = intIn(Number(url.searchParams.get("zoom")), 14, 1, 20);
+      const clientVersion = requestVersion(req);
+      if (Number.isFinite(clientVersion) && clientVersion === marketVersion) {
+        sendJson(res, 200, { ok: true, notModified: true, version: marketVersion });
+        return;
+      }
+      sendJson(res, 200, mapCellsInViewport(bounds, zoom));
+      return;
+    }
+
+    if (req.method === "GET" && req.url.startsWith("/api/map/overview")) {
+      const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
+      const bounds = parseMapBoundsQuery(url.searchParams);
+      if (!bounds) {
+        sendJson(res, 400, { error: "Потрібні параметри west, east, south, north." });
+        return;
+      }
+      const zoom = intIn(Number(url.searchParams.get("z") || url.searchParams.get("zoom")), 8, 1, 20);
+      const playerId = String(url.searchParams.get("playerId") || "").slice(0, 64);
+      const clientVersion = requestVersion(req);
+      if (Number.isFinite(clientVersion) && clientVersion === marketVersion) {
+        sendJson(res, 200, { ok: true, notModified: true, version: marketVersion });
+        return;
+      }
+      sendJson(res, 200, mapOverviewTerritories(bounds, zoom, playerId));
       return;
     }
 
@@ -1411,7 +1660,7 @@ async function handleApi(req, res) {
           targetCellId: claimed[0]
         });
       }
-      sendJson(res, 200, { ok: true, claimed, rejected, alreadyOwned, market: marketResponse(market) });
+      sendJson(res, 200, { ok: true, claimed, rejected, alreadyOwned, ...marketVersionPayload() });
       return;
     }
 
@@ -1457,7 +1706,7 @@ async function handleApi(req, res) {
           targetCellId
         });
       }
-      sendJson(res, 200, { ok: true, sold, soldIds, market: marketResponse(market) });
+      sendJson(res, 200, { ok: true, sold, soldIds, ...marketVersionPayload() });
       return;
     }
 
@@ -1477,7 +1726,7 @@ async function handleApi(req, res) {
 
       if (session.isGuest) {
         mergeFarmIntoMarket(farm, session.userId, farm.companyName || "Гостьова розвідка");
-        sendJson(res, 200, { ok: true, farm, market: marketResponse() });
+        sendJson(res, 200, { ok: true, farm, ...marketVersionPayload() });
         return;
       }
 
@@ -1492,7 +1741,7 @@ async function handleApi(req, res) {
       user.updatedAt = new Date().toISOString();
       writeUsers(users);
       mergeFarmIntoMarket(farm, user.id, userCompanyName(user));
-      sendJson(res, 200, { ok: true, farm, market: marketResponse() });
+      sendJson(res, 200, { ok: true, farm, ...marketVersionPayload() });
       return;
     }
 
