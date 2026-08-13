@@ -176,6 +176,9 @@ let marketTimer = null;
 let visibleLandTimer = null;
 let marketOwnedCellCount = 0;
 let marketVersion = 0;
+let visibleLandRequestId = 0;
+let visibleLandBoundsKey = "";
+let visibleLandVersion = 0;
 let leaderboardRows = [];
 let leaderboardTimer = null;
 let leaderboardVersion = 0;
@@ -566,6 +569,7 @@ async function initMap() {
     updateSettlementMapSource();
     requestMapBaseRender();
     scheduleVisibleLandRefresh();
+    scheduleGridUpdate();
   };
   map.on("zoomend", handleSettledMapChange);
   map.on("moveend", handleSettledMapChange);
@@ -587,6 +591,7 @@ async function initMap() {
     map.fitBounds([[MAP_BOUNDS.south, MAP_BOUNDS.west], [MAP_BOUNDS.north, MAP_BOUNDS.east]], { padding: [18, 18] });
     updateZoomBadge();
     drawMapBaseLayer();
+    scheduleVisibleLandRefresh(20);
     updateGrid();
   }, 180);
   clearInterval(marketTimer);
@@ -871,15 +876,19 @@ async function refreshGlobalMarket() {
   }
 }
 
+async function refreshMarket() {
+  return refreshGlobalMarket();
+}
+
 function mapViewportQuery() {
   if (!map) return null;
-  const bounds = map.getBounds();
+  const bounds = map.getBounds().pad(0.08);
   return new URLSearchParams({
-    west: String(bounds.getWest()),
-    east: String(bounds.getEast()),
-    south: String(bounds.getSouth()),
-    north: String(bounds.getNorth()),
-    zoom: String(Math.round(map.getZoom())),
+    west: bounds.getWest().toFixed(5),
+    east: bounds.getEast().toFixed(5),
+    south: bounds.getSouth().toFixed(5),
+    north: bounds.getNorth().toFixed(5),
+    zoom: String(Math.round(displayZoomForMapZoom(map.getZoom()))),
     version: String(marketVersion || 0),
     playerId: player?.id || ""
   });
@@ -901,8 +910,14 @@ async function refreshVisibleLand() {
 
     const query = mapViewportQuery();
     if (!query) return;
+    const boundsKey = `${query.toString()}:${marketVersion}:detail`;
+    if (boundsKey === visibleLandBoundsKey && visibleLandVersion === marketVersion) return;
+    const requestId = ++visibleLandRequestId;
     const payload = await requestJson(`/api/map/cells?${query.toString()}`);
+    if (requestId !== visibleLandRequestId) return;
     if (payload?.notModified) return;
+    visibleLandBoundsKey = boundsKey;
+    visibleLandVersion = Number(payload.version) || marketVersion;
     visibleLandState = {
       version: Number(payload.version) || marketVersion,
       owners: payload.owners && typeof payload.owners === "object" ? payload.owners : {},
@@ -930,6 +945,11 @@ function scheduleVisibleLandRefresh(immediate = false) {
     visibleLandTimer = null;
     refreshVisibleLand();
   }, immediate ? 0 : 120);
+}
+
+function invalidateVisibleLandCache() {
+  visibleLandBoundsKey = "";
+  visibleLandVersion = 0;
 }
 
 function reconcileLocalLandWithVisibleState() {
@@ -1566,7 +1586,7 @@ function appendCellVertices(strokeVertices, fillVertices, cell, width, height, d
   const edgeScale = 0.985;
   const points = boundary.map(([lat, lng]) => map.latLngToContainerPoint([lat, lng]));
   const drawStroke = drawCellBorders || (drawTerritoryBorders && (cell.overviewOwner || getOwner(cell.id) !== "free"));
-  if (drawStroke) {
+  if (drawStroke && stroke[3] > 0) {
     for (let index = 0; index < points.length; index += 1) {
       appendLineQuad(
         strokeVertices,
@@ -1629,6 +1649,7 @@ function gridCellColor(id) {
 function gridCellStrokeColor(id) {
   const selected = selectedCellIds.has(id) || id === selectedCellId;
   if (selected) return [1, 0.69, 0, 1];
+  if (displayZoomForMapZoom(map.getZoom()) < 14) return [0.07, 0.07, 0.07, 0];
   const owner = getOwner(id);
   if (owner === "player") return colorToFloats(state.color, 0.5);
   if (owner === "rival") return colorToFloats(rivalColorForCell(id), 0.42);
@@ -2697,7 +2718,7 @@ async function buySelectedCell() {
       refreshCanvasMapLayers();
       (claim.claimed || []).forEach((id) => claimedIds.add(id));
     }
-    marketOwnedCellCount += (claim.claimed || []).length;
+    marketOwnedCellCount += claimedIds.size;
     const claimedCells = cells.filter((cell) => claimedIds.has(cell.id));
     if (!claimedCells.length) {
       showGameMessage("Не вдалося купити: ці ділянки вже зайняті.");
@@ -2752,6 +2773,7 @@ async function buySelectedCell() {
     ? "Землю куплено. Дохід почне нараховуватися."
     : `Куплено земельних ділянок: ${cells.length}.`);
   refreshVisibleCellLayers(cells.map((cell) => cell.id));
+  scheduleVisibleLandRefresh(20);
   render();
   queueSave();
 }
@@ -3161,6 +3183,8 @@ async function sellSelectedLand() {
   addEvent(`Продано земельних ділянок: ${soldCells.length}. Отримано ${money(totalRefund)}.`);
   addLedger("sell", `Продаж землі: ${soldCells.length} ділянок`, totalRefund, -soldCells.length);
   showGameMessage(`Землю продано системі за ${money(totalRefund)}.`);
+  marketOwnedCellCount = Math.max(0, marketOwnedCellCount - soldCells.length);
+  scheduleVisibleLandRefresh(20);
   scheduleGridUpdate();
   render();
   queueSave();
@@ -3847,7 +3871,8 @@ async function saveProfile(event) {
     });
     state = normalizeState(payload.farm || state);
     if (Number.isFinite(payload.version)) marketVersion = payload.version;
-    renderMap();
+    invalidateVisibleLandCache();
+    scheduleVisibleLandRefresh(20);
     refreshVisibleCellLayers(Object.keys(state.land));
     renderHeader();
     renderSelectedCell();

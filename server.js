@@ -96,6 +96,11 @@ let dbPool = null;
 let marketVersion = 1;
 let leaderboardVersion = 1;
 
+const MAP_BOUNDS = { south: 43.2, west: 21.0, north: 53.0, east: 41.2 };
+const RECT_CELL_WIDTH_DEGREES = 0.018;
+const RECT_CELL_HEIGHT_DEGREES = 0.012;
+const MAX_VIEWPORT_MARKET_CELLS = 6000;
+
 const mimeTypes = {
   ".html": "text/html; charset=utf-8",
   ".css": "text/css; charset=utf-8",
@@ -529,8 +534,7 @@ function marketResponse(market = readMarket()) {
   return { ...market, version: marketVersion };
 }
 
-function globalMarketPayload() {
-  const market = readMarket();
+function globalMarketPayload(market = readMarket()) {
   return {
     version: marketVersion,
     resetAt: market.resetAt || null,
@@ -543,11 +547,6 @@ function globalMarketPayload() {
 function marketVersionPayload() {
   return { version: marketVersion, resetAt: readMarket().resetAt || null };
 }
-
-const MAP_BOUNDS = { south: 43.2, west: 21.0, north: 53.0, east: 41.2 };
-const RECT_CELL_WIDTH_DEGREES = 0.018;
-const RECT_CELL_HEIGHT_DEGREES = 0.012;
-const MAP_CELLS_MAX = 5000;
 
 let ukrainePolygonsCache = null;
 
@@ -650,7 +649,7 @@ function cellInBounds(lng, lat, bounds) {
   return lat >= bounds.south && lat <= bounds.north && lng >= bounds.west && lng <= bounds.east;
 }
 
-function mapCellsInViewport(bounds, zoom = 14, limit = MAP_CELLS_MAX) {
+function mapCellsInViewport(bounds, zoom = 14, limit = MAX_VIEWPORT_MARKET_CELLS) {
   const market = readMarket();
   const owners = {};
   const cells = [];
@@ -683,7 +682,7 @@ function mapCellsInViewport(bounds, zoom = 14, limit = MAP_CELLS_MAX) {
   });
 
   if (cells.length > limit) cells.length = limit;
-  return { version: marketVersion, zoom, owners, cells };
+  return { version: marketVersion, zoom, owners, cells, truncated: cells.length >= limit };
 }
 
 function mapOverviewTerritories(bounds, zoom, playerId = "") {
