@@ -630,10 +630,43 @@ function rectBoundaryLatLngBlockServer(q, r, step) {
 }
 
 function overviewGridStepForZoomServer(zoom) {
-  if (zoom <= 5) return 96;
-  if (zoom <= 7) return 48;
-  if (zoom <= 9) return 24;
-  return 12;
+  if (zoom <= 7) return 512;
+  if (zoom <= 10) return 256;
+  if (zoom <= 12) return 128;
+  return 32;
+}
+
+function chunkLevelForZoom(zoom) {
+  if (zoom <= 7) return 1;
+  if (zoom <= 10) return 2;
+  if (zoom <= 12) return 3;
+  return 4;
+}
+
+function chunkCellSpanForLevel(level) {
+  if (level <= 1) return 512;
+  if (level === 2) return 256;
+  if (level === 3) return 128;
+  return 32;
+}
+
+function chunkBoundsForRange(bounds, span, preload = 1) {
+  const range = gridRangeForBounds(bounds.west, bounds.east, bounds.south, bounds.north, 0);
+  return {
+    minQ: Math.floor(range.minQ / span) - preload,
+    maxQ: Math.floor(range.maxQ / span) + preload,
+    minR: Math.floor(range.minR / span) - preload,
+    maxR: Math.floor(range.maxR / span) + preload
+  };
+}
+
+function cellInsideChunkRange(q, r, chunkRange, span) {
+  const chunkQ = Math.floor(q / span);
+  const chunkR = Math.floor(r / span);
+  return chunkQ >= chunkRange.minQ
+    && chunkQ <= chunkRange.maxQ
+    && chunkR >= chunkRange.minR
+    && chunkR <= chunkRange.maxR;
 }
 
 function parseMapBoundsQuery(searchParams) {
@@ -645,26 +678,18 @@ function parseMapBoundsQuery(searchParams) {
   return { west, east, south, north };
 }
 
-function cellInBounds(lng, lat, bounds) {
-  return lat >= bounds.south && lat <= bounds.north && lng >= bounds.west && lng <= bounds.east;
-}
-
 function mapCellsInViewport(bounds, zoom = 14, limit = MAX_VIEWPORT_MARKET_CELLS) {
   const market = readMarket();
   const owners = {};
   const cells = [];
-  const padded = {
-    west: bounds.west - (bounds.east - bounds.west) * 0.02,
-    east: bounds.east + (bounds.east - bounds.west) * 0.02,
-    south: bounds.south - (bounds.north - bounds.south) * 0.02,
-    north: bounds.north + (bounds.north - bounds.south) * 0.02
-  };
+  const span = chunkCellSpanForLevel(4);
+  const chunkRange = chunkBoundsForRange(bounds, span, 1);
 
   Object.entries(market.land || {}).forEach(([id, entry]) => {
     if (!isPlayableLandId(id)) return;
     const { q, r } = parseCellGridId(id);
+    if (!cellInsideChunkRange(q, r, chunkRange, span)) return;
     const { lng, lat } = cellCenterFromGrid(q, r);
-    if (!cellInBounds(lng, lat, padded)) return;
     if (!pointInUkraineMap(lng, lat)) return;
     const ownerId = String(entry.ownerId || "");
     if (!ownerId) return;
@@ -681,27 +706,22 @@ function mapCellsInViewport(bounds, zoom = 14, limit = MAX_VIEWPORT_MARKET_CELLS
     });
   });
 
-  if (cells.length > limit) cells.length = limit;
-  return { version: marketVersion, zoom, owners, cells, truncated: cells.length >= limit };
+  const truncated = cells.length > limit;
+  if (truncated) cells.length = limit;
+  return { version: marketVersion, zoom, level: 4, owners, cells, truncated };
 }
 
 function mapOverviewTerritories(bounds, zoom, playerId = "") {
   const market = readMarket();
-  const step = overviewGridStepForZoomServer(zoom);
-  const padRatio = 0.16;
-  const padded = {
-    west: bounds.west - (bounds.east - bounds.west) * padRatio,
-    east: bounds.east + (bounds.east - bounds.west) * padRatio,
-    south: bounds.south - (bounds.north - bounds.south) * padRatio,
-    north: bounds.north + (bounds.north - bounds.south) * padRatio
-  };
+  const level = Math.min(3, chunkLevelForZoom(zoom));
+  const step = chunkCellSpanForLevel(level);
+  const chunkRange = chunkBoundsForRange(bounds, step, 1);
   const groups = new Map();
 
   Object.entries(market.land || {}).forEach(([id, entry]) => {
     if (!isPlayableLandId(id)) return;
     const { q, r } = parseCellGridId(id);
-    const { lng, lat } = cellCenterFromGrid(q, r);
-    if (!cellInBounds(lng, lat, padded)) return;
+    if (!cellInsideChunkRange(q, r, chunkRange, step)) return;
     const ownerId = String(entry.ownerId || "");
     if (!ownerId) return;
     const parentQ = Math.floor(q / step) * step;
@@ -715,32 +735,33 @@ function mapOverviewTerritories(bounds, zoom, playerId = "") {
         color,
         parentQ,
         parentR,
-        cellCount: 0,
-        latSum: 0,
-        lngSum: 0
+        cellCount: 0
       });
     }
     const group = groups.get(key);
     group.cellCount += 1;
-    group.latSum += lat;
-    group.lngSum += lng;
   });
 
-  const maxGroups = zoom <= 7 ? 900 : 1800;
+  const maxGroups = level === 1 ? 240 : level === 2 ? 520 : 1100;
   const territories = [...groups.values()]
     .sort((a, b) => b.cellCount - a.cellCount)
     .slice(0, maxGroups)
-    .map((group) => ({
-      ownerId: group.ownerId,
-      ownerKind: group.ownerKind,
-      polygon: rectBoundaryLatLngBlockServer(group.parentQ, group.parentR, step),
-      cellCount: group.cellCount,
-      color: group.color,
-      lat: group.latSum / group.cellCount,
-      lng: group.lngSum / group.cellCount
-    }));
+    .map((group) => {
+      const center = cellCenterFromGrid(group.parentQ + step / 2, group.parentR + step / 2);
+      return {
+        ownerId: group.ownerId,
+        ownerKind: group.ownerKind,
+        chunkId: `z${level}:${group.parentQ / step}:${group.parentR / step}`,
+        polygon: rectBoundaryLatLngBlockServer(group.parentQ, group.parentR, step),
+        cellCount: group.cellCount,
+        occupied: Math.min(1, group.cellCount / (step * step)),
+        color: group.color,
+        lat: center.lat,
+        lng: center.lng
+      };
+    });
 
-  return { version: marketVersion, zoom, territories };
+  return { version: marketVersion, zoom, level, span: step, territories };
 }
 
 function writeMarket(market) {
@@ -1425,11 +1446,6 @@ async function handleApi(req, res) {
         return;
       }
       const zoom = intIn(Number(url.searchParams.get("zoom")), 14, 1, 20);
-      const clientVersion = requestVersion(req);
-      if (Number.isFinite(clientVersion) && clientVersion === marketVersion) {
-        sendJson(res, 200, { ok: true, notModified: true, version: marketVersion });
-        return;
-      }
       sendJson(res, 200, mapCellsInViewport(bounds, zoom));
       return;
     }
@@ -1443,11 +1459,6 @@ async function handleApi(req, res) {
       }
       const zoom = intIn(Number(url.searchParams.get("z") || url.searchParams.get("zoom")), 8, 1, 20);
       const playerId = String(url.searchParams.get("playerId") || "").slice(0, 64);
-      const clientVersion = requestVersion(req);
-      if (Number.isFinite(clientVersion) && clientVersion === marketVersion) {
-        sendJson(res, 200, { ok: true, notModified: true, version: marketVersion });
-        return;
-      }
       sendJson(res, 200, mapOverviewTerritories(bounds, zoom, playerId));
       return;
     }

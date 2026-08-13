@@ -171,6 +171,8 @@ let settlementGrid = new Map();
 let globalMarketState = { version: 0, resetAt: null, stats: { ownedCells: 0 } };
 let visibleLandState = { version: 0, owners: {}, cells: {} };
 let overviewTerritories = [];
+const chunkCache = new Map();
+const CHUNK_CACHE_LIMIT = 220;
 let pendingSettingsImages = 0;
 let marketTimer = null;
 let visibleLandTimer = null;
@@ -857,6 +859,7 @@ async function refreshGlobalMarket() {
       || Number(nextMarket?.version) !== marketVersion
       || resetChanged;
     globalMarketState = nextMarket;
+    if (marketChanged) invalidateChunkCache();
     marketVersion = Number(nextMarket?.version) || marketVersion;
     marketOwnedCellCount = nextOwnedCount;
     if (resetChanged) {
@@ -897,14 +900,58 @@ function mapViewportQuery() {
   });
 }
 
+function currentChunkLevel() {
+  const zoom = Math.round(displayZoomForMapZoom(map?.getZoom?.() || 7));
+  if (zoom <= 7) return 1;
+  if (zoom <= 10) return 2;
+  if (zoom <= 12) return 3;
+  return 4;
+}
+
+function chunkCacheKey(level, query) {
+  return [
+    `z${level}`,
+    query.get("west"),
+    query.get("east"),
+    query.get("south"),
+    query.get("north"),
+    query.get("zoom"),
+    marketVersion || 0,
+    player?.id || ""
+  ].join(":");
+}
+
+function getChunkCache(key) {
+  const cached = chunkCache.get(key);
+  if (!cached) return null;
+  cached.lastUsed = Date.now();
+  return cached.payload;
+}
+
+function setChunkCache(key, payload) {
+  chunkCache.set(key, { payload, lastUsed: Date.now() });
+  if (chunkCache.size <= CHUNK_CACHE_LIMIT) return;
+  const oldest = [...chunkCache.entries()].sort((a, b) => a[1].lastUsed - b[1].lastUsed).slice(0, chunkCache.size - CHUNK_CACHE_LIMIT);
+  oldest.forEach(([oldKey]) => chunkCache.delete(oldKey));
+}
+
+function invalidateChunkCache() {
+  chunkCache.clear();
+  visibleLandBoundsKey = "";
+  visibleLandVersion = 0;
+}
+
 async function refreshVisibleLand() {
   if (!map) return;
   try {
     if (isOverviewZoom()) {
       const query = mapViewportQuery();
       if (!query) return;
-      const payload = await requestJson(`/api/map/overview?z=${query.get("zoom")}&${query.toString()}`);
+      const cacheKey = chunkCacheKey(currentChunkLevel(), query);
+      const cached = getChunkCache(cacheKey);
+      const payload = cached || await requestJson(`/api/map/overview?z=${query.get("zoom")}&${query.toString()}`);
       if (payload?.notModified) return;
+      if (!cached) setChunkCache(cacheKey, payload);
       overviewTerritories = Array.isArray(payload.territories) ? payload.territories : [];
       if (Number.isFinite(payload.version)) marketVersion = payload.version;
       scheduleGridUpdate();
@@ -913,12 +960,14 @@ async function refreshVisibleLand() {
 
     const query = mapViewportQuery();
     if (!query) return;
-    const boundsKey = `${query.toString()}:${marketVersion}:detail`;
+    const boundsKey = chunkCacheKey(4, query);
     if (boundsKey === visibleLandBoundsKey && visibleLandVersion === marketVersion) return;
     const requestId = ++visibleLandRequestId;
-    const payload = await requestJson(`/api/map/cells?${query.toString()}`);
+    const cached = getChunkCache(boundsKey);
+    const payload = cached || await requestJson(`/api/map/cells?${query.toString()}`);
     if (requestId !== visibleLandRequestId) return;
     if (payload?.notModified) return;
+    if (!cached) setChunkCache(boundsKey, payload);
     visibleLandBoundsKey = boundsKey;
     visibleLandVersion = Number(payload.version) || marketVersion;
     visibleLandState = {
@@ -951,8 +1000,7 @@ function scheduleVisibleLandRefresh(immediate = false) {
 }
 
 function invalidateVisibleLandCache() {
-  visibleLandBoundsKey = "";
-  visibleLandVersion = 0;
+  invalidateChunkCache();
 }
 
 function reconcileLocalLandWithVisibleState() {
@@ -989,6 +1037,7 @@ function applyClaimedCellsToVisibleLand(claimedIds) {
   claimedIds.forEach((id) => {
     visibleLandState.cells[id] = { o: player.id, l: 1 };
   });
+  invalidateChunkCache();
   invalidateGridGeometryCache();
 }
 
@@ -997,6 +1046,7 @@ function removeCellsFromVisibleLand(cellIds) {
   cellIds.forEach((id) => {
     delete visibleLandState.cells[id];
   });
+  invalidateChunkCache();
   invalidateGridGeometryCache();
 }
 
@@ -1788,9 +1838,8 @@ function renderOverviewGridLayer() {
 }
 
 function overviewTerritoryCells() {
-  const bounds = map.getBounds().pad(0.16);
   const serverCells = (overviewTerritories || []).map((territory) => ({
-    id: `territory-${territory.ownerId}-${territory.lat}-${territory.lng}`,
+    id: territory.chunkId || `territory-${territory.ownerId}-${territory.lat}-${territory.lng}`,
     code: `territory-${territory.ownerId}`,
     lat: territory.lat,
     lng: territory.lng,
@@ -1799,38 +1848,7 @@ function overviewTerritoryCells() {
     boundary: territory.polygon
   }));
 
-  const selectedGroups = new Map();
-  const addSelectedCell = (id) => {
-    if (!isRegularHexId(id)) return;
-    const { q, r } = parseHexId(id);
-    const center = cellCenterFromGrid(q, r);
-    if (!pointInBounds(center.lat, center.lng, bounds)) return;
-    const step = overviewGridStepForZoom(map.getZoom());
-    const parentQ = Math.floor(q / step) * step;
-    const parentR = Math.floor(r / step) * step;
-    const key = `selected:${parentQ}:${parentR}`;
-    if (!selectedGroups.has(key)) {
-      selectedGroups.set(key, { parentQ, parentR, count: 0, lat: 0, lng: 0 });
-    }
-    const group = selectedGroups.get(key);
-    group.count += 1;
-    group.lat += center.lat;
-    group.lng += center.lng;
-  };
-  selectedCellIds.forEach(addSelectedCell);
-  if (selectedCellId) addSelectedCell(selectedCellId);
-
-  const selectedCells = [...selectedGroups.values()].map((group) => ({
-    id: `territory-selected-${group.parentQ}-${group.parentR}`,
-    code: "selected",
-    lat: group.lat / group.count,
-    lng: group.lng / group.count,
-    overviewOwner: "selected",
-    overviewColor: "#ffb000",
-    boundary: rectBoundaryLatLngBlock(group.parentQ, group.parentR, overviewGridStepForZoom(map.getZoom()))
-  }));
-
-  return [...serverCells, ...selectedCells].slice(0, isLowPowerDevice() ? 900 : 1800);
+  return serverCells.slice(0, isLowPowerDevice() ? 900 : 1800);
 }
 
 function overviewGridStepForZoom(zoom) {
