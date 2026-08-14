@@ -4,7 +4,9 @@
   "description": "Local browser agro game with login, registration, guest mode, and persistent farm state.",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "generate:grid-mask": "node scripts/generate-playable-grid.js",
+    "extract:assets": "node scripts/extract-settings-assets.js"
   },
   "dependencies": {
     "nodemailer": "^6.9.14",

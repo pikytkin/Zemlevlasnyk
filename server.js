@@ -2,6 +2,7 @@
 const fs = require("fs");
 const http = require("http");
 const path = require("path");
+const zlib = require("zlib");
 
 function loadEnvFile() {
   const envPath = path.join(__dirname, ".env");
@@ -50,7 +51,7 @@ const DEFAULT_SETTINGS = {
     nearbyPriceRadius: 2,
     sellRefundPercent: 62,
     maxVisibleCells: 18000,
-    detailZoomMin: 8,
+    detailZoomMin: 10,
     claimBatchSize: 1000,
     drawGrid: true
   },
@@ -95,10 +96,16 @@ let storage = null;
 let dbPool = null;
 let marketVersion = 1;
 let leaderboardVersion = 1;
+let leaderboardCache = { version: 0, rows: [] };
 
 const MAP_BOUNDS = { south: 43.2, west: 21.0, north: 53.0, east: 41.2 };
 const RECT_CELL_WIDTH_DEGREES = 0.018;
 const RECT_CELL_HEIGHT_DEGREES = 0.012;
+const MARKET_INDEX_SPAN = 32;
+const PLAYABLE_GRID_FILE = path.join(PUBLIC_DIR, "playable-grid.json");
+let playableGridRowsCache = null;
+let marketSpatialIndex = null;
+let marketSpatialIndexVersion = 0;
 const MAX_VIEWPORT_MARKET_CELLS = 6000;
 
 const mimeTypes = {
@@ -254,7 +261,7 @@ function sanitizeSettings(settings) {
       nearbyPriceRadius: intIn(economy.nearbyPriceRadius, defaults.economy.nearbyPriceRadius, 1, 5),
       sellRefundPercent: numberIn(Number(economy.sellRefundPercent), defaults.economy.sellRefundPercent, 0, 100),
       maxVisibleCells: intIn(economy.maxVisibleCells, defaults.economy.maxVisibleCells, 1000, 120000),
-      detailZoomMin: intIn(economy.detailZoomMin, defaults.economy.detailZoomMin, 7, 12),
+      detailZoomMin: intIn(economy.detailZoomMin, defaults.economy.detailZoomMin, 10, 12),
       claimBatchSize: intIn(economy.claimBatchSize, defaults.economy.claimBatchSize, 1, 3000),
       drawGrid: typeof economy.drawGrid === "boolean" ? economy.drawGrid : defaults.economy.drawGrid
     },
@@ -337,8 +344,9 @@ function sanitizeAssetItems(items, fallback) {
 
 function sanitizeAssetIcon(icon) {
   const value = String(icon || "•");
+  if (/^\/assets\/game\/[a-z0-9._-]+$/i.test(value)) return value;
   if (/^data:image\/(png|jpeg|webp|svg\+xml);base64,[a-z0-9+/=]+$/i.test(value) && value.length < 180000) {
-    return value;
+    return storeAssetDataUrl(value);
   }
   return value.slice(0, 12);
 }
@@ -350,8 +358,22 @@ function sanitizeMapEmoji(value) {
 function sanitizeAssetPhotos(photos) {
   return (Array.isArray(photos) ? photos : [])
     .filter((item) => typeof item === "string")
-    .filter((item) => /^data:image\/(png|jpeg|webp|svg\+xml);base64,[a-z0-9+/=]+$/i.test(item) && item.length < 180000)
+    .filter((item) => /^\/assets\/game\/[a-z0-9._-]+$/i.test(item) || (/^data:image\/(png|jpeg|webp|svg\+xml);base64,[a-z0-9+/=]+$/i.test(item) && item.length < 180000))
+    .map(storeAssetDataUrl)
     .slice(0, 8);
+}
+
+function storeAssetDataUrl(value) {
+  if (!String(value).startsWith("data:image/")) return value;
+  const match = String(value).match(/^data:image\/(png|jpeg|webp|svg\+xml);base64,(.+)$/i);
+  if (!match) return "";
+  const extension = match[1].toLowerCase() === "jpeg" ? "jpg" : match[1].toLowerCase() === "svg+xml" ? "svg" : match[1].toLowerCase();
+  const buffer = Buffer.from(match[2], "base64");
+  const hash = crypto.createHash("sha256").update(buffer).digest("hex").slice(0, 16);
+  const directory = path.join(PUBLIC_DIR, "assets", "game");
+  fs.mkdirSync(directory, { recursive: true });
+  fs.writeFileSync(path.join(directory, `${hash}.${extension}`), buffer);
+  return `/assets/game/${hash}.${extension}`;
 }
 
 function readSettings() {
@@ -523,7 +545,7 @@ function readMarket() {
   try {
     const market = storage?.market || { land: {} };
     return market && typeof market === "object" && market.land && typeof market.land === "object"
-      ? { land: cleanMarketLand(market.land), resetAt: typeof market.resetAt === "string" ? market.resetAt : null }
+      ? { land: market.land, resetAt: typeof market.resetAt === "string" ? market.resetAt : null }
       : { land: {} };
   } catch {
     return { land: {} };
@@ -603,6 +625,78 @@ function pointInUkraineMap(lng, lat) {
 function parseCellGridId(id) {
   const match = String(id || "").match(/^cell-(-?\d+)-(-?\d+)$/);
   return { q: match ? Number(match[1]) : 0, r: match ? Number(match[2]) : 0 };
+}
+
+function hashStringServer(value) {
+  let hash = 0;
+  for (let index = 0; index < value.length; index += 1) hash = ((hash << 5) - hash + value.charCodeAt(index)) | 0;
+  return hash;
+}
+
+function authoritativeLandPrice(id, market, settings = readSettings()) {
+  const economy = settings.economy || {};
+  const base = Number.isFinite(economy.baseLandPriceMin) ? economy.baseLandPriceMin : 70;
+  const spread = Number.isFinite(economy.baseLandPriceSpread) ? Math.max(0, Math.floor(economy.baseLandPriceSpread)) : 0;
+  const seed = Math.abs(hashStringServer(id)) || 1;
+  const basePrice = Math.round(base + (spread ? seed % spread : 0));
+  const radius = Math.max(1, Math.floor(economy.nearbyPriceRadius || 2));
+  const growth = Number.isFinite(economy.nearbyPriceGrowthPercent) ? economy.nearbyPriceGrowthPercent / 100 : 0.08;
+  const { q, r } = parseCellGridId(id);
+  let pressure = 0;
+  for (let dq = -radius; dq <= radius; dq += 1) {
+    for (let dr = -radius; dr <= radius; dr += 1) {
+      if ((dq || dr) && market.land[`cell-${q + dq}-${r + dr}`]) pressure += 1;
+    }
+  }
+  return Math.max(1, Math.round(basePrice * (1 + pressure * growth)));
+}
+
+function loadPlayableGridRows() {
+  if (playableGridRowsCache) return playableGridRowsCache;
+  try {
+    const payload = JSON.parse(fs.readFileSync(PLAYABLE_GRID_FILE, "utf8"));
+    playableGridRowsCache = new Map(Object.entries(payload.rows || {}).map(([r, ranges]) => [Number(r), ranges]));
+  } catch {
+    playableGridRowsCache = new Map();
+  }
+  return playableGridRowsCache;
+}
+
+function isPlayableGridCellServer(q, r) {
+  const ranges = loadPlayableGridRows().get(r);
+  return Array.isArray(ranges) && ranges.some(([minQ, maxQ]) => q >= minQ && q <= maxQ);
+}
+
+function marketChunkKey(q, r) {
+  return `${Math.floor(q / MARKET_INDEX_SPAN)}:${Math.floor(r / MARKET_INDEX_SPAN)}`;
+}
+
+function ensureMarketSpatialIndex(market) {
+  if (marketSpatialIndex && marketSpatialIndexVersion === marketVersion) return marketSpatialIndex;
+  const index = new Map();
+  Object.entries(market.land || {}).forEach(([id, entry]) => {
+    if (!isPlayableLandId(id)) return;
+    const { q, r } = parseCellGridId(id);
+    const key = marketChunkKey(q, r);
+    if (!index.has(key)) index.set(key, []);
+    index.get(key).push([id, entry, q, r]);
+  });
+  marketSpatialIndex = index;
+  marketSpatialIndexVersion = marketVersion;
+  return index;
+}
+
+function marketEntriesInBounds(market, bounds, preload = 1) {
+  const index = ensureMarketSpatialIndex(market);
+  const chunks = chunkBoundsForRange(bounds, MARKET_INDEX_SPAN, preload);
+  const entries = [];
+  for (let cq = chunks.minQ; cq <= chunks.maxQ; cq += 1) {
+    for (let cr = chunks.minR; cr <= chunks.maxR; cr += 1) {
+      const rows = index.get(`${cq}:${cr}`);
+      if (rows) entries.push(...rows);
+    }
+  }
+  return entries;
 }
 
 function cellCenterFromGrid(q, r) {
@@ -702,12 +796,9 @@ function mapCellsInViewport(bounds, zoom = 13, limit = MAX_VIEWPORT_MARKET_CELLS
   const span = chunkCellSpanForLevel(4);
   const chunkRange = chunkBoundsForRange(bounds, span, 1);
 
-  Object.entries(market.land || {}).forEach(([id, entry]) => {
-    if (!isPlayableLandId(id)) return;
-    const { q, r } = parseCellGridId(id);
+  marketEntriesInBounds(market, bounds).forEach(([id, entry, q, r]) => {
     if (!cellInsideChunkRange(q, r, chunkRange, span)) return;
-    const { lng, lat } = cellCenterFromGrid(q, r);
-    if (!pointInUkraineMap(lng, lat)) return;
+    if (!isPlayableGridCellServer(q, r)) return;
     const ownerId = String(entry.ownerId || "");
     if (!ownerId) return;
     if (!owners[ownerId]) {
@@ -732,24 +823,25 @@ function mapOverviewTerritories(bounds, zoom, playerId = "") {
   const market = readMarket();
   const level = Math.min(3, chunkLevelForZoom(zoom));
   const chunkSpan = chunkCellSpanForLevel(level);
-  const groupSpan = overviewGroupSpanForLevel(level);
   const chunkRange = chunkBoundsForRange(bounds, chunkSpan, 1);
-  const rows = new Map();
+  let groupSpan = zoom <= 7 ? 8 : 4;
+  let groups = new Map();
 
-  Object.entries(market.land || {}).forEach(([id, entry]) => {
-    if (!isPlayableLandId(id)) return;
-    const { q, r } = parseCellGridId(id);
+  const entries = marketEntriesInBounds(market, bounds);
+  const buildGroups = (span) => {
+    const next = new Map();
+    entries.forEach(([id, entry, q, r]) => {
     if (!cellInsideChunkRange(q, r, chunkRange, chunkSpan)) return;
     const ownerId = String(entry.ownerId || "");
     if (!ownerId) return;
     const parentQ = Math.floor(q / chunkSpan) * chunkSpan;
     const parentR = Math.floor(r / chunkSpan) * chunkSpan;
-    const groupQ = Math.floor(q / groupSpan) * groupSpan;
-    const groupR = Math.floor(r / groupSpan) * groupSpan;
+    const groupQ = Math.floor(q / span) * span;
+    const groupR = Math.floor(r / span) * span;
     const color = entry.ownerColor || "#ef7669";
-    const key = `${ownerId}:${color}:${groupQ}:${groupR}:${r}`;
-    if (!rows.has(key)) {
-      rows.set(key, {
+    const key = `${ownerId}:${color}:${groupQ}:${groupR}`;
+    if (!next.has(key)) {
+      next.set(key, {
         ownerId,
         ownerKind: playerId && ownerId === playerId ? "player" : "rival",
         color,
@@ -757,50 +849,30 @@ function mapOverviewTerritories(bounds, zoom, playerId = "") {
         parentR,
         groupQ,
         groupR,
-        r,
-        qs: []
+        cellCount: 0
       });
     }
-    rows.get(key).qs.push(q);
-  });
-
-  const rowRuns = [];
-  rows.forEach((row) => {
-    const qs = [...new Set(row.qs)].sort((a, b) => a - b);
-    let start = null;
-    let previous = null;
-    qs.forEach((q) => {
-      if (start === null) {
-        start = q;
-        previous = q;
-        return;
-      }
-      if (q === previous + 1) {
-        previous = q;
-        return;
-      }
-      rowRuns.push({ ...row, minQ: start, maxQ: previous, cellCount: previous - start + 1 });
-      start = q;
-      previous = q;
+    next.get(key).cellCount += 1;
     });
-    if (start !== null) {
-      rowRuns.push({ ...row, minQ: start, maxQ: previous, cellCount: previous - start + 1 });
-    }
-  });
+    return next;
+  };
 
   const maxGroups = level === 1 ? 4800 : level === 2 ? 6400 : 7800;
-  const territories = rowRuns
-    .sort((a, b) => b.cellCount - a.cellCount)
-    .slice(0, maxGroups)
+  groups = buildGroups(groupSpan);
+  while (groups.size > maxGroups) {
+    groupSpan *= 2;
+    groups = buildGroups(groupSpan);
+  }
+  const territories = [...groups.values()]
     .map((group) => {
-      const center = cellCenterFromGrid((group.minQ + group.maxQ) / 2, group.r);
+      const center = cellCenterFromGrid(group.groupQ + groupSpan / 2, group.groupR + groupSpan / 2);
       return {
         ownerId: group.ownerId,
         ownerKind: group.ownerKind,
-        chunkId: `z${level}:${group.groupQ / groupSpan}:${group.groupR / groupSpan}:${group.r}:${group.minQ}:${group.maxQ}:${group.ownerId}`,
-        polygon: rectBoundaryLatLngRangeServer(group.minQ, group.maxQ, group.r, group.r),
+        chunkId: `z${level}:${group.groupQ / groupSpan}:${group.groupR / groupSpan}:${group.ownerId}`,
+        polygon: rectBoundaryLatLngBlockServer(group.groupQ, group.groupR, groupSpan),
         cellCount: group.cellCount,
-        occupied: 1,
+        occupied: group.cellCount / (groupSpan * groupSpan),
         color: group.color,
         lat: center.lat,
         lng: center.lng
@@ -812,8 +884,6 @@ function mapOverviewTerritories(bounds, zoom, playerId = "") {
 
 function writeMarket(market) {
   const clean = { land: cleanMarketLand(market.land), resetAt: market.resetAt || null };
-  const previous = storage?.market && typeof storage.market === "object" ? storage.market : { land: {} };
-  const changed = marketSignature(previous) !== marketSignature(clean) || (previous.resetAt || null) !== (clean.resetAt || null);
   if (storage) {
     storage.market = clean;
     persistState("market");
@@ -821,20 +891,8 @@ function writeMarket(market) {
     ensureDataFiles();
     fs.writeFileSync(MARKET_FILE, JSON.stringify(clean, null, 2), "utf8");
   }
-  if (changed) {
-    marketVersion += 1;
-  }
-}
-
-function marketSignature(market = readMarket()) {
-  const ids = Object.keys(market.land || {}).sort();
-  let hash = 0;
-  ids.forEach((id) => {
-    const owner = market.land[id] || {};
-    const token = `${id}:${owner.ownerId || ""}:${owner.ownerColor || ""}:${owner.buildingId || ""}:${owner.cellEmoji || ""}`;
-    for (let index = 0; index < token.length; index += 1) hash = ((hash << 5) - hash + token.charCodeAt(index)) | 0;
-  });
-  return `${ids.length}:${hash}`;
+  marketVersion += 1;
+  marketSpatialIndex = null;
 }
 
 function readNewsEvents() {
@@ -990,13 +1048,29 @@ function marketEntryForCell(farm, ownerId, ownerName, cell, settings = readSetti
 function mergeFarmIntoMarket(farm, ownerId, ownerName) {
   const market = readMarket();
   const settings = readSettings();
+  let changed = false;
   Object.entries(farm.land || {}).forEach(([id, cell]) => {
     if (!isPlayableLandId(id)) return;
     if (market.land[id] && market.land[id].ownerId !== ownerId) return;
-    market.land[id] = marketEntryForCell(farm, ownerId, ownerName, cell, settings);
+    const nextEntry = marketEntryForCell(farm, ownerId, ownerName, cell, settings);
+    if (JSON.stringify(market.land[id] || null) === JSON.stringify(nextEntry)) return;
+    market.land[id] = nextEntry;
+    changed = true;
   });
-  writeMarket(market);
+  if (changed) writeMarket(market);
   return market;
+}
+
+function reconcileFarmLandWithMarket(submittedFarm, storedFarm, market, ownerId) {
+  const land = {};
+  const submittedLand = submittedFarm.land || {};
+  const storedLand = storedFarm.land || {};
+  const candidateIds = new Set([...Object.keys(storedLand), ...Object.keys(submittedLand)]);
+  candidateIds.forEach((id) => {
+    if (market.land[id]?.ownerId !== ownerId) return;
+    land[id] = submittedLand[id] || storedLand[id];
+  });
+  return { ...submittedFarm, land };
 }
 
 function refreshRegisteredMarketEntries(users = readUsers()) {
@@ -1098,7 +1172,8 @@ function fertilizerMultiplier(level, settings = readSettings()) {
 }
 
 function leaderboardRows() {
-  return readUsers().map((user) => {
+  if (leaderboardCache.version === leaderboardVersion) return leaderboardCache.rows;
+  const rows = readUsers().map((user) => {
     const farm = sanitizeFarmState(user.farm);
     return {
       id: user.id,
@@ -1111,6 +1186,8 @@ function leaderboardRows() {
     .map((row) => ({ landCount: 0, cash: row.score || 0, ...row }))
     .sort((a, b) => b.landCount - a.landCount || b.cash - a.cash || b.score - a.score)
     .slice(0, 12);
+  leaderboardCache = { version: leaderboardVersion, rows };
+  return rows;
 }
 
 function isAdmin(session, users = readUsers()) {
@@ -1468,7 +1545,25 @@ function serveStatic(req, res) {
     }
 
     const ext = path.extname(filePath).toLowerCase();
-    res.writeHead(200, { "content-type": mimeTypes[ext] || "application/octet-stream" });
+    const versioned = url.searchParams.has("v") || requestedPath.startsWith("/assets/");
+    const headers = {
+      "content-type": mimeTypes[ext] || "application/octet-stream",
+      "cache-control": requestedPath === "/index.html" ? "no-cache" : versioned ? "public, max-age=31536000, immutable" : "public, max-age=3600"
+    };
+    const compressible = /\.(js|css|json|html|svg|geojson)$/i.test(filePath);
+    if (compressible && /\bgzip\b/.test(req.headers["accept-encoding"] || "") && content.length > 1024) {
+      zlib.gzip(content, { level: 6 }, (gzipError, compressed) => {
+        if (gzipError) {
+          res.writeHead(200, headers);
+          res.end(content);
+          return;
+        }
+        res.writeHead(200, { ...headers, "content-encoding": "gzip", vary: "Accept-Encoding" });
+        res.end(compressed);
+      });
+      return;
+    }
+    res.writeHead(200, headers);
     res.end(content);
   });
 }
@@ -1548,7 +1643,14 @@ async function handleApi(req, res) {
     }
 
     if (req.method === "GET" && req.url === "/api/settings") {
-      sendJson(res, 200, readSettings());
+      const settings = readSettings();
+      const etag = `"${crypto.createHash("sha1").update(JSON.stringify(settings)).digest("hex")}"`;
+      if (req.headers["if-none-match"] === etag) {
+        res.writeHead(304, { etag, "cache-control": "private, max-age=0, must-revalidate" });
+        res.end();
+        return;
+      }
+      sendJson(res, 200, settings, { etag, "cache-control": "private, max-age=0, must-revalidate" });
       return;
     }
 
@@ -1658,7 +1760,7 @@ async function handleApi(req, res) {
 
     if (req.method === "POST" && req.url === "/api/claim") {
       const session = getSession(req);
-      if (!session) {
+      if (!session || session.isGuest) {
         sendJson(res, 401, { error: "Спочатку увійдіть у гру." });
         return;
       }
@@ -1666,25 +1768,43 @@ async function handleApi(req, res) {
       const body = await readBody(req);
       const requestedCells = Array.isArray(body.cells) ? body.cells.slice(0, 1000) : [];
       const market = readMarket();
-      const users = session.isGuest ? [] : readUsers();
-      const user = session.isGuest ? null : users.find((item) => item.id === session.userId);
-      const farm = user ? sanitizeFarmState(user.farm) : defaultFarmState();
-      const ownerName = session.isGuest ? "Гостьова розвідка" : (user ? user.username : "Гравець");
+      const users = readUsers();
+      const user = users.find((item) => item.id === session.userId);
+      if (!user) {
+        sendJson(res, 404, { error: "Гравця не знайдено." });
+        return;
+      }
+      const farm = sanitizeFarmState(user.farm);
+      const ownerName = user.username || "Гравець";
+      const settings = readSettings();
       const now = new Date().toISOString();
       const claimed = [];
       const rejected = [];
       const alreadyOwned = [];
+      const prices = {};
+      let charged = 0;
 
       requestedCells.forEach((cell) => {
         const id = typeof cell.id === "string" ? cell.id.slice(0, 48) : "";
-        const price = Number.isFinite(cell.price) ? Math.max(1, Math.floor(cell.price)) : 100;
         if (!isPlayableLandId(id)) return;
+        const { q, r } = parseCellGridId(id);
+        if (!isPlayableGridCellServer(q, r)) {
+          rejected.push(id);
+          return;
+        }
         const existing = market.land[id];
         if (existing) {
           if (existing.ownerId === session.userId) alreadyOwned.push(id);
           else rejected.push(id);
           return;
         }
+        const price = authoritativeLandPrice(id, market, settings);
+        if (farm.coins - charged < price) {
+          rejected.push(id);
+          return;
+        }
+        charged += price;
+        prices[id] = price;
         market.land[id] = {
           ownerId: session.userId,
           ownerName: session.isGuest ? "Гостьова розвідка" : (farm.companyName || ownerName),
@@ -1703,7 +1823,25 @@ async function handleApi(req, res) {
         claimed.push(id);
       });
 
-      writeMarket(market);
+      farm.coins -= charged;
+      claimed.forEach((id) => {
+        farm.land[id] = {
+          id,
+          price: prices[id],
+          purchasedAt: now,
+          level: 1,
+          building: null,
+          buildingId: null,
+          buildingGroupId: null,
+          buildingLevel: 0,
+          machinery: false,
+          machineryLevel: 0
+        };
+      });
+      user.farm = sanitizeFarmState(farm);
+      user.updatedAt = now;
+      writeUsers(users);
+      if (claimed.length) writeMarket(market);
       if (claimed.length) {
         const requestedById = new Map(requestedCells.map((cell) => [cell.id, cell]));
         const regions = [...new Set(claimed.map((id) => String(requestedById.get(id)?.region || "невідомий регіон").trim()).filter(Boolean))];
@@ -1716,7 +1854,7 @@ async function handleApi(req, res) {
           targetCellId: claimed[0]
         });
       }
-      sendJson(res, 200, { ok: true, claimed, rejected, alreadyOwned, ...marketVersionPayload() });
+      sendJson(res, 200, { ok: true, claimed, rejected, alreadyOwned, prices, charged, coins: farm.coins, ...marketVersionPayload() });
       return;
     }
 
@@ -1793,6 +1931,7 @@ async function handleApi(req, res) {
         return;
       }
 
+      farm = reconcileFarmLandWithMarket(farm, sanitizeFarmState(user.farm), marketSnapshot, user.id);
       user.farm = farm;
       user.updatedAt = new Date().toISOString();
       writeUsers(users);

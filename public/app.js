@@ -43,12 +43,12 @@ const MAP_VIEW_BOUNDS = {
   east: MAP_BOUNDS.east + 4.5
 };
 const TILE_SIZE = 256;
-const DETAIL_ZOOM_LEVEL_COUNT = 3;
+const DETAIL_ZOOM_LEVEL_COUNT = 2;
 const MAP_ZOOM_LEVELS = [7, 8, 10, 12];
 const DISPLAY_ZOOM_LEVELS = [7, 8, 10, 12];
 let MAX_VISIBLE_GRID_CELLS = 20000;
 const SETTLEMENT_GRID_SIZE = 0.25;
-let DETAIL_ZOOM_MIN = 8;
+let DETAIL_ZOOM_MIN = 10;
 let DRAW_GRID = true;
 let CLAIM_BATCH_SIZE = 1000;
 let SELL_REFUND_RATE = 0.62;
@@ -209,6 +209,8 @@ let activeChatLoading = false;
 let newsRows = [];
 let newsTimer = null;
 let visibleCells = [];
+let playableGridRows = null;
+let mapSettledTimer = null;
 let landRenderMode = null;
 let cellLayerById = new Map();
 let selectedCellIds = new Set();
@@ -235,6 +237,7 @@ let detailedMapMarkerCount = 0;
 let landClusterCacheKey = "";
 let landClusterCacheMap = null;
 let landClusterCacheClusters = null;
+let farmDerivedStatsCache = null;
 
 function defaultGameState() {
   return {
@@ -387,8 +390,8 @@ function applyGameSettings(settings) {
     ? Math.max(12000, Math.min(20000, economy.maxVisibleCells))
     : (isLowPowerDevice() ? 9000 : 18000);
   DETAIL_ZOOM_MIN = Number.isFinite(Number(economy.detailZoomMin))
-    ? Math.max(8, Math.min(12, Number(economy.detailZoomMin)))
-    : 8;
+    ? Math.max(10, Math.min(12, Number(economy.detailZoomMin)))
+    : 10;
   DRAW_GRID = economy.drawGrid !== false;
   CLAIM_BATCH_SIZE = Number.isFinite(economy.claimBatchSize) ? economy.claimBatchSize : CLAIM_BATCH_SIZE;
   SELL_REFUND_RATE = Number.isFinite(economy.sellRefundPercent) ? economy.sellRefundPercent / 100 : SELL_REFUND_RATE;
@@ -417,7 +420,7 @@ function applyGameSettings(settings) {
   landClusterCacheKey = "";
   if (!DRAW_GRID) {
     visibleCells = [];
-    clearGridGpuLayer();
+    updateLandMapSource([]);
   }
 }
 
@@ -472,8 +475,6 @@ function startGame(nextPlayer, nextState) {
   render();
   showGameMessage("Карту володінь завантажено.");
   refreshMessageSummary();
-  clearInterval(messagesTimer);
-  messagesTimer = setInterval(refreshMessageSummary, 10000);
   if (window.location.pathname === "/admin") {
     if (player?.isAdmin) {
       openAdminPanel();
@@ -563,55 +564,37 @@ async function initMap() {
   addMapQuickActionsControl();
 
   await new Promise((resolve) => map.once("load", resolve));
+  initLandMapLayers();
 
-  await loadUkraineBoundary();
+  await Promise.allSettled([loadUkraineBoundary(), loadPlayableGridMask()]);
   useFallbackSettlements();
   updateSettlementMapSource();
   loadSettlementsInBackground();
-  await refreshGlobalMarket();
-  await refreshVisibleLand();
-  await refreshLeaderboard();
-  await refreshNews();
+  refreshVisibleLand();
+  Promise.allSettled([refreshGlobalMarket(), refreshLeaderboard(), refreshNews(), refreshMessageSummary()]);
   requestIdleWork(addDeferredRayonLayer);
 
   initMapTilesCanvas();
-  initGridGpuLayer();
   drawMapBaseLayer();
 
   map.on("movestart", () => {
     visibleLandRequestId += 1;
     cancelPendingGridRender();
-    invalidateGridGeometryCache();
     isMapMoving = true;
-    syncGridGpuCanvas();
   });
   map.on("move", () => {
-    invalidateGridGeometryCache();
-    syncGridGpuCanvas();
     updateZoomBadge();
     requestMapBaseRender();
   });
   const handleSettledMapChange = () => {
-    isMapMoving = false;
-    enforceDiscreteZoom();
-    setGridCanvasVisible(true);
-    syncGridGpuCanvas();
-    invalidateGridGeometryCache();
-    updateZoomBadge();
-    updateSettlementMapSource();
-    requestMapBaseRender();
-    scheduleVisibleLandRefresh(true);
-    scheduleGridUpdate(true);
+    scheduleMapSettled();
   };
   map.on("zoomend", handleSettledMapChange);
   map.on("moveend", handleSettledMapChange);
   map.on("resize", () => {
     syncMapTilesCanvas();
-    syncGridGpuCanvas();
-    invalidateGridGeometryCache();
     requestMapBaseRender();
-    scheduleVisibleLandRefresh(true);
-    scheduleGridUpdate(true);
+    scheduleMapSettled();
   });
   map.on("click", (event) => {
     selectCellAtMapPoint({
@@ -628,12 +611,24 @@ async function initMap() {
     scheduleVisibleLandRefresh(20);
     updateGrid();
   }, 180);
+  startBackgroundPolling();
+}
+
+function stopBackgroundPolling() {
   clearInterval(marketTimer);
-  marketTimer = setInterval(refreshGlobalMarket, 20000);
   clearInterval(leaderboardTimer);
-  leaderboardTimer = setInterval(refreshLeaderboard, 7000);
   clearInterval(newsTimer);
-  newsTimer = setInterval(refreshNews, 9000);
+  clearInterval(messagesTimer);
+  marketTimer = leaderboardTimer = newsTimer = messagesTimer = null;
+}
+
+function startBackgroundPolling() {
+  stopBackgroundPolling();
+  if (document.hidden || !player) return;
+  marketTimer = setInterval(refreshGlobalMarket, 20000);
+  leaderboardTimer = setInterval(refreshLeaderboard, 10000);
+  newsTimer = setInterval(refreshNews, 20000);
+  messagesTimer = setInterval(refreshMessageSummary, 10000);
 }
 
 function addMapQuickActionsControl() {
@@ -665,6 +660,19 @@ function addMapZoomControl() {
     lastWheelZoomAt = now;
     stepMapZoom(event.deltaY < 0 ? 1 : -1, mapCursorLngLat(event));
   }, { passive: false });
+}
+
+function scheduleMapSettled() {
+  clearTimeout(mapSettledTimer);
+  mapSettledTimer = setTimeout(() => {
+    mapSettledTimer = null;
+    if (enforceDiscreteZoom()) return;
+    isMapMoving = false;
+    updateZoomBadge();
+    updateSettlementMapSource();
+    requestMapBaseRender();
+    scheduleVisibleLandRefresh(true);
+  }, 80);
 }
 
 function mapCursorLngLat(event) {
@@ -834,17 +842,10 @@ function mapLibreBoundsAdapter(bounds) {
   };
 }
 
-async function initSplashMap() {
+function initSplashMap() {
   const splashMap = document.querySelector("#splashMap");
   if (!splashMap) return;
-
-  try {
-    const geojson = await fetch("/ukraine-boundary.geojson").then((response) => response.json());
-    const polygons = extractPolygonsFromGeoJson(geojson);
-    drawStaticUkrainePreview(splashMap, polygons);
-  } catch {
-    drawStaticUkrainePreview(splashMap, fallbackUkrainePolygon);
-  }
+  drawStaticUkrainePreview(splashMap, fallbackUkrainePolygon);
 }
 
 function settlementWeightForType(type) {
@@ -853,6 +854,57 @@ function settlementWeightForType(type) {
   if (type === "city") return 160000;
   if (type === "town") return 42000;
   return 9000;
+}
+
+function emptyFeatureCollection() {
+  return { type: "FeatureCollection", features: [] };
+}
+
+function initLandMapLayers() {
+  if (!map || map.getSource("game-land")) return;
+  map.addSource("game-land", { type: "geojson", data: emptyFeatureCollection() });
+  map.addLayer({ id: "game-land-fill", type: "fill", source: "game-land", paint: {
+    "fill-color": ["get", "fill"], "fill-opacity": ["get", "fillOpacity"]
+  }});
+  map.addLayer({ id: "game-land-line", type: "line", source: "game-land", paint: {
+    "line-color": ["get", "stroke"], "line-opacity": ["get", "strokeOpacity"], "line-width": ["get", "strokeWidth"]
+  }});
+}
+
+function cellFeature(cell) {
+  const parsed = parseHexId(cell.id);
+  const boundary = cell.boundary || rectBoundaryLatLng(parsed.q, parsed.r);
+  const owner = cell.overviewOwner || getOwner(cell.id);
+  const selected = selectedCellIds.has(cell.id) || selectedCellId === cell.id;
+  const zoom = displayZoomForMapZoom(map.getZoom());
+  const color = cell.overviewColor || (owner === "player" ? state.color : owner === "rival" ? rivalColorForCell(cell.id) : "#111111");
+  const overviewOpacity = cell.overviewOwner ? Math.max(0.12, Math.min(0.48, Number(cell.occupied || 1) * 0.48)) : null;
+  return {
+    type: "Feature", id: cell.id,
+    properties: {
+      id: cell.id,
+      fill: selected ? "#ffb000" : owner === "free" ? "#ffffff" : color,
+      fillOpacity: selected ? 0.42 : overviewOpacity ?? (owner === "player" ? 0.48 : owner === "rival" ? 0.38 : 0),
+      stroke: selected ? "#ffb000" : owner === "free" ? "#111111" : color,
+      strokeOpacity: selected ? 1 : cell.overviewOwner ? 0.65 : owner === "free" ? (zoom === 10 ? 0.12 : zoom >= 12 ? 0.26 : 0) : 0.38,
+      strokeWidth: selected ? 2 : cell.overviewOwner ? 1.2 : 0.75
+    },
+    geometry: { type: "Polygon", coordinates: [[...boundary.map(([lat, lng]) => [lng, lat]), [boundary[0][1], boundary[0][0]]]] }
+  };
+}
+
+function updateLandMapSource(cells = visibleCells) {
+  const source = map?.getSource?.("game-land");
+  if (source) source.setData({ type: "FeatureCollection", features: (cells || []).map(cellFeature) });
+}
+
+async function loadPlayableGridMask() {
+  try {
+    const payload = await requestJson("/playable-grid.json");
+    playableGridRows = new Map(Object.entries(payload.rows || {}).map(([row, ranges]) => [Number(row), ranges]));
+  } catch {
+    playableGridRows = null;
+  }
 }
 
 function curatedSettlementLabels() {
@@ -993,11 +1045,21 @@ async function refreshMarket() {
 function mapViewportQuery() {
   if (!map) return null;
   const bounds = map.getBounds().pad(0.08);
+  const level = currentChunkLevel();
+  const cellsPerChunk = level <= 1 ? 512 : level === 2 ? 256 : level === 3 ? 128 : 32;
+  const chunkWidth = cellsPerChunk * RECT_CELL_WIDTH_DEGREES;
+  const chunkHeight = cellsPerChunk * RECT_CELL_HEIGHT_DEGREES;
+  const minChunkQ = Math.floor((bounds.getWest() - MAP_BOUNDS.west) / chunkWidth);
+  const maxChunkQ = Math.floor((bounds.getEast() - MAP_BOUNDS.west) / chunkWidth);
+  const minChunkR = Math.floor((MAP_BOUNDS.north - bounds.getNorth()) / chunkHeight);
+  const maxChunkR = Math.floor((MAP_BOUNDS.north - bounds.getSouth()) / chunkHeight);
   return new URLSearchParams({
-    west: bounds.getWest().toFixed(5),
-    east: bounds.getEast().toFixed(5),
-    south: bounds.getSouth().toFixed(5),
-    north: bounds.getNorth().toFixed(5),
+    west: (MAP_BOUNDS.west + minChunkQ * chunkWidth).toFixed(5),
+    east: (MAP_BOUNDS.west + (maxChunkQ + 1) * chunkWidth).toFixed(5),
+    north: (MAP_BOUNDS.north - minChunkR * chunkHeight).toFixed(5),
+    south: (MAP_BOUNDS.north - (maxChunkR + 1) * chunkHeight).toFixed(5),
+    minChunkQ: String(minChunkQ), maxChunkQ: String(maxChunkQ),
+    minChunkR: String(minChunkR), maxChunkR: String(maxChunkR),
     zoom: String(Math.round(displayZoomForMapZoom(map.getZoom()))),
     version: String(marketVersion || 0),
     playerId: player?.id || ""
@@ -1016,10 +1078,8 @@ function currentChunkLevel() {
 function chunkCacheKey(level, query) {
   return [
     `z${level}`,
-    query.get("west"),
-    query.get("east"),
-    query.get("south"),
-    query.get("north"),
+    query.get("minChunkQ"), query.get("maxChunkQ"),
+    query.get("minChunkR"), query.get("maxChunkR"),
     query.get("zoom"),
     marketVersion || 0,
     player?.id || ""
@@ -1051,7 +1111,6 @@ async function refreshVisibleLand() {
   const requestId = ++visibleLandRequestId;
   try {
     const mode = currentLandRenderMode();
-    resetLandLayerForMode(mode);
     if (mode === "overview") {
       const query = mapViewportQuery();
       if (!query) return;
@@ -1063,7 +1122,8 @@ async function refreshVisibleLand() {
       if (!cached) setChunkCache(cacheKey, payload);
       overviewTerritories = Array.isArray(payload.territories) ? payload.territories : [];
       if (Number.isFinite(payload.version)) marketVersion = payload.version;
-      scheduleGridUpdate();
+      resetLandLayerForMode(mode);
+      updateGrid();
       return;
     }
 
@@ -1091,10 +1151,19 @@ async function refreshVisibleLand() {
         visibleLandState.owners[cell.o] = payload.owners[cell.o];
       }
     });
+    if (payload.truncated) {
+      const coarse = await requestJson(`/api/map/overview?z=8&${query.toString()}`);
+      if (requestId !== visibleLandRequestId) return;
+      overviewTerritories = Array.isArray(coarse.territories) ? coarse.territories : [];
+      resetLandLayerForMode("overview");
+      visibleCells = overviewTerritoryCells();
+      updateLandMapSource(visibleCells);
+      return;
+    }
     if (Number.isFinite(payload.version)) marketVersion = payload.version;
-    invalidateGridGeometryCache();
+    resetLandLayerForMode(mode);
     reconcileLocalLandWithVisibleState();
-    scheduleGridUpdate();
+    updateGrid();
   } catch {
     visibleLandState = visibleLandState || { version: 0, owners: {}, cells: {} };
   }
@@ -1595,7 +1664,7 @@ function compileShader(gl, type, source) {
 
 function refreshCanvasMapLayers() {
   drawMapBaseLayer();
-  renderGridGpuLayer();
+  updateLandMapSource(visibleCells);
 }
 
 function syncGridGpuCanvas() {
@@ -1846,16 +1915,16 @@ async function updateGrid() {
   resetLandLayerForMode(mode);
   cellLayerById = new Map();
   detailedMapMarkerCount = 0;
-  clearGridGpuLayer();
   if (!DRAW_GRID) {
     visibleCells = [];
+    updateLandMapSource([]);
     updateSettlementLabelVisibility();
     renderSelectedCell();
     return;
   }
   if (mode === "overview") {
-    visibleCells = [];
-    renderOverviewGridLayer();
+    visibleCells = overviewTerritoryCells();
+    updateLandMapSource(visibleCells);
     updateSettlementLabelVisibility();
     renderSelectedCell();
     return;
@@ -1863,13 +1932,13 @@ async function updateGrid() {
   visibleCells = gridCellsInView();
   if (renderJob !== gridRenderJob || currentLandRenderMode() !== "detail") return;
   if (gridSkippedForDensity) {
-    visibleCells = [];
-    clearGridGpuLayer();
+    await renderCoarseLandFallback(renderJob);
     updateSettlementLabelVisibility();
     renderSelectedCell();
     return;
   }
   if (!visibleCells.length) {
+    updateLandMapSource([]);
     updateSettlementLabelVisibility();
     renderSelectedCell();
     return;
@@ -1879,8 +1948,23 @@ async function updateGrid() {
     selectedCellIds = new Set();
   }
   updateSettlementLabelVisibility();
-  updateGridGpuLayer(visibleCells);
+  updateLandMapSource(visibleCells);
   renderSelectedCell();
+}
+
+async function renderCoarseLandFallback(renderJob) {
+  const query = mapViewportQuery();
+  if (!query) return;
+  try {
+    const payload = await requestJson(`/api/map/overview?z=8&${query.toString()}`);
+    if (renderJob !== gridRenderJob || currentLandRenderMode() !== "detail") return;
+    overviewTerritories = Array.isArray(payload.territories) ? payload.territories : [];
+    if (Number.isFinite(payload.version)) marketVersion = payload.version;
+    visibleCells = overviewTerritoryCells();
+    updateLandMapSource(visibleCells);
+  } catch {
+    // Keep the previous LOD visible when the fallback request fails.
+  }
 }
 
 function clearGridLayerForZoom() {
@@ -1888,7 +1972,7 @@ function clearGridLayerForZoom() {
   gridRenderJob += 1;
   cellLayerById = new Map();
   detailedMapMarkerCount = 0;
-  clearGridGpuLayer();
+  updateLandMapSource([]);
 }
 
 function showTouchTooltip(cell, owner, latlng) {
@@ -1934,10 +2018,7 @@ function currentLandRenderMode() {
 function resetLandLayerForMode(nextMode) {
   if (landRenderMode === nextMode) return;
   landRenderMode = nextMode;
-  visibleCells = [];
   invalidateGridGeometryCache();
-  clearGridGpuLayer();
-  if (nextMode === "detail") overviewTerritories = [];
 }
 
 function detailZoomStart() {
@@ -1988,10 +2069,11 @@ function overviewTerritoryCells() {
     lng: territory.lng,
     overviewOwner: territory.ownerKind === "player" ? "player" : "rival",
     overviewColor: territory.color || "#ef7669",
+    occupied: territory.occupied,
     boundary: territory.polygon
   }));
 
-  return serverCells.slice(0, isLowPowerDevice() ? 900 : 1800);
+  return serverCells;
 }
 
 function overviewGridStepForZoom(zoom) {
@@ -2026,7 +2108,7 @@ function refreshVisibleCellLayers(cellIds = null) {
     return;
   }
 
-  updateGridGpuLayer(visibleCells);
+  updateLandMapSource(visibleCells);
   renderSelectedCell();
 }
 
@@ -2127,7 +2209,7 @@ function finishShiftSelection(event) {
   refreshVisibleCellLayers(changedSelectionIds(previousSelection, selectedCellIds));
   renderSelectedCell();
   invalidateGridGeometryCache();
-  updateGridGpuLayer(visibleCells);
+  updateLandMapSource(visibleCells);
   showGameMessage(`Виділено земельних ділянок: ${selectedCellIds.size}.`);
 }
 
@@ -2138,7 +2220,7 @@ function selectionCandidateCells() {
 
 function selectCellAtMapPoint(event) {
   if (suppressMapClick) return;
-  if (!event?.latlng || !pointInUkraine([event.latlng.lng, event.latlng.lat])) return;
+  if (!event?.latlng) return;
 
   if (isOverviewZoom() && !event.originalEvent?.shiftKey && !clusterSelectionMode) {
     map.setView(event.latlng, detailZoomStart());
@@ -2169,8 +2251,7 @@ function parseHexId(id) {
 function cellFromLatLng(lat, lng) {
   const q = Math.floor((lng - MAP_BOUNDS.west) / RECT_CELL_WIDTH_DEGREES);
   const r = Math.floor((MAP_BOUNDS.north - lat) / RECT_CELL_HEIGHT_DEGREES);
-  const cell = makeCell(hexId(q, r));
-  return pointInUkraine([cell.lng, cell.lat]) ? cell : null;
+  return isPlayableGridCell(q, r) ? makeCell(hexId(q, r)) : null;
 }
 
 function gridCellsInView(bounds = map.getBounds().pad(0.04), limit = gridCellLimitForZoom()) {
@@ -2180,24 +2261,19 @@ function gridCellsInView(bounds = map.getBounds().pad(0.04), limit = gridCellLim
   const minR = Math.floor((MAP_BOUNDS.north - bounds.getNorth()) / RECT_CELL_HEIGHT_DEGREES) - 1;
   const maxR = Math.ceil((MAP_BOUNDS.north - bounds.getSouth()) / RECT_CELL_HEIGHT_DEGREES) + 1;
   const candidateCount = Math.max(0, maxQ - minQ + 1) * Math.max(0, maxR - minR + 1);
-  if (candidateCount > Math.max(limit * 5, 5000)) {
+  if (candidateCount > limit) {
     gridSkippedForDensity = true;
-    notifyGridTooDense();
     return [];
   }
+  const stride = 1;
   const cells = [];
-  for (let q = minQ; q <= maxQ; q += 1) {
-    for (let r = minR; r <= maxR; r += 1) {
+  for (let q = minQ; q <= maxQ; q += stride) {
+    for (let r = minR; r <= maxR; r += stride) {
       const { lat, lng } = cellCenterFromGrid(q, r);
       if (!pointInBounds(lat, lng, bounds)) continue;
       if (!isPlayableGridCell(q, r)) continue;
       const cell = makeVisibleCell(hexId(q, r));
       cells.push(cell);
-      if (cells.length > limit) {
-        gridSkippedForDensity = true;
-        notifyGridTooDense();
-        return [];
-      }
     }
   }
   return cells;
@@ -2211,6 +2287,10 @@ function notifyGridTooDense() {
 }
 
 function isPlayableGridCell(q, r) {
+  if (playableGridRows) {
+    const ranges = playableGridRows.get(r);
+    return Array.isArray(ranges) && ranges.some(([minQ, maxQ]) => q >= minQ && q <= maxQ);
+  }
   const { lng, lat } = cellCenterFromGrid(q, r);
   return pointInUkraine([lng, lat]);
 }
@@ -2559,8 +2639,9 @@ function connectedClusters() {
     const cluster = [];
     owned.delete(start);
 
-    while (queue.length) {
-      const id = queue.shift();
+    let queueIndex = 0;
+    while (queueIndex < queue.length) {
+      const id = queue[queueIndex++];
       cluster.push(id);
       neighbors({ id }).forEach((neighborId) => {
         if (owned.has(neighborId)) {
@@ -2726,8 +2807,9 @@ function buildingCostForCell(ownership) {
 }
 
 function buildingDailyIncome() {
+  if (Number.isFinite(farmDerivedStatsCache?.buildingIncome)) return farmDerivedStatsCache.buildingIncome;
   const counted = new Set();
-  return Object.values(state.land || {}).reduce((sum, ownership) => {
+  const value = Object.values(state.land || {}).reduce((sum, ownership) => {
     const item = buildingItemForCell(ownership);
     if (!item) return sum;
     const key = ownership.buildingGroupId || `${ownership.id}:${item.id}`;
@@ -2735,6 +2817,8 @@ function buildingDailyIncome() {
     counted.add(key);
     return sum + (item.incomePerDay || 0);
   }, 0);
+  farmDerivedStatsCache = { ...(farmDerivedStatsCache || {}), buildingIncome: value };
+  return value;
 }
 
 function buildingCountByItem() {
@@ -2746,9 +2830,10 @@ function buildingCountByItem() {
 }
 
 function totalDailyIncome() {
+  if (Number.isFinite(farmDerivedStatsCache?.income)) return farmDerivedStatsCache.income;
   const clusterMap = clusterByCell();
   const countedBuildings = new Set();
-  return ownedCells().reduce((sum, cell) => {
+  const value = ownedCells().reduce((sum, cell) => {
     const ownership = state.land[cell.id];
     const item = buildingItemForCell(ownership);
     if (item) {
@@ -2759,16 +2844,21 @@ function totalDailyIncome() {
     }
     return sum + cellDailyIncome(cell, ownership, clusterMap);
   }, 0);
+  farmDerivedStatsCache = { ...(farmDerivedStatsCache || {}), income: value };
+  return value;
 }
 
 function assetsValue() {
-  return ownedCells().reduce((sum, cell) => {
+  if (Number.isFinite(farmDerivedStatsCache?.assets)) return farmDerivedStatsCache.assets;
+  const value = ownedCells().reduce((sum, cell) => {
     const owned = state.land[cell.id];
     return sum
       + owned.price
       + fertilizerCostThroughLevel(owned.level || 1)
       + (isFirstCellInBuildingGroup(cell.id, owned) ? buildingCostForCell(owned) : 0);
   }, inventoryValue());
+  farmDerivedStatsCache = { ...(farmDerivedStatsCache || {}), assets: value };
+  return value;
 }
 
 function isFirstCellInBuildingGroup(cellId, ownership) {
@@ -2915,6 +3005,7 @@ async function buySelectedCell() {
   showLandOperationOverlay(cells.length);
   try {
     const claimedIds = new Set();
+    const authoritativePrices = new Map();
     for (let index = 0; index < cells.length; index += CLAIM_BATCH_SIZE) {
       const batch = cells.slice(index, index + CLAIM_BATCH_SIZE);
       const claim = await requestJson("/api/claim", {
@@ -2922,6 +3013,8 @@ async function buySelectedCell() {
         body: JSON.stringify({ cells: batch.map((cell) => ({ id: cell.id, price: cell.price, region: cell.region })) })
       });
       if (Number.isFinite(claim.version)) marketVersion = claim.version;
+      if (Number.isFinite(claim.coins)) state.coins = claim.coins;
+      Object.entries(claim.prices || {}).forEach(([id, price]) => authoritativePrices.set(id, Number(price)));
       applyClaimedCellsToVisibleLand(claim.claimed || []);
       refreshCanvasMapLayers();
       (claim.claimed || []).forEach((id) => claimedIds.add(id));
@@ -2937,15 +3030,8 @@ async function buySelectedCell() {
     if (claimedCells.length < cells.length) {
       showGameMessage(`Куплено ${claimedCells.length} з ${cells.length} земельних ділянок. Частину вже зайняли інші гравці.`);
     }
-    const finalPrice = claimedCells.reduce((sum, cell) => sum + cell.price, 0);
-    if (state.coins < finalPrice) {
-      showGameMessage(`Недостатньо коштів після оновлення карти. Потрібно ${money(finalPrice)}, на балансі ${money(state.coins)}.`);
-      refreshVisibleCellLayers(cells.map((cell) => cell.id));
-      render();
-      return;
-    }
     cells.length = 0;
-    cells.push(...claimedCells);
+    cells.push(...claimedCells.map((cell) => ({ ...cell, price: authoritativePrices.get(cell.id) || cell.price })));
   } catch (error) {
     showGameMessage(error.message);
     return;
@@ -2956,7 +3042,6 @@ async function buySelectedCell() {
   }
 
   const finalPrice = cells.reduce((sum, cell) => sum + cell.price, 0);
-  state.coins -= finalPrice;
   const purchasedAt = new Date().toISOString();
   cells.forEach((cell) => {
     state.land[cell.id] = {
@@ -3483,7 +3568,7 @@ function selectCell(cellId, event = null) {
   refreshVisibleCellLayers(changedSelectionIds(previousSelection, selectedCellIds));
   renderSelectedCell();
   invalidateGridGeometryCache();
-  updateGridGpuLayer(visibleCells);
+  updateLandMapSource(visibleCells);
   const cell = getCell(cellId);
   showGameMessage(selectedCellIds.size > 1
     ? `Обрано земельних ділянок: ${selectedCellIds.size}.`
@@ -3819,6 +3904,7 @@ function inventoryDescription(kind) {
 }
 
 function render() {
+  farmDerivedStatsCache = null;
   renderHeader();
   renderSelectedCell();
   renderMetrics();
@@ -5161,6 +5247,12 @@ document.addEventListener("click", (event) => {
     button.classList.add("is-pressed");
     window.setTimeout(() => button.classList.remove("is-pressed"), 160);
   });
+});
+document.addEventListener("visibilitychange", () => {
+  startBackgroundPolling();
+  if (!document.hidden && player) {
+    Promise.allSettled([refreshGlobalMarket(), refreshLeaderboard(), refreshNews(), refreshMessageSummary()]);
+  }
 });
 
 replaceGameTerms(document.body);
