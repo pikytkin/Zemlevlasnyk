@@ -671,6 +671,7 @@ function scheduleMapSettled() {
     updateZoomBadge();
     updateSettlementMapSource();
     requestMapBaseRender();
+    scheduleGridUpdate(true);
     scheduleVisibleLandRefresh(true);
   }, 80);
 }
@@ -1131,7 +1132,10 @@ async function refreshVisibleLand() {
     const query = mapViewportQuery();
     if (!query) return;
     const boundsKey = chunkCacheKey(4, query);
-    if (boundsKey === visibleLandBoundsKey && visibleLandVersion === marketVersion) return;
+    if (boundsKey === visibleLandBoundsKey && visibleLandVersion === marketVersion) {
+      updateGrid();
+      return;
+    }
     const cached = getChunkCache(boundsKey);
     const payload = cached || await requestJson(`/api/map/cells?${query.toString()}`);
     if (requestId !== visibleLandRequestId) return;
