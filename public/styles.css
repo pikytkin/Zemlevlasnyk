@@ -34,6 +34,26 @@ body {
     linear-gradient(135deg, #07120f 0%, #0f1c17 48%, #122018 100%);
 }
 
+body.is-booting #authScreen,
+body.is-booting #gameScreen {
+  visibility: hidden;
+}
+
+body.is-booting::after {
+  content: "Завантаження Землевласника...";
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  z-index: 9999;
+  color: var(--text);
+  background:
+    radial-gradient(circle at 50% 42%, rgba(53, 201, 130, 0.18), transparent 18rem),
+    #07120f;
+  font-size: 1.05rem;
+  font-weight: var(--weight-ui);
+}
+
 strong,
 b,
 h1,

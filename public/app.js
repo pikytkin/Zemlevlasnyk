@@ -150,6 +150,15 @@ const leaderboard = document.querySelector("#leaderboard");
 const newsList = document.querySelector("#newsList");
 const gameMessage = document.querySelector("#gameMessage");
 
+function finishBoot() {
+  document.body.classList.remove("is-booting");
+}
+
+function bindEvent(element, eventName, handler, options) {
+  if (!element) return;
+  element.addEventListener(eventName, handler, options);
+}
+
 let player = null;
 let state = defaultGameState();
 let selectedCellId = null;
@@ -446,6 +455,7 @@ function startGame(nextPlayer, nextState) {
 
   authScreen.classList.add("is-hidden");
   gameScreen.classList.remove("is-hidden");
+  finishBoot();
   renderPlayerHeader();
   loadGameSettings().then(() => initMap().catch((error) => {
     console.error("initMap failed:", error);
@@ -486,6 +496,7 @@ async function logoutPlayer() {
   hideCellInfoPanel();
   gameScreen.classList.add("is-hidden");
   authScreen.classList.remove("is-hidden");
+  finishBoot();
   loginForm?.reset();
   showAuthMessage("Ви вийшли з акаунта.");
 }
@@ -4919,7 +4930,7 @@ document.querySelectorAll("[data-auth-tab]").forEach((tab) => {
   });
 });
 
-forgotPasswordLink?.addEventListener("click", () => {
+bindEvent(forgotPasswordLink, "click", () => {
   document.querySelectorAll("[data-auth-tab]").forEach((item) => item.classList.remove("is-active"));
   loginForm?.classList.add("is-hidden");
   registerForm?.classList.add("is-hidden");
@@ -4937,7 +4948,7 @@ if (new URLSearchParams(window.location.search).has("reset")) {
   showAuthMessage("Введіть новий пароль для акаунта.");
 }
 
-loginForm.addEventListener("submit", async (event) => {
+bindEvent(loginForm, "submit", async (event) => {
   event.preventDefault();
   showAuthMessage("Входимо...");
   try {
@@ -4951,7 +4962,7 @@ loginForm.addEventListener("submit", async (event) => {
   }
 });
 
-registerForm.addEventListener("submit", async (event) => {
+bindEvent(registerForm, "submit", async (event) => {
   event.preventDefault();
   showAuthMessage("Створюємо компанію...");
   try {
@@ -4965,7 +4976,7 @@ registerForm.addEventListener("submit", async (event) => {
   }
 });
 
-recoverForm?.addEventListener("submit", async (event) => {
+bindEvent(recoverForm, "submit", async (event) => {
   event.preventDefault();
   showAuthMessage("Готуємо відновлення...");
   try {
@@ -4979,7 +4990,7 @@ recoverForm?.addEventListener("submit", async (event) => {
   }
 });
 
-resetForm?.addEventListener("submit", async (event) => {
+bindEvent(resetForm, "submit", async (event) => {
   event.preventDefault();
   const token = new URLSearchParams(window.location.search).get("reset");
   if (!token) {
@@ -4999,51 +5010,51 @@ resetForm?.addEventListener("submit", async (event) => {
   }
 });
 
-buyButton.addEventListener("click", buySelectedCell);
-contactOwnerButton?.addEventListener("click", () => {
+bindEvent(buyButton, "click", buySelectedCell);
+bindEvent(contactOwnerButton, "click", () => {
   const ownerId = ownerIdForCell(selectedCellId);
   if (ownerId) openChat(ownerId);
 });
-upgradeButton.addEventListener("click", upgradeSelectedCell);
-buildingButton.addEventListener("click", buildOnSelectedCell);
-machineryButton.addEventListener("click", buyMachinery);
-sellButton.addEventListener("click", sellSelectedLand);
-incomeButton.addEventListener("click", collectIncome);
-closeSelectionPopup?.addEventListener("click", () => {
+bindEvent(upgradeButton, "click", upgradeSelectedCell);
+bindEvent(buildingButton, "click", buildOnSelectedCell);
+bindEvent(machineryButton, "click", buyMachinery);
+bindEvent(sellButton, "click", sellSelectedLand);
+bindEvent(incomeButton, "click", collectIncome);
+bindEvent(closeSelectionPopup, "click", () => {
   selectionPopupDismissed = true;
   setClusterSelectionMode(false);
   hideSelectionPopup();
 });
-closeCellInfoButton?.addEventListener("click", hideCellInfoPanel);
-detailInfoButton?.addEventListener("click", showCellInfoPanel);
-clusterSelectButton?.addEventListener("click", () => setClusterSelectionMode(!clusterSelectionMode));
-newsButton?.addEventListener("click", openNewsPanel);
-returnToNewsButton?.addEventListener("click", returnToNews);
-cellDetails.addEventListener("click", (event) => {
+bindEvent(closeCellInfoButton, "click", hideCellInfoPanel);
+bindEvent(detailInfoButton, "click", showCellInfoPanel);
+bindEvent(clusterSelectButton, "click", () => setClusterSelectionMode(!clusterSelectionMode));
+bindEvent(newsButton, "click", openNewsPanel);
+bindEvent(returnToNewsButton, "click", returnToNews);
+bindEvent(cellDetails, "click", (event) => {
   const ownerButton = event.target.closest("[data-owner-id]");
   if (ownerButton) showOwnerInfo(ownerButton.dataset.ownerId);
 });
-leaderboard?.addEventListener("click", (event) => {
+bindEvent(leaderboard, "click", (event) => {
   const row = event.target.closest("[data-leader-player]");
   if (row?.dataset.leaderPlayer) showOwnerInfo(row.dataset.leaderPlayer);
 });
-ownerInfo?.addEventListener("click", (event) => {
+bindEvent(ownerInfo, "click", (event) => {
   const contact = event.target.closest("[data-contact-player]");
   if (contact?.dataset.contactPlayer) openChat(contact.dataset.contactPlayer);
 });
-profileButton.addEventListener("click", () => {
+bindEvent(profileButton, "click", () => {
   renderProfileForm();
   openModal(profileModal);
 });
-helpButton.addEventListener("click", () => openModal(helpModal));
-messagesButton?.addEventListener("click", openMessagesPanel);
-logoutButton?.addEventListener("click", logoutPlayer);
-chatList?.addEventListener("click", (event) => {
+bindEvent(helpButton, "click", () => openModal(helpModal));
+bindEvent(messagesButton, "click", openMessagesPanel);
+bindEvent(logoutButton, "click", logoutPlayer);
+bindEvent(chatList, "click", (event) => {
   const item = event.target.closest("[data-chat-user]");
   if (item?.dataset.chatUser) openChat(item.dataset.chatUser);
 });
-messageForm?.addEventListener("submit", sendChatMessage);
-newsList?.addEventListener("click", (event) => {
+bindEvent(messageForm, "submit", sendChatMessage);
+bindEvent(newsList, "click", (event) => {
   const item = event.target.closest("[data-news-cell]");
   if (item?.dataset.newsCell) focusNewsTarget(item.dataset.newsCell);
 });
@@ -5052,9 +5063,9 @@ document.querySelectorAll("[data-admin-tab]").forEach((button) => {
     activateAdminTab(button.dataset.adminTab);
   });
 });
-profileForm.addEventListener("submit", saveProfile);
-profileLogo.addEventListener("change", loadProfileLogo);
-adminStats?.addEventListener("click", (event) => {
+bindEvent(profileForm, "submit", saveProfile);
+bindEvent(profileLogo, "change", loadProfileLogo);
+bindEvent(adminStats, "click", (event) => {
   const messageButton = event.target.closest("[data-admin-message-player]");
   if (messageButton?.dataset.adminMessagePlayer) {
     openChat(messageButton.dataset.adminMessagePlayer);
@@ -5069,8 +5080,8 @@ adminStats?.addEventListener("click", (event) => {
   const editButton = event.target.closest("[data-admin-edit-player]");
   if (editButton?.dataset.adminEditPlayer) focusAdminUser(editButton.dataset.adminEditPlayer);
 });
-adminUsers.addEventListener("submit", saveAdminUser);
-adminUsers.addEventListener("click", (event) => {
+bindEvent(adminUsers, "submit", saveAdminUser);
+bindEvent(adminUsers, "click", (event) => {
   const button = event.target.closest("[data-player-stats]");
   if (button) showPlayerStats(button.dataset.playerStats);
   const clearButton = event.target.closest("[data-clear-events]");
@@ -5078,19 +5089,19 @@ adminUsers.addEventListener("click", (event) => {
   const deleteButton = event.target.closest("[data-delete-user]");
   if (deleteButton) deleteUser(deleteButton.dataset.deleteUser);
 });
-adminSettingsForm.addEventListener("submit", saveAdminSettings);
-adminSettingsFields.addEventListener("click", handleSettingsClick);
-adminSettingsFields.addEventListener("input", handleSettingsInput);
-adminSettingsFields.addEventListener("change", handleSettingsFile);
-adminResetLandButton.addEventListener("click", resetAllLand);
-adminResetMoneyButton.addEventListener("click", resetAllMoney);
-adminResetMachineryButton?.addEventListener("click", resetAllMachinery);
-adminResetAssetsButton?.addEventListener("click", resetAllAssets);
-adminClearEventsButton.addEventListener("click", () => clearEvents(""));
-assetForm.addEventListener("submit", buyAsset);
-assetOptions.addEventListener("change", updateAssetTotal);
-assetQuantity.addEventListener("input", updateAssetTotal);
-assetTotal.addEventListener("click", (event) => {
+bindEvent(adminSettingsForm, "submit", saveAdminSettings);
+bindEvent(adminSettingsFields, "click", handleSettingsClick);
+bindEvent(adminSettingsFields, "input", handleSettingsInput);
+bindEvent(adminSettingsFields, "change", handleSettingsFile);
+bindEvent(adminResetLandButton, "click", resetAllLand);
+bindEvent(adminResetMoneyButton, "click", resetAllMoney);
+bindEvent(adminResetMachineryButton, "click", resetAllMachinery);
+bindEvent(adminResetAssetsButton, "click", resetAllAssets);
+bindEvent(adminClearEventsButton, "click", () => clearEvents(""));
+bindEvent(assetForm, "submit", buyAsset);
+bindEvent(assetOptions, "change", updateAssetTotal);
+bindEvent(assetQuantity, "input", updateAssetTotal);
+bindEvent(assetTotal, "click", (event) => {
   const assetNav = event.target.closest("[data-asset-nav]");
   if (assetNav) {
     stepAssetItem(Number(assetNav.dataset.assetNav) || 0);
@@ -5104,12 +5115,12 @@ assetTotal.addEventListener("click", (event) => {
   const photoButton = event.target.closest("[data-preview-src]");
   if (photoButton) openPreviewFromButton(photoButton);
 });
-adminSettingsFields.addEventListener("click", (event) => {
+bindEvent(adminSettingsFields, "click", (event) => {
   const photoButton = event.target.closest("[data-preview-src]");
   if (photoButton) openPreviewFromButton(photoButton);
 });
-imagePreviewPrev?.addEventListener("click", () => stepImagePreview(-1));
-imagePreviewNext?.addEventListener("click", () => stepImagePreview(1));
+bindEvent(imagePreviewPrev, "click", () => stepImagePreview(-1));
+bindEvent(imagePreviewNext, "click", () => stepImagePreview(1));
 document.addEventListener("keydown", (event) => {
   if (!imagePreviewModal || imagePreviewModal.classList.contains("is-hidden")) return;
   if (event.key === "ArrowLeft") stepImagePreview(-1);
@@ -5140,8 +5151,13 @@ initSplashMap();
 
 requestJson("/api/me")
   .then((payload) => {
-    if (payload.player.isGuest) return;
+    if (payload.player.isGuest) {
+      finishBoot();
+      return;
+    }
     startGame(payload.player, payload.farm);
   })
-  .catch(() => {});
+  .catch(() => {
+    finishBoot();
+  });
 
