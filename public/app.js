@@ -574,9 +574,6 @@ async function initMap() {
   Promise.allSettled([refreshGlobalMarket(), refreshLeaderboard(), refreshNews(), refreshMessageSummary()]);
   requestIdleWork(addDeferredRayonLayer);
 
-  initMapTilesCanvas();
-  drawMapBaseLayer();
-
   map.on("movestart", () => {
     visibleLandRequestId += 1;
     cancelPendingGridRender();
@@ -584,7 +581,6 @@ async function initMap() {
   });
   map.on("move", () => {
     updateZoomBadge();
-    requestMapBaseRender();
   });
   const handleSettledMapChange = () => {
     scheduleMapSettled();
@@ -592,8 +588,6 @@ async function initMap() {
   map.on("zoomend", handleSettledMapChange);
   map.on("moveend", handleSettledMapChange);
   map.on("resize", () => {
-    syncMapTilesCanvas();
-    requestMapBaseRender();
     scheduleMapSettled();
   });
   map.on("click", (event) => {
@@ -607,7 +601,6 @@ async function initMap() {
     map.invalidateSize();
     map.fitBounds([[MAP_BOUNDS.south, MAP_BOUNDS.west], [MAP_BOUNDS.north, MAP_BOUNDS.east]], { padding: [18, 18] });
     updateZoomBadge();
-    drawMapBaseLayer();
     scheduleVisibleLandRefresh(20);
     updateGrid();
   }, 180);
@@ -699,14 +692,30 @@ function stepMapZoom(direction, around = null) {
 }
 
 function createUkraineVectorStyle() {
+  const rasterBaseUrl = globalThis.AGRO_RASTER_BASEMAP_URL || "https://tile.openstreetmap.org/{z}/{x}/{y}.png";
   return {
     version: 8,
     sources: {
+      basemap: {
+        type: "raster",
+        tiles: [rasterBaseUrl],
+        tileSize: 256,
+        attribution: "© OpenStreetMap contributors"
+      },
       ukraine: { type: "geojson", data: "/ukraine-boundary.geojson" },
       oblasts: { type: "geojson", data: "/ukraine-adm1.geojson" }
     },
     layers: [
       { id: "background", type: "background", paint: { "background-color": "#f7f8f4" } },
+      {
+        id: "basemap-raster",
+        type: "raster",
+        source: "basemap",
+        paint: {
+          "raster-opacity": 1,
+          "raster-resampling": "linear"
+        }
+      },
       {
         id: "ukraine-fill",
         type: "fill",
@@ -1488,29 +1497,6 @@ function globalPixelToLngLat(x, y, zoom) {
   return { lat, lng };
 }
 
-function initMapTilesCanvas() {
-  if (mapTilesCanvas || !mapBoard) return;
-  mapTilesCanvas = document.createElement("canvas");
-  mapTilesCanvas.className = "math-map-canvas";
-  mapTilesCanvas.setAttribute("aria-hidden", "true");
-  mapBoard.prepend(mapTilesCanvas);
-  syncMapTilesCanvas();
-}
-
-function syncMapTilesCanvas() {
-  if (!mapTilesCanvas || !mapBoard) return;
-  const ratio = Math.min(1.5, window.devicePixelRatio || 1);
-  const rect = mapBoard.getBoundingClientRect();
-  const width = Math.max(1, Math.round(rect.width * ratio));
-  const height = Math.max(1, Math.round(rect.height * ratio));
-  if (mapTilesCanvas.width !== width || mapTilesCanvas.height !== height) {
-    mapTilesCanvas.width = width;
-    mapTilesCanvas.height = height;
-  }
-  mapTilesCanvas.style.width = rect.width + "px";
-  mapTilesCanvas.style.height = rect.height + "px";
-}
-
 function drawStaticUkrainePreview(container, polygons) {
   container.innerHTML = "";
   const canvas = document.createElement("canvas");
@@ -1524,23 +1510,11 @@ function drawStaticUkrainePreview(container, polygons) {
   drawUkrainePolygons(context, polygons, canvas.width, canvas.height, mathBounds(MAP_BOUNDS), true);
 }
 
-function drawMapBaseLayer() {
-  if (!mapTilesCanvas || !map) return;
-  mapBaseRenderFrame = null;
-  syncMapTilesCanvas();
-  const context = mapTilesCanvas.getContext("2d");
-  const rect = mapBoard.getBoundingClientRect();
-  const ratio = mapTilesCanvas.width / Math.max(1, rect.width);
-  const width = rect.width;
-  const height = rect.height;
-  context.setTransform(ratio, 0, 0, ratio, 0, 0);
-  context.clearRect(0, 0, width, height);
-  drawSettlementLabelsOnCanvas(context);
-}
-
 function requestMapBaseRender() {
   if (mapBaseRenderFrame) return;
-  mapBaseRenderFrame = requestAnimationFrame(drawMapBaseLayer);
+  mapBaseRenderFrame = requestAnimationFrame(() => {
+    mapBaseRenderFrame = null;
+  });
 }
 
 function drawUkrainePolygons(context, polygons, width, height, bounds, staticPreview) {
@@ -1574,45 +1548,8 @@ function drawUkrainePolygons(context, polygons, width, height, bounds, staticPre
   context.restore();
 }
 
-function drawSettlementLabelsOnCanvas(context) {
-  const zoom = displayZoomForMapZoom(map?.getZoom?.() || MAP_ZOOM_LEVELS[0]);
-  const bounds = map.getBounds().pad(0.08);
-  const lowPower = isLowPowerDevice();
-  const limit = zoom >= 13 ? (lowPower ? 120 : 220)
-    : zoom >= 12 ? (lowPower ? 90 : 160)
-      : zoom >= 11 ? (lowPower ? 70 : 120)
-        : zoom >= 9 ? (lowPower ? 42 : 72)
-          : 28;
-  const labels = settlementPlaces
-    .filter((place) => {
-      const lat = Number(place.lat);
-      const lng = Number(place.lng);
-      if (!Number.isFinite(lat) || !Number.isFinite(lng)) return false;
-      if (!pointInBounds(lat, lng, bounds)) return false;
-      return zoom >= Number(place.z || 13);
-    })
-    .sort((a, b) => Number(a.z || 13) - Number(b.z || 13) || Number(b.p || b.population || 0) - Number(a.p || a.population || 0))
-    .slice(0, limit);
-
-  context.save();
-  context.fillStyle = "rgba(20, 31, 24, 0.82)";
-  context.strokeStyle = "rgba(255, 255, 255, 0.88)";
-  context.lineWidth = 3;
-  labels.forEach((place) => {
-    const lat = Number(place.lat);
-    const lng = Number(place.lng);
-    const name = place.n || place.name || place.asciiname || place.toponymName || "населений пункт";
-    const point = map.latLngToContainerPoint([lat, lng]);
-    const fontSize = place.type === "oblast" ? 13 : place.type === "rayon" ? 12 : place.type === "city" ? 13 : 11;
-    context.font = `600 ${fontSize}px system-ui, sans-serif`;
-    context.strokeText(name, point.x, point.y);
-    context.fillText(name, point.x, point.y);
-  });
-  context.restore();
-}
-
 function drawSettlementLabels() {
-  requestMapBaseRender();
+  return;
 }
 
 function initGridGpuLayer() {
@@ -1669,7 +1606,7 @@ function compileShader(gl, type, source) {
 }
 
 function refreshCanvasMapLayers() {
-  drawMapBaseLayer();
+  requestMapBaseRender();
   updateLandMapSource(visibleCells);
 }
 
@@ -2009,7 +1946,7 @@ function buildingMapEmojiForCell(ownership) {
 }
 
 function updateSettlementLabelVisibility() {
-  drawSettlementLabels();
+  return;
 }
 
 function isOverviewZoom() {
