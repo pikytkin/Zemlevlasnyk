@@ -1133,7 +1133,9 @@ async function refreshVisibleLand() {
     if (!query) return;
     const boundsKey = chunkCacheKey(4, query);
     if (boundsKey === visibleLandBoundsKey && visibleLandVersion === marketVersion) {
-      updateGrid();
+      visibleCells = isOverviewZoom() ? overviewTerritoryCells() : visibleCells;
+      if (isOverviewZoom() && visibleCells.length) updateLandMapSource(visibleCells);
+      renderGridGpuLayer();
       return;
     }
     const cached = getChunkCache(boundsKey);
@@ -2213,7 +2215,6 @@ function finishShiftSelection(event) {
   refreshVisibleCellLayers(changedSelectionIds(previousSelection, selectedCellIds));
   renderSelectedCell();
   invalidateGridGeometryCache();
-  updateLandMapSource(visibleCells);
   showGameMessage(`Виділено земельних ділянок: ${selectedCellIds.size}.`);
 }
 
