@@ -44,11 +44,11 @@ const MAP_VIEW_BOUNDS = {
 };
 const TILE_SIZE = 256;
 const DETAIL_ZOOM_LEVEL_COUNT = 3;
-const MAP_ZOOM_LEVELS = [5, 9.55, 10.55, 11.55, 12.45];
-const DISPLAY_ZOOM_LEVELS = [7, 9, 11, 12, 13];
+const MAP_ZOOM_LEVELS = [7, 8, 10, 12];
+const DISPLAY_ZOOM_LEVELS = [7, 8, 10, 12];
 let MAX_VISIBLE_GRID_CELLS = 20000;
 const SETTLEMENT_GRID_SIZE = 0.25;
-let DETAIL_ZOOM_MIN = 11;
+let DETAIL_ZOOM_MIN = 8;
 let DRAW_GRID = true;
 let CLAIM_BATCH_SIZE = 1000;
 let SELL_REFUND_RATE = 0.62;
@@ -386,7 +386,9 @@ function applyGameSettings(settings) {
   MAX_VISIBLE_GRID_CELLS = Number.isFinite(economy.maxVisibleCells)
     ? Math.max(12000, Math.min(20000, economy.maxVisibleCells))
     : (isLowPowerDevice() ? 9000 : 18000);
-  DETAIL_ZOOM_MIN = 11;
+  DETAIL_ZOOM_MIN = Number.isFinite(Number(economy.detailZoomMin))
+    ? Math.max(8, Math.min(12, Number(economy.detailZoomMin)))
+    : 8;
   DRAW_GRID = economy.drawGrid !== false;
   CLAIM_BATCH_SIZE = Number.isFinite(economy.claimBatchSize) ? economy.claimBatchSize : CLAIM_BATCH_SIZE;
   SELL_REFUND_RATE = Number.isFinite(economy.sellRefundPercent) ? economy.sellRefundPercent / 100 : SELL_REFUND_RATE;
@@ -1822,7 +1824,7 @@ function gridCellColor(id) {
 function gridCellStrokeColor(id) {
   const selected = selectedCellIds.has(id) || id === selectedCellId;
   if (selected) return [1, 0.69, 0, 1];
-  if (displayZoomForMapZoom(map.getZoom()) < 13) return [0.07, 0.07, 0.07, 0];
+  if (displayZoomForMapZoom(map.getZoom()) < 12) return [0.07, 0.07, 0.07, 0];
   const owner = getOwner(id);
   if (owner === "player") return colorToFloats(state.color, 0.5);
   if (owner === "rival") return colorToFloats(rivalColorForCell(id), 0.42);
@@ -2216,10 +2218,10 @@ function isPlayableGridCell(q, r) {
 function gridCellLimitForZoom() {
   const zoom = displayZoomForMapZoom(map?.getZoom?.() || detailZoomStart());
   const lowPower = isLowPowerDevice();
-  const zoomLimit = zoom >= 13 ? (lowPower ? 10000 : 18000)
-    : zoom >= 12 ? (lowPower ? 9000 : 16000)
-      : zoom >= 11 ? (lowPower ? 8000 : 14000)
-        : (lowPower ? 2400 : 4200);
+  const zoomLimit = zoom >= 12 ? (lowPower ? 9000 : 16000)
+    : zoom >= 10 ? (lowPower ? 6500 : 11000)
+      : zoom >= 8 ? (lowPower ? 4200 : 7000)
+        : (lowPower ? 1600 : 2600);
   return Math.min(MAX_VISIBLE_GRID_CELLS, zoomLimit);
 }
 

@@ -9,7 +9,7 @@
     "nearbyPriceRadius": 2,
     "sellRefundPercent": 62,
     "maxVisibleCells": 46000,
-    "detailZoomMin": 10,
+    "detailZoomMin": 8,
     "claimBatchSize": 1000
   },
   "upgrades": {

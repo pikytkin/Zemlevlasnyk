@@ -50,7 +50,7 @@ const DEFAULT_SETTINGS = {
     nearbyPriceRadius: 2,
     sellRefundPercent: 62,
     maxVisibleCells: 18000,
-    detailZoomMin: 11,
+    detailZoomMin: 8,
     claimBatchSize: 1000,
     drawGrid: true
   },
@@ -254,7 +254,7 @@ function sanitizeSettings(settings) {
       nearbyPriceRadius: intIn(economy.nearbyPriceRadius, defaults.economy.nearbyPriceRadius, 1, 5),
       sellRefundPercent: numberIn(Number(economy.sellRefundPercent), defaults.economy.sellRefundPercent, 0, 100),
       maxVisibleCells: intIn(economy.maxVisibleCells, defaults.economy.maxVisibleCells, 1000, 120000),
-      detailZoomMin: intIn(economy.detailZoomMin, defaults.economy.detailZoomMin, 7, 13),
+      detailZoomMin: intIn(economy.detailZoomMin, defaults.economy.detailZoomMin, 7, 12),
       claimBatchSize: intIn(economy.claimBatchSize, defaults.economy.claimBatchSize, 1, 3000),
       drawGrid: typeof economy.drawGrid === "boolean" ? economy.drawGrid : defaults.economy.drawGrid
     },
