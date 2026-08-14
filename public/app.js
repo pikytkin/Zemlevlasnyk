@@ -722,7 +722,7 @@ function createUkraineVectorStyle() {
         source: "ukraine",
         paint: {
           "fill-color": "#edf6df",
-          "fill-opacity": 1
+          "fill-opacity": 0.14
         }
       },
       {
