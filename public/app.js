@@ -36,6 +36,12 @@ const rivalOwners = ["Інший гравець"];
 const RECT_CELL_WIDTH_DEGREES = 0.018;
 const RECT_CELL_HEIGHT_DEGREES = 0.012;
 const MAP_BOUNDS = { south: 43.2, west: 21.0, north: 53.0, east: 41.2 };
+const MAP_VIEW_BOUNDS = {
+  south: MAP_BOUNDS.south - 2.2,
+  west: MAP_BOUNDS.west - 4.5,
+  north: MAP_BOUNDS.north + 2.2,
+  east: MAP_BOUNDS.east + 4.5
+};
 const TILE_SIZE = 256;
 const DETAIL_ZOOM_LEVEL_COUNT = 3;
 const MAP_ZOOM_LEVELS = [5, 9.55, 10.55, 11.55, 12.45];
@@ -540,7 +546,7 @@ async function initMap() {
     zoom: MAP_ZOOM_LEVELS[0],
     minZoom: MAP_ZOOM_LEVELS[0],
     maxZoom: MAP_ZOOM_LEVELS[MAP_ZOOM_LEVELS.length - 1],
-    maxBounds: [[MAP_BOUNDS.west, MAP_BOUNDS.south], [MAP_BOUNDS.east, MAP_BOUNDS.north]],
+    maxBounds: [[MAP_VIEW_BOUNDS.west, MAP_VIEW_BOUNDS.south], [MAP_VIEW_BOUNDS.east, MAP_VIEW_BOUNDS.north]],
     renderWorldCopies: false,
     dragRotate: false,
     pitchWithRotate: false,
@@ -579,12 +585,13 @@ async function initMap() {
   });
   map.on("move", () => {
     invalidateGridGeometryCache();
+    syncGridGpuCanvas();
+    updateZoomBadge();
     requestMapBaseRender();
-    requestGridPanRender();
   });
   const handleSettledMapChange = () => {
     isMapMoving = false;
-    if (enforceDiscreteZoom()) return;
+    enforceDiscreteZoom();
     setGridCanvasVisible(true);
     syncGridGpuCanvas();
     invalidateGridGeometryCache();
@@ -2052,6 +2059,14 @@ function setupShiftSelection() {
   });
 
   window.addEventListener("pointerup", finishShiftSelection);
+  window.addEventListener("pointercancel", finishShiftSelection);
+  window.addEventListener("blur", () => {
+    if (selectionDrag) {
+      selectionDrag.box?.remove();
+      selectionDrag = null;
+    }
+    map.dragging.enable();
+  });
 }
 
 function updateSelectionBox() {
@@ -2079,7 +2094,7 @@ function finishShiftSelection(event) {
   const drag = selectionDrag;
   const previousSelection = new Set(selectedCellIds);
   selectionDrag = null;
-  if (!clusterSelectionMode) map.dragging.enable();
+  map.dragging.enable();
   drag.box.remove();
 
   if (!drag.moved) {
