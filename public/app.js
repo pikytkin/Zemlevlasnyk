@@ -858,11 +858,12 @@ function zoomPresetForMapZoom(zoom = map?.getZoom?.() ?? MAP_ZOOM_LEVELS[0]) {
   return MAP_ZOOM_PRESETS[index >= 0 ? index : 0] || MAP_ZOOM_PRESETS[0];
 }
 
-function applyZoomConfigToLiveMap() {
+function applyZoomConfigToLiveMap(preferredZoom = null) {
   if (!map) return;
   map.setMinZoom?.(MAP_ZOOM_LEVELS[0]);
   map.setMaxZoom?.(MAP_ZOOM_LEVELS[MAP_ZOOM_LEVELS.length - 1]);
-  const snapped = snapZoom(map.getZoom());
+  const desiredZoom = Number.isFinite(Number(preferredZoom)) ? Number(preferredZoom) : map.getZoom();
+  const snapped = snapZoom(desiredZoom);
   if (Math.abs(snapped - map.getZoom()) > 0.001) map.jumpTo({ zoom: snapped });
   invalidateChunkCache();
   resetLandLayerForMode(currentLandRenderMode());
@@ -4266,7 +4267,7 @@ function renderMapZoomEditor(mapSettings) {
           <div class="settings-card compact-card map-zoom-settings-card" data-item="mapZoomPresets">
             <input data-field="displayZoom" type="hidden" value="${preset.displayZoom}">
             <strong>Zoom ${preset.displayZoom}</strong>
-            <label>MapLibre zoom <input data-field="mapZoom" type="number" min="3" max="16" step="0.25" value="${preset.mapZoom}"></label>
+            <label>MapLibre zoom <input data-field="mapZoom" type="number" min="3" max="16" step="1" inputmode="numeric" value="${preset.mapZoom}"></label>
             <label>Режим
               <select data-field="mode">
                 <option value="overview" ${preset.mode === "overview" ? "selected" : ""}>Огляд (агрегація)</option>
@@ -4275,7 +4276,7 @@ function renderMapZoomEditor(mapSettings) {
             </label>
             <label class="settings-checkbox"><input data-field="showFreeGrid" type="checkbox" ${preset.showFreeGrid ? "checked" : ""}><span>Сітка вільних комірок</span></label>
             <label>Прозорість сітки <input data-field="freeGridOpacity" type="number" min="0" max="1" step="0.01" value="${preset.freeGridOpacity}"></label>
-            <label>Макс. комірок цього zoom <input data-field="maxVisibleCells" type="number" min="500" max="120000" step="100" value="${preset.maxVisibleCells}"></label>
+            <label>Макс. комірок цього zoom <input data-field="maxVisibleCells" type="number" min="500" max="120000" step="1" inputmode="numeric" value="${preset.maxVisibleCells}"></label>
           </div>
         `).join("")}
       </div>
@@ -4293,7 +4294,7 @@ function renderGridDensityEditor(mapSettings) {
       <div class="settings-section-head"><h5>Кількість комірок на карті України</h5></div>
       <div class="settings-card compact-card">
         <div><span class="muted-text">Поточна фактична кількість</span><strong>${actual.toLocaleString("uk-UA")}</strong></div>
-        <label>Цільова кількість <input data-grid-target type="number" min="50000" max="1000000" step="1000" value="${actual}"></label>
+        <label>Цільова кількість <input data-grid-target type="number" min="50000" max="1000000" step="1" inputmode="numeric" value="${actual}"></label>
         <div><span class="muted-text">Розмір комірки</span><strong>${width.toFixed(6)}° × ${height.toFixed(6)}°</strong></div>
         <button class="danger-action" type="button" data-rebuild-grid>Перебудувати сітку</button>
       </div>
@@ -4807,6 +4808,7 @@ async function saveAdminSettings(event) {
     showGameMessage("Зачекайте, фото ще обробляються. Після повідомлення про додавання натисніть “Зберегти” ще раз.");
     return;
   }
+  const currentZoomBeforeSave = map ? snapZoom(map.getZoom()) : null;
   const restoreButton = setSavingButton(event.submitter, true);
   try {
     const payload = await requestJson("/api/admin/settings", {
@@ -4814,7 +4816,7 @@ async function saveAdminSettings(event) {
       body: JSON.stringify({ settings: settingsFromForm(adminSettingsForm) })
     });
     applyGameSettings(payload.settings);
-    applyZoomConfigToLiveMap();
+    applyZoomConfigToLiveMap(currentZoomBeforeSave);
     renderAdminSettings(gameSettings);
     renderAdminSummary(payload.summary || {}, payload.users || []);
     renderAdminUsers(payload.users || []);
@@ -4858,6 +4860,7 @@ function addSettingsItem(listName) {
 async function rebuildPlayableGrid() {
   const targetInput = adminSettingsFields?.querySelector("[data-grid-target]");
   const targetCells = Math.floor(Number(targetInput?.value) || 0);
+  if (targetInput) targetInput.value = String(targetCells || "");
   if (targetCells < 50000 || targetCells > 1000000) {
     showGameMessage("Вкажіть від 50 000 до 1 000 000 комірок.");
     return;
@@ -5360,4 +5363,3 @@ requestJson("/api/me")
   .catch(() => {
     finishBoot();
   });
-
