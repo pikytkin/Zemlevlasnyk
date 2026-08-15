@@ -576,7 +576,6 @@ async function initMap() {
     zoom: MAP_ZOOM_LEVELS[0],
     minZoom: MAP_ZOOM_LEVELS[0],
     maxZoom: MAP_ZOOM_LEVELS[MAP_ZOOM_LEVELS.length - 1],
-    maxBounds: [[MAP_VIEW_BOUNDS.west, MAP_VIEW_BOUNDS.south], [MAP_VIEW_BOUNDS.east, MAP_VIEW_BOUNDS.north]],
     renderWorldCopies: false,
     dragRotate: false,
     pitchWithRotate: false,
@@ -606,6 +605,14 @@ async function initMap() {
     cancelPendingGridRender();
     isMapMoving = true;
   });
+  map.on("dragstart", () => {
+    suppressMapClick = true;
+  });
+  map.on("dragend", () => {
+    window.setTimeout(() => {
+      suppressMapClick = false;
+    }, 80);
+  });
   map.on("move", () => {
     updateZoomBadge();
   });
@@ -614,10 +621,15 @@ async function initMap() {
   };
   map.on("zoomend", handleSettledMapChange);
   map.on("moveend", handleSettledMapChange);
+  map.on("moveend", () => {
+    clampMapLibreCenterToBounds();
+  });
   map.on("resize", () => {
     scheduleMapSettled();
   });
   map.on("click", (event) => {
+    if (event?.originalEvent?.button != null && event.originalEvent.button !== 0) return;
+    if (event?.originalEvent?.buttons != null && (event.originalEvent.buttons & 1) === 0) return;
     selectCellAtMapPoint({
       latlng: { lat: event.lngLat.lat, lng: event.lngLat.lng },
       originalEvent: event.originalEvent || event
@@ -2225,6 +2237,26 @@ function selectCellAtMapPoint(event) {
     if (clusterSelectionMode) toggleCellSelection(cell.id);
     else selectCell(cell.id, event.originalEvent);
   }
+}
+
+function clampMapLibreCenterToBounds() {
+  if (!map || typeof map.getCenter !== "function" || typeof map.getBounds !== "function") return;
+  const bounds = map.getBounds();
+  const currentCenter = map.getCenter();
+  const width = bounds.getEast() - bounds.getWest();
+  const height = bounds.getNorth() - bounds.getSouth();
+  if (!(width > 0 && height > 0)) return;
+  if (width >= (MAP_VIEW_BOUNDS.east - MAP_VIEW_BOUNDS.west) || height >= (MAP_VIEW_BOUNDS.north - MAP_VIEW_BOUNDS.south)) {
+    return;
+  }
+  const halfWidth = width / 2;
+  const halfHeight = height / 2;
+  const clampedCenter = {
+    lng: Math.max(MAP_VIEW_BOUNDS.west + halfWidth, Math.min(MAP_VIEW_BOUNDS.east - halfWidth, currentCenter.lng)),
+    lat: Math.max(MAP_VIEW_BOUNDS.south + halfHeight, Math.min(MAP_VIEW_BOUNDS.north - halfHeight, currentCenter.lat))
+  };
+  if (Math.abs(clampedCenter.lng - currentCenter.lng) < 1e-6 && Math.abs(clampedCenter.lat - currentCenter.lat) < 1e-6) return;
+  map.jumpTo({ center: [clampedCenter.lng, clampedCenter.lat] });
 }
 
 function hexId(q, r) {
@@ -4841,7 +4873,6 @@ async function saveAdminSettings(event) {
     applyZoomConfigToLiveMap(currentZoomBeforeSave);
     renderAdminSettings(gameSettings);
     renderAdminSummary(payload.summary || {}, payload.users || []);
-    renderAdminUsers(payload.users || []);
     scheduleGridUpdate();
     render();
     showGameMessage("Налаштування гри збережено.");

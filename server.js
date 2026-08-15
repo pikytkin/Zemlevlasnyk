@@ -104,6 +104,7 @@ const DEFAULT_SETTINGS = {
 
 const sessions = new Map();
 let previousNewsLeaders = { land: null, assets: null };
+let newsCache = { key: "", rows: [] };
 let storage = null;
 let dbPool = null;
 let marketVersion = 1;
@@ -360,13 +361,21 @@ function sanitizeMapSettings(mapSettings, fallback = DEFAULT_SETTINGS.map) {
   };
 }
 
-function applyRuntimeMapSettings(settings = readSettings()) {
+function applyRuntimeMapSettings(settings = readSettings(), previousSettings = null) {
   const mapSettings = settings?.map || DEFAULT_SETTINGS.map;
+  const previousMap = previousSettings?.map || null;
   RECT_CELL_WIDTH_DEGREES = numberIn(Number(mapSettings.cellWidthDegrees), BASE_RECT_CELL_WIDTH_DEGREES, 0.002, 0.08);
   RECT_CELL_HEIGHT_DEGREES = numberIn(Number(mapSettings.cellHeightDegrees), BASE_RECT_CELL_HEIGHT_DEGREES, 0.0015, 0.06);
-  marketSpatialIndex = null;
-  marketSpatialIndexVersion = 0;
-  playableGridRowsCache = null;
+  const geometryChanged = !previousMap || (
+    Number(previousMap.cellWidthDegrees) !== Number(mapSettings.cellWidthDegrees)
+    || Number(previousMap.cellHeightDegrees) !== Number(mapSettings.cellHeightDegrees)
+    || Number(previousMap.gridCellCount) !== Number(mapSettings.gridCellCount)
+  );
+  if (geometryChanged) {
+    marketSpatialIndex = null;
+    marketSpatialIndexVersion = 0;
+    playableGridRowsCache = null;
+  }
 }
 
 function sanitizeLandLevels(items, upgrades = {}, fallback = DEFAULT_SETTINGS.upgrades.landLevels) {
@@ -454,6 +463,7 @@ function readSettings() {
 }
 
 function writeSettings(settings) {
+  const previousSettings = storage?.settings || null;
   const clean = sanitizeSettings(settings);
   if (storage) {
     storage.settings = clean;
@@ -462,7 +472,7 @@ function writeSettings(settings) {
     ensureDataFiles();
     fs.writeFileSync(SETTINGS_FILE, JSON.stringify(clean, null, 2), "utf8");
   }
-  applyRuntimeMapSettings(clean);
+  applyRuntimeMapSettings(clean, previousSettings);
   return clean;
 }
 
@@ -590,6 +600,7 @@ function writeUsers(users) {
 function ensureAdminUser() {
   const users = readUsers();
   let admin = users.find((user) => String(user.username || "").toLowerCase() === ADMIN_USERNAME.toLowerCase());
+  let changed = false;
   if (!admin) {
     admin = {
       id: "admin",
@@ -601,14 +612,27 @@ function ensureAdminUser() {
       updatedAt: new Date().toISOString()
     };
     users.push(admin);
+    changed = true;
   } else {
-    admin.username = ADMIN_USERNAME;
-    admin.passwordHash = hashPassword(ADMIN_PASSWORD);
-    admin.isAdmin = true;
-    admin.farm = { ...defaultFarmState(), ...sanitizeFarmState(admin.farm) };
-    admin.updatedAt = new Date().toISOString();
+    if (admin.username !== ADMIN_USERNAME) {
+      admin.username = ADMIN_USERNAME;
+      changed = true;
+    }
+    if (!admin.passwordHash) {
+      admin.passwordHash = hashPassword(ADMIN_PASSWORD);
+      changed = true;
+    }
+    if (!admin.isAdmin) {
+      admin.isAdmin = true;
+      changed = true;
+    }
+    if (!admin.farm || typeof admin.farm !== "object") {
+      admin.farm = { ...defaultFarmState(), companyName: "Адміністрація Землевласника" };
+      changed = true;
+    }
+    if (changed) admin.updatedAt = new Date().toISOString();
   }
-  writeUsers(users);
+  if (changed) writeUsers(users);
 }
 
 function readMarket() {
@@ -1063,6 +1087,7 @@ function writeNewsEvents(rows) {
     ensureDataFiles();
     fs.writeFileSync(NEWS_FILE, JSON.stringify(clean, null, 2), "utf8");
   }
+  newsCache = { key: "", rows: [] };
 }
 
 function appendNewsEvent(row) {
@@ -1397,11 +1422,30 @@ function companyNameForUser(user, farm) {
   return userCompanyName(user);
 }
 
+function adminSummaryUserRow(user) {
+  const farm = user?.farm && typeof user.farm === "object" ? user.farm : {};
+  const land = farm.land && typeof farm.land === "object" ? farm.land : {};
+  const rawCompanyName = String(farm.companyName || "").trim();
+  return {
+    id: user.id,
+    username: user.username || "",
+    companyName: rawCompanyName || (user.username || ""),
+    createdAt: user.createdAt || null,
+    updatedAt: user.updatedAt || null,
+    coins: Number(farm.coins) || 0,
+    landCount: Object.keys(land).length,
+    color: farm.color || "#35c982",
+    isAdmin: Boolean(user.isAdmin)
+  };
+}
+
 function formatMoney(value) {
   return `${Math.floor(value || 0).toLocaleString("uk-UA")} мон.`;
 }
 
 function newsRows() {
+  const cacheKey = `${marketVersion}:${leaderboardVersion}`;
+  if (newsCache.key === cacheKey) return newsCache.rows;
   const users = readUsers();
   const settings = readSettings();
   const farms = users.map((user) => {
@@ -1533,9 +1577,12 @@ function newsRows() {
       targetCellId: item.cellId
     }));
 
-  return rows
+  const result = rows
     .sort((a, b) => new Date(b.at).getTime() - new Date(a.at).getTime())
-    .slice(0, 24);
+    .slice(0, 24)
+    .map((row) => ({ ...row }));
+  newsCache = { key: cacheKey, rows: result };
+  return result;
 }
 
 function rangedSettingValue(baseValue, spreadValue, id, fallback) {
@@ -1554,18 +1601,18 @@ function adminPayload(users = readUsers(), market = readMarket(), options = {}) 
   const onlineIds = new Set([...sessions.values()]
     .filter((session) => !session.isGuest && session.expiresAt > now && now - (session.lastSeenAt || 0) < 1000 * 60 * 5)
     .map((session) => session.userId));
-  const publicUsers = users.map(publicUserRow);
+  const summaryUsers = users.map(adminSummaryUserRow);
   return {
-    users: options.includeUsers === false ? [] : publicUsers,
+    users: options.includeUsers === false ? [] : users.map(publicUserRow),
     summary: {
       users: users.length,
       admins: users.filter((user) => user.isAdmin).length,
       occupiedLand: Object.keys(market.land || {}).length,
-      totalCash: users.reduce((sum, user) => sum + sanitizeFarmState(user.farm).coins, 0),
+      totalCash: users.reduce((sum, user) => sum + (Number(user?.farm?.coins) || 0), 0),
       onlineUsers: onlineIds.size,
       registeredToday: users.filter((user) => new Date(user.createdAt || 0).getTime() >= dayStart.getTime()).length,
       registeredLast30Days: users.filter((user) => new Date(user.createdAt || 0).getTime() >= monthAgo).length,
-      newestUsers: publicUsers
+      newestUsers: summaryUsers
         .slice()
         .sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0))
         .slice(0, 40)
@@ -2120,7 +2167,7 @@ async function handleApi(req, res) {
 
       const body = await readBody(req);
       const settings = writeSettings(body.settings || body);
-      sendJson(res, 200, { ok: true, settings, ...adminPayload(users, readMarket()) });
+      sendJson(res, 200, { ok: true, settings, ...adminPayload(users, readMarket(), { includeUsers: false }) });
       return;
     }
 
