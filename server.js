@@ -244,6 +244,15 @@ function intIn(value, fallback, min = 0, max = 1_000_000_000) {
   return Math.floor(numberIn(value, fallback, min, max));
 }
 
+function safeDecodeURIComponent(value, fallback = "") {
+  if (typeof value !== "string") return fallback;
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return fallback;
+  }
+}
+
 function isPlayableLandId(id) {
   return /^cell--?\d+--?\d+$/.test(String(id || ""));
 }
@@ -1591,7 +1600,7 @@ function getSession(req) {
   const match = cookie.match(/(?:^|;\s*)agro_session=([^;]+)/);
   if (!match) return null;
 
-  const token = decodeURIComponent(match[1]);
+  const token = safeDecodeURIComponent(match[1]);
   const session = sessions.get(token);
   if (!session || session.expiresAt < Date.now()) {
     sessions.delete(token);
@@ -1606,7 +1615,7 @@ function getSession(req) {
 function getSessionToken(req) {
   const cookie = req.headers.cookie || "";
   const match = cookie.match(/(?:^|;\s*)agro_session=([^;]+)/);
-  return match ? decodeURIComponent(match[1]) : "";
+  return match ? safeDecodeURIComponent(match[1]) : "";
 }
 
 function sendJson(res, status, payload, headers = {}) {
@@ -1653,14 +1662,21 @@ function readBody(req) {
 }
 
 function serveStatic(req, res) {
-  const url = new URL(req.url, `http://${req.headers.host}`);
+  let url;
+  try {
+    url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
+  } catch {
+    res.writeHead(400, { "content-type": "text/plain; charset=utf-8" });
+    res.end("Bad request");
+    return;
+  }
   const session = getSession(req);
   if (url.pathname === "/admin" && session && !isAdmin(session)) {
     res.writeHead(302, { location: "/" });
     res.end();
     return;
   }
-  const requestedPath = decodeURIComponent(url.pathname === "/" || url.pathname === "/admin" ? "/index.html" : url.pathname);
+  const requestedPath = safeDecodeURIComponent(url.pathname === "/" || url.pathname === "/admin" ? "/index.html" : url.pathname, "/index.html");
   const filePath = path.normalize(path.join(PUBLIC_DIR, requestedPath));
 
   if (!filePath.startsWith(PUBLIC_DIR)) {
@@ -2670,5 +2686,4 @@ startServer().catch((error) => {
   console.error("Не вдалося запустити сервер:", error);
   process.exit(1);
 });
-
 
