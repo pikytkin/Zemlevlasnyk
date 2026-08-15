@@ -1546,7 +1546,7 @@ function rangedSettingValue(baseValue, spreadValue, id, fallback) {
   return Math.round(base + (Math.abs(seed) % spread));
 }
 
-function adminPayload(users = readUsers(), market = readMarket()) {
+function adminPayload(users = readUsers(), market = readMarket(), options = {}) {
   const now = Date.now();
   const dayStart = new Date();
   dayStart.setUTCHours(0, 0, 0, 0);
@@ -1554,8 +1554,9 @@ function adminPayload(users = readUsers(), market = readMarket()) {
   const onlineIds = new Set([...sessions.values()]
     .filter((session) => !session.isGuest && session.expiresAt > now && now - (session.lastSeenAt || 0) < 1000 * 60 * 5)
     .map((session) => session.userId));
+  const publicUsers = users.map(publicUserRow);
   return {
-    users: users.map(publicUserRow),
+    users: options.includeUsers === false ? [] : publicUsers,
     summary: {
       users: users.length,
       admins: users.filter((user) => user.isAdmin).length,
@@ -1563,7 +1564,11 @@ function adminPayload(users = readUsers(), market = readMarket()) {
       totalCash: users.reduce((sum, user) => sum + sanitizeFarmState(user.farm).coins, 0),
       onlineUsers: onlineIds.size,
       registeredToday: users.filter((user) => new Date(user.createdAt || 0).getTime() >= dayStart.getTime()).length,
-      registeredLast30Days: users.filter((user) => new Date(user.createdAt || 0).getTime() >= monthAgo).length
+      registeredLast30Days: users.filter((user) => new Date(user.createdAt || 0).getTime() >= monthAgo).length,
+      newestUsers: publicUsers
+        .slice()
+        .sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0))
+        .slice(0, 40)
     }
   };
 }
@@ -2091,15 +2096,17 @@ async function handleApi(req, res) {
       return;
     }
 
-    if (req.method === "GET" && req.url === "/api/admin") {
+    if (req.method === "GET" && req.url.startsWith("/api/admin")) {
       const session = getSession(req);
       const users = readUsers();
       if (!isAdmin(session, users)) {
         sendJson(res, 403, { error: "Потрібен адміністратор." });
         return;
       }
-
-      sendJson(res, 200, { ...adminPayload(users, readMarket()), settings: readSettings() });
+      const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
+      const includeUsers = url.searchParams.get("includeUsers") === "1";
+      const payload = adminPayload(users, readMarket(), { includeUsers });
+      sendJson(res, 200, { ...payload, settings: readSettings() });
       return;
     }
 
@@ -2686,4 +2693,3 @@ startServer().catch((error) => {
   console.error("Не вдалося запустити сервер:", error);
   process.exit(1);
 });
-

@@ -392,9 +392,10 @@ function normalizeMapZoomPresets(mapSettings = {}) {
   return DISPLAY_ZOOM_LEVELS.map((displayZoom, index) => {
     const fallback = MAP_ZOOM_PRESETS[index] || { displayZoom, mapZoom: displayZoom, mode: displayZoom >= 10 ? "detail" : "overview", showFreeGrid: displayZoom >= 10, freeGridOpacity: displayZoom >= 12 ? 0.26 : 0.12, maxVisibleCells: displayZoom >= 12 ? 46000 : displayZoom >= 10 ? 18000 : 7000 };
     const raw = incoming.find((item) => Number(item?.displayZoom) === displayZoom) || incoming[index] || fallback;
+    const mapZoom = Number.isFinite(Number(raw.mapZoom)) ? Number(raw.mapZoom) : fallback.mapZoom;
     return {
       displayZoom,
-      mapZoom: Number.isFinite(Number(raw.mapZoom)) ? Number(raw.mapZoom) : fallback.mapZoom,
+      mapZoom: displayZoom === 5 ? 5 : mapZoom,
       mode: raw.mode === "detail" ? "detail" : "overview",
       showFreeGrid: raw.showFreeGrid !== false,
       freeGridOpacity: Math.max(0, Math.min(1, Number(raw.freeGridOpacity) || 0)),
@@ -848,8 +849,10 @@ function displayZoomForMapZoom(zoom) {
 }
 
 function mapZoomForDisplayZoom(displayZoom) {
-  const index = DISPLAY_ZOOM_LEVELS.findIndex((zoom) => zoom >= displayZoom);
-  return MAP_ZOOM_LEVELS[index >= 0 ? index : MAP_ZOOM_LEVELS.length - 1];
+  const exactIndex = DISPLAY_ZOOM_LEVELS.indexOf(Number(displayZoom));
+  if (exactIndex >= 0) return MAP_ZOOM_LEVELS[exactIndex];
+  const fallbackIndex = DISPLAY_ZOOM_LEVELS.findIndex((zoom) => zoom > displayZoom);
+  return MAP_ZOOM_LEVELS[fallbackIndex >= 0 ? fallbackIndex : MAP_ZOOM_LEVELS.length - 1];
 }
 
 function zoomPresetForMapZoom(zoom = map?.getZoom?.() ?? MAP_ZOOM_LEVELS[0]) {
@@ -4202,13 +4205,14 @@ function loadProfileLogo() {
 
 async function openAdminPanel() {
   openModal(adminModal);
-  adminUsers.innerHTML = "<p>Завантажуємо учасників...</p>";
+  adminUsers.innerHTML = "<p>Список учасників відкриємо після натискання на вкладку “Гравці”.</p>";
   try {
     const payload = await requestJson("/api/admin");
     applyGameSettings(payload.settings || gameSettings);
     renderAdminSettings(gameSettings);
-    renderAdminSummary(payload.summary || {}, payload.users || []);
-    renderAdminUsers(payload.users || []);
+    renderAdminSummary(payload.summary || {}, payload.summary?.newestUsers || []);
+    adminUsers.dataset.loaded = "0";
+    adminUsers.dataset.users = JSON.stringify(payload.users || []);
   } catch (error) {
     adminSummary.innerHTML = "";
     adminUsers.innerHTML = `<p>${error.message}</p>`;
@@ -4294,7 +4298,7 @@ function renderGridDensityEditor(mapSettings) {
       <div class="settings-section-head"><h5>Кількість комірок на карті України</h5></div>
       <div class="settings-card compact-card">
         <div><span class="muted-text">Поточна фактична кількість</span><strong>${actual.toLocaleString("uk-UA")}</strong></div>
-        <label>Цільова кількість <input data-grid-target type="number" min="50000" max="1000000" step="1" inputmode="numeric" value="${actual}"></label>
+        <label>Цільова кількість <input data-grid-target type="text" inputmode="numeric" pattern="[0-9]*" value="${actual}"></label>
         <div><span class="muted-text">Розмір комірки</span><strong>${width.toFixed(6)}° × ${height.toFixed(6)}°</strong></div>
         <button class="danger-action" type="button" data-rebuild-grid>Перебудувати сітку</button>
       </div>
@@ -4558,9 +4562,9 @@ function renderAdminSummary(summary, users = []) {
 
 function renderAdminStats(summary, users = []) {
   if (!adminStats) return;
-  const newestUsers = [...(Array.isArray(users) ? users : [])]
-    .sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0))
-    .slice(0, 40);
+  const newestUsers = Array.isArray(summary?.newestUsers) && summary.newestUsers.length
+    ? summary.newestUsers
+    : [...(Array.isArray(users) ? users : [])].sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0)).slice(0, 40);
   const summaryHtml = [
     ["Онлайн зараз", Number.isFinite(summary.onlineUsers) ? summary.onlineUsers : 0],
     ["Усього зареєстровано", Number.isFinite(summary.users) ? summary.users : 0],
@@ -4602,6 +4606,7 @@ function totalPlayableLandCount() {
 function renderAdminUsers(users) {
   const machineryItems = gameSettings?.assets?.machineryItems || [];
   const elevatorItems = gameSettings?.assets?.elevatorItems || [];
+  if (adminUsers) adminUsers.dataset.loaded = "1";
   adminUsers.innerHTML = users.map((user) => `
     <form class="admin-user" data-user-id="${user.id}">
       <div class="admin-user-title">
@@ -4751,6 +4756,23 @@ async function showPlayerStats(userId) {
 function activateAdminTab(tab) {
   document.querySelectorAll("[data-admin-tab]").forEach((item) => item.classList.toggle("is-active", item.dataset.adminTab === tab));
   document.querySelectorAll("[data-admin-panel]").forEach((panel) => panel.classList.toggle("is-hidden", panel.dataset.adminPanel !== tab));
+  if (tab === "players") loadAdminUsersIfNeeded();
+}
+
+async function loadAdminUsersIfNeeded() {
+  if (!adminUsers || adminUsers.dataset.loaded === "1") return;
+  adminUsers.dataset.loaded = "loading";
+  adminUsers.innerHTML = "<p>Завантажуємо список гравців...</p>";
+  try {
+    const payload = await requestJson("/api/admin?includeUsers=1");
+    const users = payload.users || [];
+    adminUsers.dataset.users = JSON.stringify(users);
+    renderAdminUsers(users);
+    adminUsers.dataset.loaded = "1";
+  } catch (error) {
+    adminUsers.dataset.loaded = "0";
+    adminUsers.innerHTML = `<p>${error.message}</p>`;
+  }
 }
 
 function focusAdminUser(userId) {
@@ -4859,7 +4881,7 @@ function addSettingsItem(listName) {
 
 async function rebuildPlayableGrid() {
   const targetInput = adminSettingsFields?.querySelector("[data-grid-target]");
-  const targetCells = Math.floor(Number(targetInput?.value) || 0);
+  const targetCells = Math.floor(Number(String(targetInput?.value || "").replace(/[^\d]/g, "")) || 0);
   if (targetInput) targetInput.value = String(targetCells || "");
   if (targetCells < 50000 || targetCells > 1000000) {
     showGameMessage("Вкажіть від 50 000 до 1 000 000 комірок.");
