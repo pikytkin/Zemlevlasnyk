@@ -110,6 +110,8 @@ let dbPool = null;
 let marketVersion = 1;
 let leaderboardVersion = 1;
 let leaderboardCache = { version: 0, rows: [] };
+let mapOverviewCache = new Map();
+let mapCellsCache = new Map();
 
 const MAP_BOUNDS = { south: 43.2, west: 21.0, north: 53.0, east: 41.2 };
 const BASE_RECT_CELL_WIDTH_DEGREES = 0.018;
@@ -955,6 +957,9 @@ function parseMapBoundsQuery(searchParams) {
 }
 
 function mapCellsInViewport(bounds, zoom = 13, limit = MAX_VIEWPORT_MARKET_CELLS) {
+  const cacheKey = `${marketVersion}|${zoom}|${limit}|${bounds.west.toFixed(3)}|${bounds.south.toFixed(3)}|${bounds.east.toFixed(3)}|${bounds.north.toFixed(3)}`;
+  const cached = mapCellsCache.get(cacheKey);
+  if (cached) return cached;
   const market = readMarket();
   const owners = {};
   const cells = [];
@@ -981,10 +986,16 @@ function mapCellsInViewport(bounds, zoom = 13, limit = MAX_VIEWPORT_MARKET_CELLS
 
   const truncated = cells.length > limit;
   if (truncated) cells.length = limit;
-  return { version: marketVersion, zoom, level: 4, owners, cells, truncated };
+  const payload = { version: marketVersion, zoom, level: 4, owners, cells, truncated };
+  mapCellsCache.set(cacheKey, payload);
+  if (mapCellsCache.size > 24) mapCellsCache.delete(mapCellsCache.keys().next().value);
+  return payload;
 }
 
 function mapOverviewTerritories(bounds, zoom, playerId = "") {
+  const cacheKey = `${marketVersion}|${zoom}|${playerId}|${bounds.west.toFixed(3)}|${bounds.south.toFixed(3)}|${bounds.east.toFixed(3)}|${bounds.north.toFixed(3)}`;
+  const cached = mapOverviewCache.get(cacheKey);
+  if (cached) return cached;
   const market = readMarket();
   const level = Math.min(3, chunkLevelForZoom(zoom));
   const chunkSpan = chunkCellSpanForLevel(level);
@@ -1044,7 +1055,10 @@ function mapOverviewTerritories(bounds, zoom, playerId = "") {
       };
     });
 
-  return { version: marketVersion, zoom, level, span: groupSpan, territories };
+  const payload = { version: marketVersion, zoom, level, span: groupSpan, territories };
+  mapOverviewCache.set(cacheKey, payload);
+  if (mapOverviewCache.size > 36) mapOverviewCache.delete(mapOverviewCache.keys().next().value);
+  return payload;
 }
 
 function writeMarket(market) {
@@ -1058,6 +1072,8 @@ function writeMarket(market) {
   }
   marketVersion += 1;
   marketSpatialIndex = null;
+  mapOverviewCache.clear();
+  mapCellsCache.clear();
 }
 
 function readNewsEvents() {

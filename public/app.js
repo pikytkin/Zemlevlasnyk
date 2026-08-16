@@ -224,6 +224,7 @@ let landOperationOverlay = null;
 let selectionDrag = null;
 let clusterSelectionMode = false;
 let suppressMapClick = false;
+let adminSettingsLoaded = false;
 let selectionPopupDismissed = false;
 let cellInfoOpen = false;
 let newsReturnState = null;
@@ -490,26 +491,33 @@ function normalizePlayableCellId(id) {
 function startGame(nextPlayer, nextState) {
   player = nextPlayer;
   state = normalizeState(nextState);
+  adminSettingsLoaded = false;
 
   authScreen.classList.add("is-hidden");
   gameScreen.classList.remove("is-hidden");
   finishBoot();
   renderPlayerHeader();
-  loadGameSettings().then(() => initMap().catch((error) => {
-    console.error("initMap failed:", error);
-    showGameMessage(error?.message || "Не вдалося завантажити карту.");
-  }));
   render();
   showGameMessage("Карту володінь завантажено.");
   refreshMessageSummary();
   if (window.location.pathname === "/admin") {
     if (player?.isAdmin) {
       openAdminPanel();
+      return;
     } else {
       window.history.replaceState({}, "", "/");
       showGameMessage("Адмін-панель доступна тільки адміністратору.");
+      loadGameSettings().then(() => initMap().catch((error) => {
+        console.error("initMap failed:", error);
+        showGameMessage(error?.message || "Не вдалося завантажити карту.");
+      }));
     }
+    return;
   }
+  loadGameSettings().then(() => initMap().catch((error) => {
+    console.error("initMap failed:", error);
+    showGameMessage(error?.message || "Не вдалося завантажити карту.");
+  }));
 }
 
 async function logoutPlayer() {
@@ -629,7 +637,7 @@ async function initMap() {
   });
   map.on("click", (event) => {
     if (event?.originalEvent?.button != null && event.originalEvent.button !== 0) return;
-    if (event?.originalEvent?.buttons != null && (event.originalEvent.buttons & 1) === 0) return;
+    if (suppressMapClick) return;
     selectCellAtMapPoint({
       latlng: { lat: event.lngLat.lat, lng: event.lngLat.lng },
       originalEvent: event.originalEvent || event
@@ -659,7 +667,7 @@ function stopBackgroundPolling() {
 
 function startBackgroundPolling() {
   stopBackgroundPolling();
-  if (document.hidden || !player) return;
+  if (document.hidden || !player || window.location.pathname === "/admin") return;
   marketTimer = setInterval(refreshGlobalMarket, 20000);
   leaderboardTimer = setInterval(refreshLeaderboard, 10000);
   newsTimer = setInterval(refreshNews, 20000);
@@ -2212,8 +2220,6 @@ function finishShiftSelection(event) {
   selectedCellIds = nextSelection;
   selectionPopupDismissed = false;
   refreshVisibleCellLayers(changedSelectionIds(previousSelection, selectedCellIds));
-  renderSelectedCell();
-  invalidateGridGeometryCache();
   showGameMessage(`Виділено земельних ділянок: ${selectedCellIds.size}.`);
 }
 
@@ -3585,9 +3591,6 @@ function selectCell(cellId, event = null) {
   }
 
   refreshVisibleCellLayers(changedSelectionIds(previousSelection, selectedCellIds));
-  renderSelectedCell();
-  invalidateGridGeometryCache();
-  updateLandMapSource(visibleCells);
   const cell = getCell(cellId);
   showGameMessage(selectedCellIds.size > 1
     ? `Обрано земельних ділянок: ${selectedCellIds.size}.`
@@ -4239,12 +4242,12 @@ async function openAdminPanel() {
   openModal(adminModal);
   adminUsers.innerHTML = "<p>Список учасників відкриємо після натискання на вкладку “Гравці”.</p>";
   try {
-    const payload = await requestJson("/api/admin");
+    const payload = await requestJson("/api/admin?includeUsers=0");
     applyGameSettings(payload.settings || gameSettings);
-    renderAdminSettings(gameSettings);
     renderAdminSummary(payload.summary || {}, payload.summary?.newestUsers || []);
     adminUsers.dataset.loaded = "0";
     adminUsers.dataset.users = JSON.stringify(payload.users || []);
+    adminSettingsLoaded = false;
   } catch (error) {
     adminSummary.innerHTML = "";
     adminUsers.innerHTML = `<p>${error.message}</p>`;
@@ -4330,7 +4333,7 @@ function renderGridDensityEditor(mapSettings) {
       <div class="settings-section-head"><h5>Кількість комірок на карті України</h5></div>
       <div class="settings-card compact-card">
         <div><span class="muted-text">Поточна фактична кількість</span><strong>${actual.toLocaleString("uk-UA")}</strong></div>
-        <label>Цільова кількість <input data-grid-target type="text" inputmode="numeric" pattern="[0-9]*" value="${actual}"></label>
+        <label>Цільова кількість <input data-grid-target type="number" min="50000" max="1000000" step="1" inputmode="numeric" value="${actual}"></label>
         <div><span class="muted-text">Розмір комірки</span><strong>${width.toFixed(6)}° × ${height.toFixed(6)}°</strong></div>
         <button class="danger-action" type="button" data-rebuild-grid>Перебудувати сітку</button>
       </div>
@@ -4373,7 +4376,7 @@ function renderPhotoThumbs(photos) {
   if (!list.length) return `<span class="muted-text">Фото ще не додано</span>`;
   return list.map((src, index) => `
     <button class="asset-photo-button" type="button" data-preview-src="${escapeHtml(src)}" data-preview-index="${index}" title="Відкрити фото ${index + 1}">
-      <img src="${escapeHtml(src)}" alt="Фото ${index + 1}">
+      <img src="${escapeHtml(src)}" alt="Фото ${index + 1}" loading="lazy" decoding="async">
     </button>
   `).join("");
 }
@@ -4385,7 +4388,7 @@ function renderAssetGallery(photos) {
     <div class="asset-gallery">
       ${list.map((src, index) => `
         <button class="asset-photo-button" type="button" data-preview-src="${escapeHtml(src)}" data-preview-index="${index}" title="Роздивитися фото ${index + 1}">
-          <img src="${escapeHtml(src)}" alt="Фото ${index + 1}">
+          <img src="${escapeHtml(src)}" alt="Фото ${index + 1}" loading="lazy" decoding="async">
         </button>
       `).join("")}
     </div>
@@ -4789,6 +4792,14 @@ function activateAdminTab(tab) {
   document.querySelectorAll("[data-admin-tab]").forEach((item) => item.classList.toggle("is-active", item.dataset.adminTab === tab));
   document.querySelectorAll("[data-admin-panel]").forEach((panel) => panel.classList.toggle("is-hidden", panel.dataset.adminPanel !== tab));
   if (tab === "players") loadAdminUsersIfNeeded();
+  if (tab === "settings") loadAdminSettingsIfNeeded();
+}
+
+async function loadAdminSettingsIfNeeded() {
+  if (!adminSettingsForm || adminSettingsLoaded) return;
+  adminSettingsLoaded = true;
+  adminSettingsFields.innerHTML = "<p>Завантажуємо налаштування...</p>";
+  renderAdminSettings(gameSettings);
 }
 
 async function loadAdminUsersIfNeeded() {
@@ -5397,7 +5408,7 @@ document.addEventListener("click", (event) => {
 });
 document.addEventListener("visibilitychange", () => {
   startBackgroundPolling();
-  if (!document.hidden && player) {
+  if (!document.hidden && player && window.location.pathname !== "/admin") {
     Promise.allSettled([refreshGlobalMarket(), refreshLeaderboard(), refreshNews(), refreshMessageSummary()]);
   }
 });
