@@ -888,9 +888,10 @@ function applyZoomConfigToLiveMap(preferredZoom = null) {
   map.setMaxZoom?.(MAP_ZOOM_LEVELS[MAP_ZOOM_LEVELS.length - 1]);
   const desiredZoom = Number.isFinite(Number(preferredZoom)) ? Number(preferredZoom) : map.getZoom();
   const snapped = snapZoom(desiredZoom);
+  const nextMode = zoomPresetForMapZoom(snapped)?.mode === "detail" ? "detail" : "overview";
+  const previousMode = currentLandRenderMode();
   if (Math.abs(snapped - map.getZoom()) > 0.001) map.jumpTo({ zoom: snapped });
-  invalidateChunkCache();
-  resetLandLayerForMode(currentLandRenderMode());
+  if (previousMode !== nextMode) resetLandLayerForMode(nextMode);
   scheduleVisibleLandRefresh(true);
   scheduleGridUpdate(true);
   updateZoomBadge();
@@ -1102,7 +1103,6 @@ async function refreshGlobalMarket() {
       || Number(nextMarket?.version) !== marketVersion
       || resetChanged;
     globalMarketState = nextMarket;
-    if (marketChanged) invalidateChunkCache();
     marketVersion = Number(nextMarket?.version) || marketVersion;
     marketOwnedCellCount = nextOwnedCount;
     if (resetChanged) {
@@ -1131,7 +1131,7 @@ async function refreshMarket() {
 
 function mapViewportQuery() {
   if (!map) return null;
-  const bounds = map.getBounds().pad(0.08);
+  const bounds = map.getBounds().pad(currentLandRenderMode() === "overview" ? 0.22 : 0.08);
   const level = currentChunkLevel();
   const cellsPerChunk = level <= 1 ? 512 : level === 2 ? 256 : level === 3 ? 128 : 32;
   const chunkWidth = cellsPerChunk * RECT_CELL_WIDTH_DEGREES;
@@ -1305,7 +1305,7 @@ function applyClaimedCellsToVisibleLand(claimedIds) {
   claimedIds.forEach((id) => {
     visibleLandState.cells[id] = { o: player.id, l: 1 };
   });
-  invalidateChunkCache();
+  visibleLandVersion = marketVersion;
   invalidateGridGeometryCache();
 }
 
@@ -1314,7 +1314,7 @@ function removeCellsFromVisibleLand(cellIds) {
   cellIds.forEach((id) => {
     delete visibleLandState.cells[id];
   });
-  invalidateChunkCache();
+  visibleLandVersion = marketVersion;
   invalidateGridGeometryCache();
 }
 
@@ -1974,7 +1974,7 @@ async function renderCoarseLandFallback(renderJob) {
   const query = mapViewportQuery();
   if (!query) return;
   try {
-    const payload = await requestJson(`/api/map/overview?z=8&${query.toString()}`);
+    const payload = await requestJson(`/api/map/overview?${query.toString()}`);
     if (renderJob !== gridRenderJob || currentLandRenderMode() !== "detail") return;
     overviewTerritories = Array.isArray(payload.territories) ? payload.territories : [];
     if (Number.isFinite(payload.version)) marketVersion = payload.version;
@@ -3499,9 +3499,10 @@ async function sellSelectedLand() {
   const cells = ownedSelectedCells();
   if (!cells.length) return;
   let soldCells = [];
+  let payload = null;
 
   try {
-    const payload = await requestJson("/api/sell", {
+    payload = await requestJson("/api/sell", {
       method: "POST",
       body: JSON.stringify({ cells: cells.map((cell) => ({ id: cell.id, region: cell.region })) })
     });
@@ -3510,6 +3511,7 @@ async function sellSelectedLand() {
     refreshCanvasMapLayers();
     const soldIds = new Set(Array.isArray(payload.soldIds) ? payload.soldIds : []);
     soldCells = cells.filter((cell) => soldIds.has(cell.id));
+    if (Number.isFinite(payload.coins)) state.coins = payload.coins;
   } catch (error) {
     showGameMessage(error.message);
     return;
@@ -3522,12 +3524,11 @@ async function sellSelectedLand() {
     return;
   }
 
-  const totalRefund = soldCells.reduce((sum, cell) => sum + sellValue(cell, state.land[cell.id]), 0);
   soldCells.forEach((cell) => delete state.land[cell.id]);
   state.stats.buildings = Object.values(state.land || {}).filter((owned) => owned.building || owned.buildingId).length;
-  state.coins += totalRefund;
   selectedCellIds = new Set();
   selectedCellId = null;
+  const totalRefund = Number.isFinite(payload?.refund) ? payload.refund : 0;
   addEvent(`Продано земельних ділянок: ${soldCells.length}. Отримано ${money(totalRefund)}.`);
   addLedger("sell", `Продаж землі: ${soldCells.length} ділянок`, totalRefund, -soldCells.length);
   showGameMessage(`Землю продано системі за ${money(totalRefund)}.`);
@@ -4365,7 +4366,7 @@ function renderGridDensityEditor(mapSettings) {
       <div class="settings-section-head"><h5>Кількість комірок на карті України</h5></div>
       <div class="settings-card compact-card">
         <div><span class="muted-text">Поточна фактична кількість</span><strong>${actual.toLocaleString("uk-UA")}</strong></div>
-        <label>Цільова кількість <input data-grid-target type="number" min="50000" max="1000000" step="1" inputmode="numeric" value="${actual}"></label>
+        <label>Цільова кількість <input data-grid-target type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="off" value="${actual}"></label>
         <div><span class="muted-text">Розмір комірки</span><strong>${width.toFixed(6)}° × ${height.toFixed(6)}°</strong></div>
         <button class="danger-action" type="button" data-rebuild-grid>Перебудувати сітку</button>
       </div>
@@ -4977,9 +4978,8 @@ async function rebuildPlayableGrid() {
     selectedCellId = null;
     visibleLandState = { version: 0, owners: {}, cells: {} };
     playableGridRows = null;
-    invalidateChunkCache();
     await loadPlayableGridMask();
-    applyZoomConfigToLiveMap();
+    applyZoomConfigToLiveMap(map ? snapZoom(map.getZoom()) : null);
     renderAdminSettings(gameSettings);
     renderAdminSummary(payload.summary || {}, payload.users || []);
     renderAdminUsers(payload.users || []);

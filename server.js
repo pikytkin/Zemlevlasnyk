@@ -962,10 +962,10 @@ function chunkCellSpanForLevel(level) {
 }
 
 function overviewGroupSpanForLevel(level) {
-  if (level <= 1) return 64;
-  if (level === 2) return 32;
-  if (level === 3) return 16;
-  return 8;
+  if (level <= 1) return 8;
+  if (level === 2) return 4;
+  if (level === 3) return 2;
+  return 2;
 }
 
 function groupKeyForCell(q, r, span) {
@@ -1076,12 +1076,13 @@ function mapCellsInViewport(bounds, zoom = 13, limit = MAX_VIEWPORT_MARKET_CELLS
 }
 
 function mapOverviewTerritories(bounds, zoom, playerId = "") {
-  const cacheKey = `${marketVersion}|${zoom}|${playerId}|global`;
+  const cacheKey = `${marketVersion}|${zoom}|${playerId}|${bounds.west.toFixed(3)}|${bounds.south.toFixed(3)}|${bounds.east.toFixed(3)}|${bounds.north.toFixed(3)}`;
   const cached = mapOverviewCache.get(cacheKey);
   if (cached) return cached;
   const market = readMarket();
   const level = Math.min(3, chunkLevelForZoom(zoom));
-  const entries = Object.entries(market.land || {});
+  const preload = level <= 1 ? 36 : level === 2 ? 24 : 12;
+  const entries = marketEntriesInBounds(market, bounds, preload);
 
   const owners = new Map();
   entries.forEach(([id, entry]) => {
@@ -1105,14 +1106,7 @@ function mapOverviewTerritories(bounds, zoom, playerId = "") {
   });
 
   const territories = [];
-  const maxTerritories = level <= 1 ? 450 : level === 2 ? 700 : 1100;
-  const cellPolygon = (q, r) => [
-    [MAP_BOUNDS.west + q * RECT_CELL_WIDTH_DEGREES, MAP_BOUNDS.north - r * RECT_CELL_HEIGHT_DEGREES],
-    [MAP_BOUNDS.west + (q + 1) * RECT_CELL_WIDTH_DEGREES, MAP_BOUNDS.north - r * RECT_CELL_HEIGHT_DEGREES],
-    [MAP_BOUNDS.west + (q + 1) * RECT_CELL_WIDTH_DEGREES, MAP_BOUNDS.north - (r + 1) * RECT_CELL_HEIGHT_DEGREES],
-    [MAP_BOUNDS.west + q * RECT_CELL_WIDTH_DEGREES, MAP_BOUNDS.north - (r + 1) * RECT_CELL_HEIGHT_DEGREES],
-    [MAP_BOUNDS.west + q * RECT_CELL_WIDTH_DEGREES, MAP_BOUNDS.north - r * RECT_CELL_HEIGHT_DEGREES]
-  ];
+  const maxTerritories = level <= 1 ? 2600 : level === 2 ? 3600 : 4800;
 
   const polygonToCenter = (polygon) => {
     const lats = polygon.map(([lat]) => lat);
@@ -1123,14 +1117,22 @@ function mapOverviewTerritories(bounds, zoom, playerId = "") {
     };
   };
 
-  const componentize = (cells) => {
-    const byKey = new Map(cells.map(({ q, r }) => [`${q}:${r}`, { q, r }]));
+  const buildGroupBounds = (group, span) => {
+    const minQ = Math.max(0, Math.min(group.minQ, group.maxQ));
+    const maxQ = Math.max(group.minQ, group.maxQ);
+    const minR = Math.max(0, Math.min(group.minR, group.maxR));
+    const maxR = Math.max(group.minR, group.maxR);
+    return rectBoundaryLatLngRangeServer(minQ, maxQ, minR, maxR);
+  };
+
+  const componentizeGroups = (groupMap) => {
+    const byKey = new Map([...groupMap.values()].map((group) => [`${group.gq}:${group.gr}`, group]));
     const visited = new Set();
     const components = [];
-    for (const cell of cells) {
-      const startKey = `${cell.q}:${cell.r}`;
+    for (const group of groupMap.values()) {
+      const startKey = `${group.gq}:${group.gr}`;
       if (visited.has(startKey)) continue;
-      const queue = [cell];
+      const queue = [group];
       const component = [];
       visited.add(startKey);
       while (queue.length) {
@@ -1166,12 +1168,37 @@ function mapOverviewTerritories(bounds, zoom, playerId = "") {
   };
 
   for (const owner of owners.values()) {
-    const components = componentize(owner.cells);
+    const span = overviewGroupSpanForLevel(level);
+    const groupMap = new Map();
+    owner.cells.forEach(({ q, r }) => {
+      const gq = Math.floor(q / span);
+      const gr = Math.floor(r / span);
+      const groupId = `${gq}:${gr}`;
+      if (!groupMap.has(groupId)) {
+        groupMap.set(groupId, {
+          gq,
+          gr,
+          cellCount: 0,
+          minQ: q,
+          maxQ: q,
+          minR: r,
+          maxR: r
+        });
+      }
+      const group = groupMap.get(groupId);
+      group.cellCount += 1;
+      group.minQ = Math.min(group.minQ, q);
+      group.maxQ = Math.max(group.maxQ, q);
+      group.minR = Math.min(group.minR, r);
+      group.maxR = Math.max(group.maxR, r);
+    });
+
+    const components = componentizeGroups(groupMap);
     components
       .sort((a, b) => b.length - a.length)
       .slice(0, maxTerritories)
       .forEach((component, index) => {
-        const polygons = component.map(({ q, r }) => [cellPolygon(q, r)]);
+        const polygons = component.map((group) => [buildGroupBounds(group, span)]);
         const union = polygonClipping.union(...polygons);
         if (!Array.isArray(union) || !union.length) return;
         union.forEach((polygon) => {
@@ -1193,8 +1220,8 @@ function mapOverviewTerritories(bounds, zoom, playerId = "") {
             chunkId: `z${level}:${owner.ownerId}:${index}`,
             polygon: boundary,
             bbox: box,
-            cellCount: component.length,
-            occupied: component.length / Math.max(1, owner.cellCount),
+            cellCount: component.reduce((sum, group) => sum + (group.cellCount || 0), 0),
+            occupied: component.reduce((sum, group) => sum + (group.cellCount || 0), 0) / Math.max(1, owner.cellCount),
             color: owner.color,
             lat: center.lat,
             lng: center.lng
@@ -1221,9 +1248,6 @@ function writeMarket(market) {
     fs.writeFileSync(MARKET_FILE, JSON.stringify(clean, null, 2), "utf8");
   }
   marketVersion += 1;
-  marketSpatialIndex = null;
-  mapOverviewCache.clear();
-  mapCellsCache.clear();
 }
 
 function readNewsEvents() {
