@@ -1040,120 +1040,83 @@ function mapOverviewTerritories(bounds, zoom, playerId = "") {
   const level = Math.min(3, chunkLevelForZoom(zoom));
   const chunkSpan = chunkCellSpanForLevel(level);
   const chunkRange = chunkBoundsForRange(bounds, chunkSpan, 1);
-  let groupSpan = overviewGroupSpanForLevel(level);
   const entries = marketEntriesInBounds(market, bounds);
 
-  const buildBlocks = (span) => {
-    const blocks = new Map();
-    entries.forEach(([id, entry, q, r]) => {
-      if (!cellInsideChunkRange(q, r, chunkRange, chunkSpan)) return;
-      const ownerId = String(entry.ownerId || "");
-      if (!ownerId) return;
-      const color = entry.ownerColor || "#ef7669";
-      const blockQ = Math.floor(q / span) * span;
-      const blockR = Math.floor(r / span) * span;
-      const key = `${ownerId}:${color}:${blockQ}:${blockR}`;
-      if (!blocks.has(key)) {
-        blocks.set(key, {
-          ownerId,
-          ownerKind: playerId && ownerId === playerId ? "player" : "rival",
-          color,
-          blockQ,
-          blockR,
-          cellCount: 0
-        });
-      }
-      blocks.get(key).cellCount += 1;
-    });
-    return blocks;
-  };
+  const owners = new Map();
+  entries.forEach(([id, entry, q, r]) => {
+    if (!cellInsideChunkRange(q, r, chunkRange, chunkSpan)) return;
+    const ownerId = String(entry.ownerId || "");
+    if (!ownerId) return;
+    const color = entry.ownerColor || "#ef7669";
+    const key = `${ownerId}:${color}`;
+    if (!owners.has(key)) {
+      owners.set(key, {
+        ownerId,
+        ownerKind: playerId && ownerId === playerId ? "player" : "rival",
+        color,
+        cells: [],
+        cellCount: 0
+      });
+    }
+    owners.get(key).cells.push({ q, r });
+    owners.get(key).cellCount += 1;
+  });
 
-  const connectedComponents = (blocks) => {
-    const byCoord = new Map();
-    blocks.forEach((block, key) => {
-      byCoord.set(key, block);
-    });
-    const visited = new Set();
-    const components = [];
-    const directions = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+  const territories = [];
+  const maxTerritories = level <= 1 ? 700 : level === 2 ? 1200 : 1800;
+  const maxCellsPerOwner = level <= 1 ? 5000 : level === 2 ? 9000 : 14000;
 
-    blocks.forEach((block, key) => {
-      if (visited.has(key)) return;
-      const queue = [block];
-      const component = [];
-      visited.add(key);
-      while (queue.length) {
-        const current = queue.pop();
-        component.push(current);
-        directions.forEach(([dq, dr]) => {
-          const neighborKey = `${current.ownerId}:${current.color}:${current.blockQ + dq * groupSpan}:${current.blockR + dr * groupSpan}`;
-          const neighbor = byCoord.get(neighborKey);
-          if (!neighbor || visited.has(neighborKey)) return;
-          visited.add(neighborKey);
-          queue.push(neighbor);
-        });
-      }
-      components.push(component);
-    });
-    return components;
-  };
+  const buildCellPolygon = (q, r) => [
+    [MAP_BOUNDS.west + q * RECT_CELL_WIDTH_DEGREES, MAP_BOUNDS.north - r * RECT_CELL_HEIGHT_DEGREES],
+    [MAP_BOUNDS.west + (q + 1) * RECT_CELL_WIDTH_DEGREES, MAP_BOUNDS.north - r * RECT_CELL_HEIGHT_DEGREES],
+    [MAP_BOUNDS.west + (q + 1) * RECT_CELL_WIDTH_DEGREES, MAP_BOUNDS.north - (r + 1) * RECT_CELL_HEIGHT_DEGREES],
+    [MAP_BOUNDS.west + q * RECT_CELL_WIDTH_DEGREES, MAP_BOUNDS.north - (r + 1) * RECT_CELL_HEIGHT_DEGREES],
+    [MAP_BOUNDS.west + q * RECT_CELL_WIDTH_DEGREES, MAP_BOUNDS.north - r * RECT_CELL_HEIGHT_DEGREES]
+  ];
 
-  const mergedBoundaryForComponent = (component) => {
-    const unionInput = component.map((block) => [rectBoundaryRingForUnionServer(block.blockQ, block.blockR, groupSpan)]);
-    const union = polygonClipping.union(...unionInput);
-    const ring = largestRingFromUnionServer(union);
-    if (ring && ring.length >= 4) return ringToLatLngServer(ring);
-    const minQ = Math.min(...component.map((item) => item.blockQ));
-    const maxQ = Math.max(...component.map((item) => item.blockQ + groupSpan));
-    const minR = Math.min(...component.map((item) => item.blockR));
-    const maxR = Math.max(...component.map((item) => item.blockR + groupSpan));
-    return [
-      [MAP_BOUNDS.north - minR * RECT_CELL_HEIGHT_DEGREES, MAP_BOUNDS.west + minQ * RECT_CELL_WIDTH_DEGREES],
-      [MAP_BOUNDS.north - minR * RECT_CELL_HEIGHT_DEGREES, MAP_BOUNDS.west + maxQ * RECT_CELL_WIDTH_DEGREES],
-      [MAP_BOUNDS.north - maxR * RECT_CELL_HEIGHT_DEGREES, MAP_BOUNDS.west + maxQ * RECT_CELL_WIDTH_DEGREES],
-      [MAP_BOUNDS.north - maxR * RECT_CELL_HEIGHT_DEGREES, MAP_BOUNDS.west + minQ * RECT_CELL_WIDTH_DEGREES]
-    ];
-  };
-
-  const maxGroups = level === 1 ? 1800 : level === 2 ? 3200 : 5200;
-  let blocks = buildBlocks(groupSpan);
-  while (blocks.size > maxGroups) {
-    groupSpan *= 2;
-    blocks = buildBlocks(groupSpan);
-  }
-
-  const territories = connectedComponents(blocks).map((component, index) => {
-    const ownerId = component[0].ownerId;
-    const ownerKind = component[0].ownerKind;
-    const color = component[0].color;
-    const cellCount = component.reduce((sum, item) => sum + item.cellCount, 0);
-    const polygon = mergedBoundaryForComponent(component);
+  const polygonToCenter = (polygon) => {
     const lats = polygon.map(([lat]) => lat);
     const lngs = polygon.map(([, lng]) => lng);
-    const center = {
+    return {
       lat: (Math.min(...lats) + Math.max(...lats)) / 2,
       lng: (Math.min(...lngs) + Math.max(...lngs)) / 2
     };
-    return {
-      ownerId,
-      ownerKind,
-      chunkId: `z${level}:${index}:${ownerId}`,
-      polygon,
-      cellCount,
-      occupied: cellCount / (groupSpan * groupSpan),
-      color,
-      lat: center.lat,
-      lng: center.lng
-    };
-  });
+  };
 
-  const payload = { version: marketVersion, zoom, level, span: groupSpan, territories };
+  for (const owner of owners.values()) {
+    const cells = owner.cells.slice(0, maxCellsPerOwner);
+    const polygons = cells.map(({ q, r }) => [buildCellPolygon(q, r)]);
+    const union = polygonClipping.union(...polygons);
+    if (!Array.isArray(union) || !union.length) continue;
+    union.forEach((polygon, index) => {
+      if (territories.length >= maxTerritories) return;
+      if (!Array.isArray(polygon) || !polygon.length) return;
+      const outerRing = polygon[0];
+      const boundary = outerRing.map(([lng, lat]) => [lat, lng]);
+      if (boundary.length < 4) return;
+      const center = polygonToCenter(boundary);
+      territories.push({
+        ownerId: owner.ownerId,
+        ownerKind: owner.ownerKind,
+        chunkId: `z${level}:${owner.ownerId}:${index}`,
+        polygon: boundary,
+        cellCount: owner.cellCount,
+        occupied: owner.cellCount / Math.max(1, cells.length),
+        color: owner.color,
+        lat: center.lat,
+        lng: center.lng
+      });
+    });
+  }
+
+  const payload = { version: marketVersion, zoom, level, territories };
   mapOverviewCache.set(cacheKey, payload);
   if (mapOverviewCache.size > 36) mapOverviewCache.delete(mapOverviewCache.keys().next().value);
   return payload;
 }
 
 function writeMarket(market) {
+
 
   const clean = { land: cleanMarketLand(market.land), resetAt: market.resetAt || null };
   if (storage) {
