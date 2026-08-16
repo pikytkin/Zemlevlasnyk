@@ -922,10 +922,10 @@ function chunkCellSpanForLevel(level) {
 }
 
 function overviewGroupSpanForLevel(level) {
-  if (level <= 1) return 24;
-  if (level === 2) return 12;
-  if (level === 3) return 6;
-  return 4;
+  if (level <= 1) return 64;
+  if (level === 2) return 32;
+  if (level === 3) return 16;
+  return 8;
 }
 
 function chunkBoundsForRange(bounds, span, preload = 1) {
@@ -1000,7 +1000,7 @@ function mapOverviewTerritories(bounds, zoom, playerId = "") {
   const level = Math.min(3, chunkLevelForZoom(zoom));
   const chunkSpan = chunkCellSpanForLevel(level);
   const chunkRange = chunkBoundsForRange(bounds, chunkSpan, 1);
-  let groupSpan = zoom <= 7 ? 8 : 4;
+  let groupSpan = overviewGroupSpanForLevel(level);
   let groups = new Map();
 
   const entries = marketEntriesInBounds(market, bounds);
@@ -1033,7 +1033,7 @@ function mapOverviewTerritories(bounds, zoom, playerId = "") {
     return next;
   };
 
-  const maxGroups = level === 1 ? 4800 : level === 2 ? 6400 : 7800;
+  const maxGroups = level === 1 ? 1800 : level === 2 ? 3200 : 5200;
   groups = buildGroups(groupSpan);
   while (groups.size > maxGroups) {
     groupSpan *= 2;
