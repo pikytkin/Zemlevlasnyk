@@ -968,6 +968,49 @@ function overviewGroupSpanForLevel(level) {
   return 8;
 }
 
+function groupKeyForCell(q, r, span) {
+  return `${Math.floor(q / span)}:${Math.floor(r / span)}`;
+}
+
+function connectedComponentsForGroups(groupMap) {
+  const groups = [...groupMap.values()];
+  const byKey = new Map(groups.map((group) => [`${group.gq}:${group.gr}`, group]));
+  const visited = new Set();
+  const components = [];
+
+  for (const group of groups) {
+    const startKey = `${group.gq}:${group.gr}`;
+    if (visited.has(startKey)) continue;
+    const queue = [group];
+    const component = { groups: [], cellCount: 0 };
+    visited.add(startKey);
+
+    while (queue.length) {
+      const current = queue.pop();
+      component.groups.push(current);
+      component.cellCount += current.cellCount || 0;
+      const neighbors = [
+        [current.gq + 1, current.gr],
+        [current.gq - 1, current.gr],
+        [current.gq, current.gr + 1],
+        [current.gq, current.gr - 1]
+      ];
+      neighbors.forEach(([nq, nr]) => {
+        const neighborKey = `${nq}:${nr}`;
+        if (visited.has(neighborKey)) return;
+        const neighbor = byKey.get(neighborKey);
+        if (!neighbor) return;
+        visited.add(neighborKey);
+        queue.push(neighbor);
+      });
+    }
+
+    components.push(component);
+  }
+
+  return components;
+}
+
 function chunkBoundsForRange(bounds, span, preload = 1) {
   const range = gridRangeForBounds(bounds.west, bounds.east, bounds.south, bounds.north, 0);
   return {
@@ -1033,18 +1076,18 @@ function mapCellsInViewport(bounds, zoom = 13, limit = MAX_VIEWPORT_MARKET_CELLS
 }
 
 function mapOverviewTerritories(bounds, zoom, playerId = "") {
-  const cacheKey = `${marketVersion}|${zoom}|${playerId}|${bounds.west.toFixed(3)}|${bounds.south.toFixed(3)}|${bounds.east.toFixed(3)}|${bounds.north.toFixed(3)}`;
+  const cacheKey = `${marketVersion}|${zoom}|${playerId}|global`;
   const cached = mapOverviewCache.get(cacheKey);
   if (cached) return cached;
   const market = readMarket();
   const level = Math.min(3, chunkLevelForZoom(zoom));
-  const chunkSpan = chunkCellSpanForLevel(level);
-  const chunkRange = chunkBoundsForRange(bounds, chunkSpan, 1);
-  const entries = marketEntriesInBounds(market, bounds);
+  const groupSpan = overviewGroupSpanForLevel(level);
+  const entries = Object.entries(market.land || {});
 
   const owners = new Map();
-  entries.forEach(([id, entry, q, r]) => {
-    if (!cellInsideChunkRange(q, r, chunkRange, chunkSpan)) return;
+  entries.forEach(([id, entry]) => {
+    if (!isPlayableLandId(id)) return;
+    const { q, r } = parseCellGridId(id);
     const ownerId = String(entry.ownerId || "");
     if (!ownerId) return;
     const color = entry.ownerColor || "#ef7669";
@@ -1054,25 +1097,27 @@ function mapOverviewTerritories(bounds, zoom, playerId = "") {
         ownerId,
         ownerKind: playerId && ownerId === playerId ? "player" : "rival",
         color,
-        cells: [],
+        groups: new Map(),
         cellCount: 0
       });
     }
-    owners.get(key).cells.push({ q, r });
-    owners.get(key).cellCount += 1;
+    const groupKey = groupKeyForCell(q, r, groupSpan);
+    const owner = owners.get(key);
+    if (!owner.groups.has(groupKey)) {
+      const gq = Math.floor(q / groupSpan);
+      const gr = Math.floor(r / groupSpan);
+      owner.groups.set(groupKey, {
+        gq,
+        gr,
+        cellCount: 0
+      });
+    }
+    owner.groups.get(groupKey).cellCount += 1;
+    owner.cellCount += 1;
   });
 
   const territories = [];
-  const maxTerritories = level <= 1 ? 700 : level === 2 ? 1200 : 1800;
-  const maxCellsPerOwner = level <= 1 ? 5000 : level === 2 ? 9000 : 14000;
-
-  const buildCellPolygon = (q, r) => [
-    [MAP_BOUNDS.west + q * RECT_CELL_WIDTH_DEGREES, MAP_BOUNDS.north - r * RECT_CELL_HEIGHT_DEGREES],
-    [MAP_BOUNDS.west + (q + 1) * RECT_CELL_WIDTH_DEGREES, MAP_BOUNDS.north - r * RECT_CELL_HEIGHT_DEGREES],
-    [MAP_BOUNDS.west + (q + 1) * RECT_CELL_WIDTH_DEGREES, MAP_BOUNDS.north - (r + 1) * RECT_CELL_HEIGHT_DEGREES],
-    [MAP_BOUNDS.west + q * RECT_CELL_WIDTH_DEGREES, MAP_BOUNDS.north - (r + 1) * RECT_CELL_HEIGHT_DEGREES],
-    [MAP_BOUNDS.west + q * RECT_CELL_WIDTH_DEGREES, MAP_BOUNDS.north - r * RECT_CELL_HEIGHT_DEGREES]
-  ];
+  const maxTerritories = level <= 1 ? 450 : level === 2 ? 700 : 1100;
 
   const polygonToCenter = (polygon) => {
     const lats = polygon.map(([lat]) => lat);
@@ -1084,29 +1129,34 @@ function mapOverviewTerritories(bounds, zoom, playerId = "") {
   };
 
   for (const owner of owners.values()) {
-    const cells = owner.cells.slice(0, maxCellsPerOwner);
-    const polygons = cells.map(({ q, r }) => [buildCellPolygon(q, r)]);
-    const union = polygonClipping.union(...polygons);
-    if (!Array.isArray(union) || !union.length) continue;
-    union.forEach((polygon, index) => {
-      if (territories.length >= maxTerritories) return;
-      if (!Array.isArray(polygon) || !polygon.length) return;
-      const outerRing = polygon[0];
-      const boundary = outerRing.map(([lng, lat]) => [lat, lng]);
-      if (boundary.length < 4) return;
-      const center = polygonToCenter(boundary);
-      territories.push({
-        ownerId: owner.ownerId,
-        ownerKind: owner.ownerKind,
-        chunkId: `z${level}:${owner.ownerId}:${index}`,
-        polygon: boundary,
-        cellCount: owner.cellCount,
-        occupied: owner.cellCount / Math.max(1, cells.length),
-        color: owner.color,
-        lat: center.lat,
-        lng: center.lng
+    const components = connectedComponentsForGroups(owner.groups);
+    components
+      .sort((a, b) => b.cellCount - a.cellCount)
+      .slice(0, maxTerritories)
+      .forEach((component, index) => {
+        const polygons = component.groups.map(({ gq, gr }) => [rectBoundaryRingForUnionServer(gq * groupSpan, gr * groupSpan, groupSpan)]);
+        const union = polygonClipping.union(...polygons);
+        if (!Array.isArray(union) || !union.length) return;
+        union.forEach((polygon) => {
+          if (territories.length >= maxTerritories) return;
+          if (!Array.isArray(polygon) || !polygon.length) return;
+          const outerRing = polygon[0];
+          const boundary = outerRing.map(([lng, lat]) => [lat, lng]);
+          if (boundary.length < 4) return;
+          const center = polygonToCenter(boundary);
+          territories.push({
+            ownerId: owner.ownerId,
+            ownerKind: owner.ownerKind,
+            chunkId: `z${level}:${owner.ownerId}:${index}`,
+            polygon: boundary,
+            cellCount: component.cellCount,
+            occupied: component.cellCount / Math.max(1, owner.cellCount),
+            color: owner.color,
+            lat: center.lat,
+            lng: center.lng
+          });
+        });
       });
-    });
   }
 
   const payload = { version: marketVersion, zoom, level, territories };
