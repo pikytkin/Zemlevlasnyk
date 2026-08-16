@@ -10,7 +10,8 @@
   },
   "dependencies": {
     "nodemailer": "^6.9.14",
-    "pg": "^8.13.1"
+    "pg": "^8.13.1",
+    "polygon-clipping": "^0.15.7"
   },
   "license": "UNLICENSED"
 }

@@ -2,6 +2,7 @@
 const fs = require("fs");
 const http = require("http");
 const path = require("path");
+const polygonClipping = require("polygon-clipping");
 const zlib = require("zlib");
 
 function loadEnvFile() {
@@ -890,6 +891,45 @@ function rectBoundaryLatLngBlockServer(q, r, step) {
   return [[north, west], [north, east], [south, east], [south, west]];
 }
 
+function rectBoundaryRingForUnionServer(q, r, step) {
+  const west = MAP_BOUNDS.west + q * RECT_CELL_WIDTH_DEGREES;
+  const east = MAP_BOUNDS.west + (q + step) * RECT_CELL_WIDTH_DEGREES;
+  const north = MAP_BOUNDS.north - r * RECT_CELL_HEIGHT_DEGREES;
+  const south = MAP_BOUNDS.north - (r + step) * RECT_CELL_HEIGHT_DEGREES;
+  return [[west, north], [east, north], [east, south], [west, south], [west, north]];
+}
+
+function polygonAreaSignedServer(ring) {
+  if (!Array.isArray(ring) || ring.length < 3) return 0;
+  let area = 0;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i, i += 1) {
+    const [x1, y1] = ring[j];
+    const [x2, y2] = ring[i];
+    area += (x1 * y2) - (x2 * y1);
+  }
+  return area / 2;
+}
+
+function largestRingFromUnionServer(unionResult) {
+  if (!Array.isArray(unionResult) || !unionResult.length) return null;
+  let bestRing = null;
+  let bestArea = 0;
+  unionResult.forEach((polygon) => {
+    if (!Array.isArray(polygon) || !polygon.length) return;
+    const outer = polygon[0];
+    const area = Math.abs(polygonAreaSignedServer(outer));
+    if (area > bestArea) {
+      bestArea = area;
+      bestRing = outer;
+    }
+  });
+  return bestRing;
+}
+
+function ringToLatLngServer(ring) {
+  return ring.map(([lng, lat]) => [lat, lng]);
+}
+
 function rectBoundaryLatLngRangeServer(minQ, maxQ, minR, maxR) {
   const west = MAP_BOUNDS.west + minQ * RECT_CELL_WIDTH_DEGREES;
   const east = MAP_BOUNDS.west + (maxQ + 1) * RECT_CELL_WIDTH_DEGREES;
@@ -1001,59 +1041,111 @@ function mapOverviewTerritories(bounds, zoom, playerId = "") {
   const chunkSpan = chunkCellSpanForLevel(level);
   const chunkRange = chunkBoundsForRange(bounds, chunkSpan, 1);
   let groupSpan = overviewGroupSpanForLevel(level);
-  let groups = new Map();
-
   const entries = marketEntriesInBounds(market, bounds);
-  const buildGroups = (span) => {
-    const next = new Map();
+
+  const buildBlocks = (span) => {
+    const blocks = new Map();
     entries.forEach(([id, entry, q, r]) => {
-    if (!cellInsideChunkRange(q, r, chunkRange, chunkSpan)) return;
-    const ownerId = String(entry.ownerId || "");
-    if (!ownerId) return;
-    const parentQ = Math.floor(q / chunkSpan) * chunkSpan;
-    const parentR = Math.floor(r / chunkSpan) * chunkSpan;
-    const groupQ = Math.floor(q / span) * span;
-    const groupR = Math.floor(r / span) * span;
-    const color = entry.ownerColor || "#ef7669";
-    const key = `${ownerId}:${color}:${groupQ}:${groupR}`;
-    if (!next.has(key)) {
-      next.set(key, {
-        ownerId,
-        ownerKind: playerId && ownerId === playerId ? "player" : "rival",
-        color,
-        parentQ,
-        parentR,
-        groupQ,
-        groupR,
-        cellCount: 0
-      });
-    }
-    next.get(key).cellCount += 1;
+      if (!cellInsideChunkRange(q, r, chunkRange, chunkSpan)) return;
+      const ownerId = String(entry.ownerId || "");
+      if (!ownerId) return;
+      const color = entry.ownerColor || "#ef7669";
+      const blockQ = Math.floor(q / span) * span;
+      const blockR = Math.floor(r / span) * span;
+      const key = `${ownerId}:${color}:${blockQ}:${blockR}`;
+      if (!blocks.has(key)) {
+        blocks.set(key, {
+          ownerId,
+          ownerKind: playerId && ownerId === playerId ? "player" : "rival",
+          color,
+          blockQ,
+          blockR,
+          cellCount: 0
+        });
+      }
+      blocks.get(key).cellCount += 1;
     });
-    return next;
+    return blocks;
+  };
+
+  const connectedComponents = (blocks) => {
+    const byCoord = new Map();
+    blocks.forEach((block, key) => {
+      byCoord.set(key, block);
+    });
+    const visited = new Set();
+    const components = [];
+    const directions = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+
+    blocks.forEach((block, key) => {
+      if (visited.has(key)) return;
+      const queue = [block];
+      const component = [];
+      visited.add(key);
+      while (queue.length) {
+        const current = queue.pop();
+        component.push(current);
+        directions.forEach(([dq, dr]) => {
+          const neighborKey = `${current.ownerId}:${current.color}:${current.blockQ + dq * groupSpan}:${current.blockR + dr * groupSpan}`;
+          const neighbor = byCoord.get(neighborKey);
+          if (!neighbor || visited.has(neighborKey)) return;
+          visited.add(neighborKey);
+          queue.push(neighbor);
+        });
+      }
+      components.push(component);
+    });
+    return components;
+  };
+
+  const mergedBoundaryForComponent = (component) => {
+    const unionInput = component.map((block) => [rectBoundaryRingForUnionServer(block.blockQ, block.blockR, groupSpan)]);
+    const union = polygonClipping.union(...unionInput);
+    const ring = largestRingFromUnionServer(union);
+    if (ring && ring.length >= 4) return ringToLatLngServer(ring);
+    const minQ = Math.min(...component.map((item) => item.blockQ));
+    const maxQ = Math.max(...component.map((item) => item.blockQ + groupSpan));
+    const minR = Math.min(...component.map((item) => item.blockR));
+    const maxR = Math.max(...component.map((item) => item.blockR + groupSpan));
+    return [
+      [MAP_BOUNDS.north - minR * RECT_CELL_HEIGHT_DEGREES, MAP_BOUNDS.west + minQ * RECT_CELL_WIDTH_DEGREES],
+      [MAP_BOUNDS.north - minR * RECT_CELL_HEIGHT_DEGREES, MAP_BOUNDS.west + maxQ * RECT_CELL_WIDTH_DEGREES],
+      [MAP_BOUNDS.north - maxR * RECT_CELL_HEIGHT_DEGREES, MAP_BOUNDS.west + maxQ * RECT_CELL_WIDTH_DEGREES],
+      [MAP_BOUNDS.north - maxR * RECT_CELL_HEIGHT_DEGREES, MAP_BOUNDS.west + minQ * RECT_CELL_WIDTH_DEGREES]
+    ];
   };
 
   const maxGroups = level === 1 ? 1800 : level === 2 ? 3200 : 5200;
-  groups = buildGroups(groupSpan);
-  while (groups.size > maxGroups) {
+  let blocks = buildBlocks(groupSpan);
+  while (blocks.size > maxGroups) {
     groupSpan *= 2;
-    groups = buildGroups(groupSpan);
+    blocks = buildBlocks(groupSpan);
   }
-  const territories = [...groups.values()]
-    .map((group) => {
-      const center = cellCenterFromGrid(group.groupQ + groupSpan / 2, group.groupR + groupSpan / 2);
-      return {
-        ownerId: group.ownerId,
-        ownerKind: group.ownerKind,
-        chunkId: `z${level}:${group.groupQ / groupSpan}:${group.groupR / groupSpan}:${group.ownerId}`,
-        polygon: rectBoundaryLatLngBlockServer(group.groupQ, group.groupR, groupSpan),
-        cellCount: group.cellCount,
-        occupied: group.cellCount / (groupSpan * groupSpan),
-        color: group.color,
-        lat: center.lat,
-        lng: center.lng
-      };
-    });
+
+  const territories = connectedComponents(blocks).map((component, index) => {
+    const ownerId = component[0].ownerId;
+    const ownerKind = component[0].ownerKind;
+    const color = component[0].color;
+    const cellCount = component.reduce((sum, item) => sum + item.cellCount, 0);
+    const polygon = mergedBoundaryForComponent(component);
+    const lats = polygon.map(([lat]) => lat);
+    const lngs = polygon.map(([, lng]) => lng);
+    const center = {
+      lat: (Math.min(...lats) + Math.max(...lats)) / 2,
+      lng: (Math.min(...lngs) + Math.max(...lngs)) / 2
+    };
+    return {
+      ownerId,
+      ownerKind,
+      chunkId: `z${level}:${index}:${ownerId}`,
+      polygon,
+      cellCount,
+      occupied: cellCount / (groupSpan * groupSpan),
+      color,
+      lat: center.lat,
+      lng: center.lng
+    };
+  });
 
   const payload = { version: marketVersion, zoom, level, span: groupSpan, territories };
   mapOverviewCache.set(cacheKey, payload);
@@ -1062,6 +1154,7 @@ function mapOverviewTerritories(bounds, zoom, playerId = "") {
 }
 
 function writeMarket(market) {
+
   const clean = { land: cleanMarketLand(market.land), resetAt: market.resetAt || null };
   if (storage) {
     storage.market = clean;
