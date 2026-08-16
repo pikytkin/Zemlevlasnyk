@@ -222,6 +222,7 @@ let selectedCellIds = new Set();
 let purchaseInProgress = false;
 let landOperationOverlay = null;
 let selectionDrag = null;
+let selectionDragWasEnabled = true;
 let clusterSelectionMode = false;
 let suppressMapClick = false;
 let adminSettingsLoaded = false;
@@ -2129,6 +2130,7 @@ function setupShiftSelection() {
   mapBoard.addEventListener("pointerdown", (event) => {
     if ((!clusterSelectionMode && !event.shiftKey) || event.button !== 0) return;
     event.preventDefault();
+    selectionDragWasEnabled = !!map?.dragging?.enabled?.();
     map.dragging.disable();
 
     const boardRect = mapBoard.getBoundingClientRect();
@@ -2162,7 +2164,7 @@ function setupShiftSelection() {
       selectionDrag.box?.remove();
       selectionDrag = null;
     }
-    map.dragging.enable();
+    if (selectionDragWasEnabled) map.dragging.enable();
   });
 }
 
@@ -2191,15 +2193,13 @@ function finishShiftSelection(event) {
   const drag = selectionDrag;
   const previousSelection = new Set(selectedCellIds);
   selectionDrag = null;
-  map.dragging.enable();
+  if (selectionDragWasEnabled) map.dragging.enable();
   drag.box.remove();
 
   if (!drag.moved) {
-    if (clusterSelectionMode) {
-      const latlng = map.containerPointToLatLng([drag.endX, drag.endY]);
-      const cell = cellFromLatLng(latlng.lat, latlng.lng);
-      if (cell) toggleCellSelection(cell.id);
-    }
+    const latlng = map.containerPointToLatLng([drag.endX, drag.endY]);
+    const cell = cellFromLatLng(latlng.lat, latlng.lng);
+    if (cell) selectCell(cell.id, { shiftKey: true });
     return;
   }
 
@@ -2209,7 +2209,7 @@ function finishShiftSelection(event) {
   const bottom = Math.max(drag.startY, drag.endY);
   const nextSelection = new Set(selectedCellIds);
 
-  selectionCandidateCells().forEach((cell) => {
+  selectionCellsForDrag(drag).forEach((cell) => {
     const point = map.latLngToContainerPoint([cell.lat, cell.lng]);
     if (point.x >= left && point.x <= right && point.y >= top && point.y <= bottom) {
       nextSelection.add(cell.id);
@@ -2226,6 +2226,35 @@ function finishShiftSelection(event) {
 function selectionCandidateCells() {
   if (!isOverviewZoom()) return visibleCells;
   return gridCellsInView(map.getBounds().pad(0.02));
+}
+
+function selectionCellsForDrag(drag) {
+  if (!drag || !map) return selectionCandidateCells();
+  if (!isOverviewZoom()) return selectionCandidateCells();
+  const left = Math.min(drag.startX, drag.endX);
+  const right = Math.max(drag.startX, drag.endX);
+  const top = Math.min(drag.startY, drag.endY);
+  const bottom = Math.max(drag.startY, drag.endY);
+  const northWest = map.containerPointToLatLng([left, top]);
+  const southEast = map.containerPointToLatLng([right, bottom]);
+  const minLat = Math.min(northWest.lat, southEast.lat);
+  const maxLat = Math.max(northWest.lat, southEast.lat);
+  const minLng = Math.min(northWest.lng, southEast.lng);
+  const maxLng = Math.max(northWest.lng, southEast.lng);
+  const startQ = Math.max(0, Math.floor((minLng - MAP_BOUNDS.west) / RECT_CELL_WIDTH_DEGREES) - 2);
+  const endQ = Math.min(Math.ceil((maxLng - MAP_BOUNDS.west) / RECT_CELL_WIDTH_DEGREES) + 2, Math.ceil((MAP_BOUNDS.east - MAP_BOUNDS.west) / RECT_CELL_WIDTH_DEGREES));
+  const startR = Math.max(0, Math.floor((MAP_BOUNDS.north - maxLat) / RECT_CELL_HEIGHT_DEGREES) - 2);
+  const endR = Math.min(Math.ceil((MAP_BOUNDS.north - minLat) / RECT_CELL_HEIGHT_DEGREES) + 2, Math.ceil((MAP_BOUNDS.north - MAP_BOUNDS.south) / RECT_CELL_HEIGHT_DEGREES));
+  const result = [];
+  for (let q = startQ; q <= endQ; q += 1) {
+    for (let r = startR; r <= endR; r += 1) {
+      const cell = makeVisibleCell(hexId(q, r));
+      if (!cell) continue;
+      if (cell.lat == null || cell.lng == null) continue;
+      result.push(cell);
+    }
+  }
+  return result.length ? result : selectionCandidateCells();
 }
 
 function selectCellAtMapPoint(event) {
@@ -2524,7 +2553,7 @@ function freeSelectedCells() {
 
 function ownedSelectedCells() {
   const ids = selectedCellIds.size ? [...selectedCellIds] : selectedCellId ? [selectedCellId] : [];
-  return ids.filter((id) => state.land[id]).map(getCell).filter(Boolean);
+  return ids.filter((id) => state.land[id] || visibleLandState.cells[id]).map(getCell).filter(Boolean);
 }
 
 function buildableSelectedCells() {
@@ -3641,10 +3670,11 @@ function setClusterSelectionMode(enabled) {
   mapBoard?.classList.toggle("is-cluster-mode", enabled);
   if (!map) return;
   if (enabled) {
+    selectionDragWasEnabled = !!map?.dragging?.enabled?.();
     map.dragging.disable();
     showGameMessage("Режим виділення кластера: проведіть пальцем прямокутник або натискайте ділянки для додавання/зняття.");
   } else {
-    map.dragging.enable();
+    if (selectionDragWasEnabled) map.dragging.enable();
   }
 }
 
@@ -3687,18 +3717,20 @@ function renderSelectedCell() {
     const cell = getCell(selectedCellId);
     cellTitle.textContent = cell ? "Огляд території" : "Оберіть ділянку";
     cellDetails.innerHTML = `<div><dt>Масштаб</dt><dd>Для операцій із землею наблизьте карту до рівня 150, 75 або 40 комірок по ширині.</dd></div>`;
-    setActionButton(buyButton, "Купити землю", "Доступно на 3 найближчих масштабах");
-    setActionButton(contactOwnerButton, "Зв'язатися з власником", "Наблизьте карту до ділянки");
-    setActionButton(upgradeButton, "Інвестиції в добрива", "Доступно на 3 найближчих масштабах");
-    setActionButton(buildingButton, "Побудувати", "Доступно на 3 найближчих масштабах");
-    setActionButton(machineryButton, "Купити техніку", "Доступно на 3 найближчих масштабах");
-    setActionButton(sellButton, "Продати землю", "Доступно на 3 найближчих масштабах");
-    buyButton.disabled = true;
-    if (contactOwnerButton) contactOwnerButton.disabled = true;
-    upgradeButton.disabled = true;
-    buildingButton.disabled = true;
-    machineryButton.disabled = true;
-    sellButton.disabled = true;
+    const cellOwner = cell ? getOwner(cell.id) : "free";
+    const canOperate = Boolean(cell) && selectedCellIds.size <= 1;
+    setActionButton(buyButton, "Купити землю", canOperate && cellOwner === "free" ? "" : "Наблизьте карту або виберіть вільну ділянку");
+    setActionButton(contactOwnerButton, "Зв'язатися з власником", cellOwner === "rival" ? "" : "Доступно для чужої зайнятої ділянки");
+    setActionButton(upgradeButton, "Інвестиції в добрива", canOperate && cellOwner === "player" ? "" : "Доступно на 3 найближчих масштабах");
+    setActionButton(buildingButton, "Побудувати", canOperate && cellOwner === "player" ? "" : "Доступно на 3 найближчих масштабах");
+    setActionButton(machineryButton, "Купити техніку", canOperate ? "" : "Доступно на 3 найближчих масштабах");
+    setActionButton(sellButton, "Продати землю", canOperate && cellOwner === "player" ? "" : "Доступно на 3 найближчих масштабах");
+    buyButton.disabled = !(cellOwner === "free" && cell);
+    if (contactOwnerButton) contactOwnerButton.disabled = !(cellOwner === "rival");
+    upgradeButton.disabled = !(cellOwner === "player");
+    buildingButton.disabled = !(cellOwner === "player");
+    machineryButton.disabled = !(cellOwner === "player" || cellOwner === "rival" || cellOwner === "free");
+    sellButton.disabled = !(cellOwner === "player");
     showSelectionPopup("Наблизьте карту, щоб працювати з окремими ділянками.");
     if (cellInfoOpen) cellInfoPanel?.classList.remove("is-hidden");
     return;

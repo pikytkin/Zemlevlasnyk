@@ -1081,7 +1081,6 @@ function mapOverviewTerritories(bounds, zoom, playerId = "") {
   if (cached) return cached;
   const market = readMarket();
   const level = Math.min(3, chunkLevelForZoom(zoom));
-  const groupSpan = overviewGroupSpanForLevel(level);
   const entries = Object.entries(market.land || {});
 
   const owners = new Map();
@@ -1097,27 +1096,23 @@ function mapOverviewTerritories(bounds, zoom, playerId = "") {
         ownerId,
         ownerKind: playerId && ownerId === playerId ? "player" : "rival",
         color,
-        groups: new Map(),
+        cells: [],
         cellCount: 0
       });
     }
-    const groupKey = groupKeyForCell(q, r, groupSpan);
-    const owner = owners.get(key);
-    if (!owner.groups.has(groupKey)) {
-      const gq = Math.floor(q / groupSpan);
-      const gr = Math.floor(r / groupSpan);
-      owner.groups.set(groupKey, {
-        gq,
-        gr,
-        cellCount: 0
-      });
-    }
-    owner.groups.get(groupKey).cellCount += 1;
-    owner.cellCount += 1;
+    owners.get(key).cells.push({ q, r });
+    owners.get(key).cellCount += 1;
   });
 
   const territories = [];
   const maxTerritories = level <= 1 ? 450 : level === 2 ? 700 : 1100;
+  const cellPolygon = (q, r) => [
+    [MAP_BOUNDS.west + q * RECT_CELL_WIDTH_DEGREES, MAP_BOUNDS.north - r * RECT_CELL_HEIGHT_DEGREES],
+    [MAP_BOUNDS.west + (q + 1) * RECT_CELL_WIDTH_DEGREES, MAP_BOUNDS.north - r * RECT_CELL_HEIGHT_DEGREES],
+    [MAP_BOUNDS.west + (q + 1) * RECT_CELL_WIDTH_DEGREES, MAP_BOUNDS.north - (r + 1) * RECT_CELL_HEIGHT_DEGREES],
+    [MAP_BOUNDS.west + q * RECT_CELL_WIDTH_DEGREES, MAP_BOUNDS.north - (r + 1) * RECT_CELL_HEIGHT_DEGREES],
+    [MAP_BOUNDS.west + q * RECT_CELL_WIDTH_DEGREES, MAP_BOUNDS.north - r * RECT_CELL_HEIGHT_DEGREES]
+  ];
 
   const polygonToCenter = (polygon) => {
     const lats = polygon.map(([lat]) => lat);
@@ -1128,13 +1123,55 @@ function mapOverviewTerritories(bounds, zoom, playerId = "") {
     };
   };
 
+  const componentize = (cells) => {
+    const byKey = new Map(cells.map(({ q, r }) => [`${q}:${r}`, { q, r }]));
+    const visited = new Set();
+    const components = [];
+    for (const cell of cells) {
+      const startKey = `${cell.q}:${cell.r}`;
+      if (visited.has(startKey)) continue;
+      const queue = [cell];
+      const component = [];
+      visited.add(startKey);
+      while (queue.length) {
+        const current = queue.pop();
+        component.push(current);
+        [
+          [current.q + 1, current.r],
+          [current.q - 1, current.r],
+          [current.q, current.r + 1],
+          [current.q, current.r - 1]
+        ].forEach(([nq, nr]) => {
+          const key = `${nq}:${nr}`;
+          if (visited.has(key)) return;
+          if (!byKey.has(key)) return;
+          visited.add(key);
+          queue.push(byKey.get(key));
+        });
+      }
+      components.push(component);
+    }
+    return components;
+  };
+
+  const territoryBounds = (ring) => {
+    const lats = ring.map(([lat]) => lat);
+    const lngs = ring.map(([, lng]) => lng);
+    return {
+      west: Math.min(...lngs),
+      east: Math.max(...lngs),
+      south: Math.min(...lats),
+      north: Math.max(...lats)
+    };
+  };
+
   for (const owner of owners.values()) {
-    const components = connectedComponentsForGroups(owner.groups);
+    const components = componentize(owner.cells);
     components
-      .sort((a, b) => b.cellCount - a.cellCount)
+      .sort((a, b) => b.length - a.length)
       .slice(0, maxTerritories)
       .forEach((component, index) => {
-        const polygons = component.groups.map(({ gq, gr }) => [rectBoundaryRingForUnionServer(gq * groupSpan, gr * groupSpan, groupSpan)]);
+        const polygons = component.map(({ q, r }) => [cellPolygon(q, r)]);
         const union = polygonClipping.union(...polygons);
         if (!Array.isArray(union) || !union.length) return;
         union.forEach((polygon) => {
@@ -1144,13 +1181,20 @@ function mapOverviewTerritories(bounds, zoom, playerId = "") {
           const boundary = outerRing.map(([lng, lat]) => [lat, lng]);
           if (boundary.length < 4) return;
           const center = polygonToCenter(boundary);
+          const box = territoryBounds(boundary);
+          const intersectsViewport = box.east >= bounds.west
+            && box.west <= bounds.east
+            && box.north >= bounds.south
+            && box.south <= bounds.north;
+          if (!intersectsViewport) return;
           territories.push({
             ownerId: owner.ownerId,
             ownerKind: owner.ownerKind,
             chunkId: `z${level}:${owner.ownerId}:${index}`,
             polygon: boundary,
-            cellCount: component.cellCount,
-            occupied: component.cellCount / Math.max(1, owner.cellCount),
+            bbox: box,
+            cellCount: component.length,
+            occupied: component.length / Math.max(1, owner.cellCount),
             color: owner.color,
             lat: center.lat,
             lng: center.lng
@@ -2191,29 +2235,60 @@ async function handleApi(req, res) {
       }
 
       const body = await readBody(req);
-      const requestedCells = Array.isArray(body.cells) ? body.cells.slice(0, 1000) : [];
+      const requestedCells = Array.isArray(body.cells) ? body.cells : [];
       const ids = requestedCells
         .map((cell) => typeof cell === "string" ? cell : cell?.id)
         .filter((id) => isPlayableLandId(id));
+      if (!ids.length) {
+        sendJson(res, 200, { ok: true, sold: 0, soldIds: [], ...marketVersionPayload() });
+        return;
+      }
+      const settings = readSettings();
+      const users = readUsers();
+      const user = users.find((item) => item.id === session.userId);
+      if (!user) {
+        sendJson(res, 404, { error: "Користувача не знайдено." });
+        return;
+      }
+      const farm = sanitizeFarmState(user.farm);
       const market = readMarket();
       let sold = 0;
       const soldIds = [];
       let sellerName = "Гравець";
       let targetCellId = null;
       const regions = [];
+      let totalRefund = 0;
 
       ids.forEach((id) => {
-        if (market.land[id]?.ownerId === session.userId) {
-          sellerName = market.land[id].ownerName || sellerName;
+        const marketCell = market.land[id];
+        const farmCell = farm.land?.[id];
+        if (marketCell?.ownerId === session.userId && farmCell) {
+          sellerName = marketCell.ownerName || sellerName;
           targetCellId = targetCellId || id;
           const requestRow = requestedCells.find((cell) => typeof cell !== "string" && cell?.id === id);
           if (requestRow?.region) regions.push(String(requestRow.region));
           delete market.land[id];
+          delete farm.land[id];
+          const baseValue = (Number(farmCell.price) || 0)
+            + improvementCostForLevel(farmCell.level || 1, settings)
+            + buildingCostForCell(farmCell, settings);
+          const refundRate = Number.isFinite(settings.economy?.sellRefundPercent) ? settings.economy.sellRefundPercent / 100 : 0.62;
+          const refund = Math.max(0, Math.floor(baseValue * refundRate));
+          totalRefund += refund;
           sold += 1;
           soldIds.push(id);
         }
       });
 
+      if (!sold) {
+        sendJson(res, 200, { ok: true, sold: 0, soldIds: [], ...marketVersionPayload() });
+        return;
+      }
+
+      farm.coins = Math.max(0, Math.floor((farm.coins || 0) + totalRefund));
+      user.farm = sanitizeFarmState(farm);
+      user.updatedAt = new Date().toISOString();
+      writeUsers(users);
       writeMarket(market);
       if (sold) {
         const region = [...new Set(regions.map((item) => item.trim()).filter(Boolean))][0] || "невідомий регіон";
@@ -2225,7 +2300,14 @@ async function handleApi(req, res) {
           targetCellId
         });
       }
-      sendJson(res, 200, { ok: true, sold, soldIds, ...marketVersionPayload() });
+      sendJson(res, 200, {
+        ok: true,
+        sold,
+        soldIds,
+        refund: totalRefund,
+        coins: farm.coins,
+        ...marketVersionPayload()
+      });
       return;
     }
 
