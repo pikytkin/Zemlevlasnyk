@@ -398,7 +398,7 @@ function normalizeMapZoomPresets(mapSettings = {}) {
     return {
       displayZoom,
       mapZoom: displayZoom === 5 ? 5 : mapZoom,
-      mode: raw.mode === "detail" ? "detail" : "overview",
+      mode: displayZoom >= 10 ? "detail" : "overview",
       showFreeGrid: raw.showFreeGrid !== false,
       freeGridOpacity: Math.max(0, Math.min(1, Number(raw.freeGridOpacity) || 0)),
       maxVisibleCells: Math.max(500, Math.min(120000, Math.floor(Number(raw.maxVisibleCells) || fallback.maxVisibleCells || 10000)))
@@ -2091,11 +2091,11 @@ function overviewTerritoryCells() {
 }
 
 function overviewGridStepForZoom(zoom) {
+  if (zoom <= 5) return 72;
   if (zoom <= 7) return 48;
   if (zoom <= 9) return 24;
   if (zoom <= 11) return 12;
-  if (zoom <= 12) return 6;
-  return 12;
+  return 6;
 }
 
 function scheduleGridUpdate(immediate = false) {

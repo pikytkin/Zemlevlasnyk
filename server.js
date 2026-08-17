@@ -341,7 +341,9 @@ function sanitizeMapSettings(mapSettings, fallback = DEFAULT_SETTINGS.map) {
     return {
       displayZoom,
       mapZoom: numberIn(Number(raw.mapZoom), Number(base.mapZoom ?? displayZoom), 3 + index * 0.25, 16 - (expectedDisplayZooms.length - 1 - index) * 0.25),
-      mode: raw.mode === "detail" ? "detail" : raw.mode === "overview" ? "overview" : (base.mode || (displayZoom >= 10 ? "detail" : "overview")),
+      mode: displayZoom >= 10
+        ? "detail"
+        : "overview",
       showFreeGrid: typeof raw.showFreeGrid === "boolean" ? raw.showFreeGrid : Boolean(base.showFreeGrid),
       freeGridOpacity: numberIn(Number(raw.freeGridOpacity), Number(base.freeGridOpacity || 0), 0, 1),
       maxVisibleCells: intIn(raw.maxVisibleCells, base.maxVisibleCells || 10000, 500, 120000)
