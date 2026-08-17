@@ -64,6 +64,7 @@ const DEFAULT_SETTINGS = {
       { displayZoom: 12, mapZoom: 12, mode: "detail", showFreeGrid: true, freeGridOpacity: 0.26, maxVisibleCells: 46000 }
     ],
     maxOwnedCellsPerViewport: 50000,
+    overviewMaxTerritories: 8000,
     cellWidthDegrees: 0.018,
     cellHeightDegrees: 0.012,
     gridCellCount: 363019
@@ -235,6 +236,27 @@ function persistState(key) {
   });
 }
 
+function persistMarketPatch(upserts = {}, deleteIds = []) {
+  if (!dbPool || !storage) return false;
+  const safeDeletes = (Array.isArray(deleteIds) ? deleteIds : []).filter(isPlayableLandId);
+  const safeUpserts = Object.fromEntries(Object.entries(upserts || {}).filter(([id]) => isPlayableLandId(id)));
+  dbPool.query(
+    `UPDATE app_state
+     SET value = jsonb_set(
+       value,
+       '{land}',
+       (COALESCE(value->'land', '{}'::jsonb) - $2::text[]) || $1::jsonb,
+       true
+     ), updated_at = now()
+     WHERE key = 'market'`,
+    [JSON.stringify(safeUpserts), safeDeletes]
+  ).catch((error) => {
+    console.error(`Failed to persist market patch:`, error.message);
+    // Keep the in-memory state authoritative for this process; a later full write can heal DB state.
+  });
+  return true;
+}
+
 async function initStorage() {
   storage = await initDatabaseStorage();
   if (!storage) storage = readFileStorageSnapshot();
@@ -261,9 +283,20 @@ function isPlayableLandId(id) {
   return /^cell--?\d+--?\d+$/.test(String(id || ""));
 }
 
+function compactMarketEntry(entry = {}) {
+  return {
+    ownerId: String(entry.ownerId || "").slice(0, 64),
+    ownerName: String(entry.ownerName || "Гравець").slice(0, 80),
+    ownerColor: /^#[0-9a-f]{6}$/i.test(entry.ownerColor || "") ? entry.ownerColor : "#ef7669",
+    level: Number.isFinite(entry.level) ? Math.max(1, Math.floor(entry.level)) : 1
+  };
+}
+
 function cleanMarketLand(land) {
   if (!land || typeof land !== "object" || Array.isArray(land)) return {};
-  return Object.fromEntries(Object.entries(land).filter(([id]) => isPlayableLandId(id)));
+  return Object.fromEntries(Object.entries(land)
+    .filter(([id, entry]) => isPlayableLandId(id) && entry?.ownerId)
+    .map(([id, entry]) => [id, compactMarketEntry(entry)]));
 }
 
 function numberArray(value, fallback, maxLength = 12) {
@@ -289,7 +322,7 @@ function sanitizeSettings(settings) {
       nearbyPriceGrowthPercent: numberIn(Number(economy.nearbyPriceGrowthPercent), defaults.economy.nearbyPriceGrowthPercent, -95, 1000),
       nearbyPriceRadius: intIn(economy.nearbyPriceRadius, defaults.economy.nearbyPriceRadius, 1, 5),
       sellRefundPercent: numberIn(Number(economy.sellRefundPercent), defaults.economy.sellRefundPercent, 0, 100),
-      maxVisibleCells: intIn(economy.maxVisibleCells, defaults.economy.maxVisibleCells, 1000, 120000),
+      maxVisibleCells: intIn(economy.maxVisibleCells, defaults.economy.maxVisibleCells, 1000, 500000),
       detailZoomMin: intIn(economy.detailZoomMin, defaults.economy.detailZoomMin, 10, 12),
       claimBatchSize: intIn(economy.claimBatchSize, defaults.economy.claimBatchSize, 1, 3000),
       drawGrid: typeof economy.drawGrid === "boolean" ? economy.drawGrid : defaults.economy.drawGrid
@@ -346,7 +379,7 @@ function sanitizeMapSettings(mapSettings, fallback = DEFAULT_SETTINGS.map) {
         : "overview",
       showFreeGrid: typeof raw.showFreeGrid === "boolean" ? raw.showFreeGrid : Boolean(base.showFreeGrid),
       freeGridOpacity: numberIn(Number(raw.freeGridOpacity), Number(base.freeGridOpacity || 0), 0, 1),
-      maxVisibleCells: intIn(raw.maxVisibleCells, base.maxVisibleCells || 10000, 500, 120000)
+      maxVisibleCells: intIn(raw.maxVisibleCells, base.maxVisibleCells || 10000, 500, 500000)
     };
   });
 
@@ -359,7 +392,8 @@ function sanitizeMapSettings(mapSettings, fallback = DEFAULT_SETTINGS.map) {
 
   return {
     zoomPresets,
-    maxOwnedCellsPerViewport: intIn(source.maxOwnedCellsPerViewport, fallback?.maxOwnedCellsPerViewport || 50000, 6000, 120000),
+    maxOwnedCellsPerViewport: intIn(source.maxOwnedCellsPerViewport, fallback?.maxOwnedCellsPerViewport || 50000, 6000, 500000),
+    overviewMaxTerritories: intIn(source.overviewMaxTerritories, fallback?.overviewMaxTerritories || 8000, 500, 30000),
     cellWidthDegrees: numberIn(Number(source.cellWidthDegrees), fallback?.cellWidthDegrees || BASE_RECT_CELL_WIDTH_DEGREES, 0.002, 0.08),
     cellHeightDegrees: numberIn(Number(source.cellHeightDegrees), fallback?.cellHeightDegrees || BASE_RECT_CELL_HEIGHT_DEGREES, 0.0015, 0.06),
     gridCellCount: intIn(source.gridCellCount, fallback?.gridCellCount || BASE_PLAYABLE_CELL_COUNT, 10000, 2000000)
@@ -478,6 +512,10 @@ function writeSettings(settings) {
     fs.writeFileSync(SETTINGS_FILE, JSON.stringify(clean, null, 2), "utf8");
   }
   applyRuntimeMapSettings(clean, previousSettings);
+  // Settings can change overview/detail caps without changing marketVersion. Do not serve
+  // stale map payloads that were produced with the previous limits.
+  mapOverviewCache.clear();
+  mapCellsCache.clear();
   return clean;
 }
 
@@ -856,16 +894,56 @@ function ensureMarketSpatialIndex(market) {
   return index;
 }
 
-function marketEntriesInBounds(market, bounds, preload = 1) {
+function patchMarketSpatialIndex(upsertIds = [], deleteIds = [], market = readMarket(), previousVersion = marketVersion) {
+  if (!marketSpatialIndex || marketSpatialIndexVersion !== previousVersion) return false;
+
+  for (const id of deleteIds || []) {
+    if (!isPlayableLandId(id)) continue;
+    const { q, r } = parseCellGridId(id);
+    const key = marketChunkKey(q, r);
+    const rows = marketSpatialIndex.get(key);
+    if (!rows) continue;
+    const nextRows = rows.filter((row) => row[0] !== id);
+    if (nextRows.length) marketSpatialIndex.set(key, nextRows);
+    else marketSpatialIndex.delete(key);
+  }
+
+  for (const id of upsertIds || []) {
+    if (!isPlayableLandId(id)) continue;
+    const entry = market.land?.[id];
+    if (!entry) continue;
+    const { q, r } = parseCellGridId(id);
+    const key = marketChunkKey(q, r);
+    const rows = marketSpatialIndex.get(key) || [];
+    const index = rows.findIndex((row) => row[0] === id);
+    const row = [id, entry, q, r];
+    if (index >= 0) rows[index] = row;
+    else rows.push(row);
+    marketSpatialIndex.set(key, rows);
+  }
+  return true;
+}
+
+function forEachMarketEntryInBounds(market, bounds, preload = 1, visitor = () => true) {
   const index = ensureMarketSpatialIndex(market);
   const chunks = chunkBoundsForRange(bounds, MARKET_INDEX_SPAN, preload);
-  const entries = [];
   for (let cq = chunks.minQ; cq <= chunks.maxQ; cq += 1) {
     for (let cr = chunks.minR; cr <= chunks.maxR; cr += 1) {
       const rows = index.get(`${cq}:${cr}`);
-      if (rows) entries.push(...rows);
+      if (!rows) continue;
+      for (const row of rows) {
+        if (visitor(row) === false) return false;
+      }
     }
   }
+  return true;
+}
+
+function marketEntriesInBounds(market, bounds, preload = 1) {
+  const entries = [];
+  forEachMarketEntryInBounds(market, bounds, preload, (row) => {
+    entries.push(row);
+  });
   return entries;
 }
 
@@ -1051,11 +1129,16 @@ function mapCellsInViewport(bounds, zoom = 13, limit = MAX_VIEWPORT_MARKET_CELLS
   const span = chunkCellSpanForLevel(4);
   const chunkRange = chunkBoundsForRange(bounds, span, 1);
 
-  marketEntriesInBounds(market, bounds).forEach(([id, entry, q, r]) => {
-    if (!cellInsideChunkRange(q, r, chunkRange, span)) return;
-    if (!isPlayableGridCellServer(q, r)) return;
+  let truncated = false;
+  forEachMarketEntryInBounds(market, bounds, 1, ([id, entry, q, r]) => {
+    if (!cellInsideChunkRange(q, r, chunkRange, span)) return true;
+    if (!isPlayableGridCellServer(q, r)) return true;
     const ownerId = String(entry.ownerId || "");
-    if (!ownerId) return;
+    if (!ownerId) return true;
+    if (cells.length >= limit) {
+      truncated = true;
+      return false;
+    }
     if (!owners[ownerId]) {
       owners[ownerId] = {
         color: entry.ownerColor || "#ef7669",
@@ -1067,14 +1150,33 @@ function mapCellsInViewport(bounds, zoom = 13, limit = MAX_VIEWPORT_MARKET_CELLS
       o: ownerId,
       l: Number.isFinite(entry.level) ? entry.level : 1
     });
+    return true;
   });
-
-  const truncated = cells.length > limit;
-  if (truncated) cells.length = limit;
   const payload = { version: marketVersion, zoom, level: 4, owners, cells, truncated };
   mapCellsCache.set(cacheKey, payload);
   if (mapCellsCache.size > 24) mapCellsCache.delete(mapCellsCache.keys().next().value);
   return payload;
+}
+
+function unionPolygonsBatched(polygons, batchSize = 256) {
+  let queue = Array.isArray(polygons) ? polygons.filter(Boolean) : [];
+  if (!queue.length) return [];
+  while (queue.length > 1) {
+    const next = [];
+    for (let index = 0; index < queue.length; index += batchSize) {
+      const batch = queue.slice(index, index + batchSize);
+      if (batch.length === 1) next.push(batch[0]);
+      else next.push(polygonClipping.union(...batch));
+    }
+    queue = next;
+  }
+  const result = queue[0];
+  // A single untouched input is a Polygon; polygon-clipping union normally returns MultiPolygon.
+  if (!Array.isArray(result)) return [];
+  if (result.length && Array.isArray(result[0]) && Array.isArray(result[0][0]) && typeof result[0][0][0] === "number") {
+    return [result];
+  }
+  return result;
 }
 
 function mapOverviewTerritories(bounds, zoom, playerId = "") {
@@ -1084,14 +1186,14 @@ function mapOverviewTerritories(bounds, zoom, playerId = "") {
   const market = readMarket();
   const level = Math.min(3, chunkLevelForZoom(zoom));
   const preload = level <= 1 ? 36 : level === 2 ? 24 : 12;
-  const entries = marketEntriesInBounds(market, bounds, preload);
 
   const owners = new Map();
-  entries.forEach(([id, entry]) => {
-    if (!isPlayableLandId(id)) return;
+  const overviewSpan = overviewGroupSpanForLevel(level);
+  forEachMarketEntryInBounds(market, bounds, preload, ([id, entry]) => {
+    if (!isPlayableLandId(id)) return true;
     const { q, r } = parseCellGridId(id);
     const ownerId = String(entry.ownerId || "");
-    if (!ownerId) return;
+    if (!ownerId) return true;
     const color = entry.ownerColor || "#ef7669";
     const key = `${ownerId}:${color}`;
     if (!owners.has(key)) {
@@ -1099,16 +1201,38 @@ function mapOverviewTerritories(bounds, zoom, playerId = "") {
         ownerId,
         ownerKind: playerId && ownerId === playerId ? "player" : "rival",
         color,
-        cells: [],
+        groupMap: new Map(),
         cellCount: 0
       });
     }
-    owners.get(key).cells.push({ q, r });
-    owners.get(key).cellCount += 1;
+    const owner = owners.get(key);
+    owner.cellCount += 1;
+    const gq = Math.floor(q / overviewSpan);
+    const gr = Math.floor(r / overviewSpan);
+    const groupId = `${gq}:${gr}`;
+    if (!owner.groupMap.has(groupId)) {
+      owner.groupMap.set(groupId, {
+        gq,
+        gr,
+        cellCount: 0,
+        minQ: q,
+        maxQ: q,
+        minR: r,
+        maxR: r
+      });
+    }
+    const group = owner.groupMap.get(groupId);
+    group.cellCount += 1;
+    group.minQ = Math.min(group.minQ, q);
+    group.maxQ = Math.max(group.maxQ, q);
+    group.minR = Math.min(group.minR, r);
+    group.maxR = Math.max(group.maxR, r);
+    return true;
   });
 
   const territories = [];
-  const maxTerritories = level <= 1 ? 2600 : level === 2 ? 3600 : 4800;
+  const configuredTerritoryLimit = readSettings().map?.overviewMaxTerritories || 8000;
+  const maxTerritories = Math.max(500, Math.min(30000, configuredTerritoryLimit));
 
   const polygonToCenter = (polygon) => {
     const lats = polygon.map(([lat]) => lat);
@@ -1124,7 +1248,13 @@ function mapOverviewTerritories(bounds, zoom, playerId = "") {
     const maxQ = Math.max(group.minQ, group.maxQ);
     const minR = Math.max(0, Math.min(group.minR, group.maxR));
     const maxR = Math.max(group.minR, group.maxR);
-    return rectBoundaryLatLngRangeServer(minQ, maxQ, minR, maxR);
+    // polygon-clipping expects GeoJSON axis order [lng, lat].
+    const latLng = rectBoundaryLatLngRangeServer(minQ, maxQ, minR, maxR);
+    const ring = latLng.map(([lat, lng]) => [lng, lat]);
+    if (ring.length && (ring[0][0] !== ring[ring.length - 1][0] || ring[0][1] !== ring[ring.length - 1][1])) {
+      ring.push([...ring[0]]);
+    }
+    return ring;
   };
 
   const componentizeGroups = (groupMap) => {
@@ -1141,10 +1271,10 @@ function mapOverviewTerritories(bounds, zoom, playerId = "") {
         const current = queue.pop();
         component.push(current);
         [
-          [current.q + 1, current.r],
-          [current.q - 1, current.r],
-          [current.q, current.r + 1],
-          [current.q, current.r - 1]
+          [current.gq + 1, current.gr],
+          [current.gq - 1, current.gr],
+          [current.gq, current.gr + 1],
+          [current.gq, current.gr - 1]
         ].forEach(([nq, nr]) => {
           const key = `${nq}:${nr}`;
           if (visited.has(key)) return;
@@ -1169,87 +1299,102 @@ function mapOverviewTerritories(bounds, zoom, playerId = "") {
     };
   };
 
-  for (const owner of owners.values()) {
-    const span = overviewGroupSpanForLevel(level);
-    const groupMap = new Map();
-    owner.cells.forEach(({ q, r }) => {
-      const gq = Math.floor(q / span);
-      const gr = Math.floor(r / span);
-      const groupId = `${gq}:${gr}`;
-      if (!groupMap.has(groupId)) {
-        groupMap.set(groupId, {
-          gq,
-          gr,
-          cellCount: 0,
-          minQ: q,
-          maxQ: q,
-          minR: r,
-          maxR: r
-        });
-      }
-      const group = groupMap.get(groupId);
-      group.cellCount += 1;
-      group.minQ = Math.min(group.minQ, q);
-      group.maxQ = Math.max(group.maxQ, q);
-      group.minR = Math.min(group.minR, r);
-      group.maxR = Math.max(group.maxR, r);
-    });
+  const ownerComponentRows = [...owners.values()].map((owner) => ({
+    owner,
+    components: componentizeGroups(owner.groupMap).sort((a, b) => b.length - a.length),
+    nextIndex: 0
+  }));
+  let overviewTruncated = false;
+  let hasRemainingComponents = true;
 
-    const components = componentizeGroups(groupMap);
-    components
-      .sort((a, b) => b.length - a.length)
-      .slice(0, maxTerritories)
-      .forEach((component, index) => {
-        const polygons = component.map((group) => [buildGroupBounds(group, span)]);
-        const union = polygonClipping.union(...polygons);
-        if (!Array.isArray(union) || !union.length) return;
-        union.forEach((polygon) => {
-          if (territories.length >= maxTerritories) return;
-          if (!Array.isArray(polygon) || !polygon.length) return;
-          const outerRing = polygon[0];
-          const boundary = outerRing.map(([lng, lat]) => [lat, lng]);
-          if (boundary.length < 4) return;
-          const center = polygonToCenter(boundary);
-          const box = territoryBounds(boundary);
-          const intersectsViewport = box.east >= bounds.west
-            && box.west <= bounds.east
-            && box.north >= bounds.south
-            && box.south <= bounds.north;
-          if (!intersectsViewport) return;
-          territories.push({
-            ownerId: owner.ownerId,
-            ownerKind: owner.ownerKind,
-            chunkId: `z${level}:${owner.ownerId}:${index}`,
-            polygon: boundary,
-            bbox: box,
-            cellCount: component.reduce((sum, group) => sum + (group.cellCount || 0), 0),
-            occupied: component.reduce((sum, group) => sum + (group.cellCount || 0), 0) / Math.max(1, owner.cellCount),
-            color: owner.color,
-            lat: center.lat,
-            lng: center.lng
-          });
+  // Round-robin owners instead of exhausting one owner first. With a global cap this keeps
+  // every player represented even when the map becomes highly fragmented.
+  while (territories.length < maxTerritories && hasRemainingComponents) {
+    hasRemainingComponents = false;
+    for (const row of ownerComponentRows) {
+      if (territories.length >= maxTerritories) break;
+      const componentIndex = row.nextIndex;
+      const component = row.components[componentIndex];
+      if (!component) continue;
+      hasRemainingComponents = true;
+      row.nextIndex += 1;
+      const polygons = component.map((group) => [buildGroupBounds(group, overviewSpan)]);
+      const union = unionPolygonsBatched(polygons);
+      if (!Array.isArray(union) || !union.length) continue;
+      const componentCellCount = component.reduce((sum, group) => sum + (group.cellCount || 0), 0);
+      union.forEach((polygon, polygonIndex) => {
+        if (territories.length >= maxTerritories) {
+          overviewTruncated = true;
+          return;
+        }
+        if (!Array.isArray(polygon) || !polygon.length) return;
+        const outerRing = polygon[0];
+        const boundary = outerRing.map(([lng, lat]) => [lat, lng]);
+        if (boundary.length < 4) return;
+        const center = polygonToCenter(boundary);
+        const box = territoryBounds(boundary);
+        const intersectsViewport = box.east >= bounds.west
+          && box.west <= bounds.east
+          && box.north >= bounds.south
+          && box.south <= bounds.north;
+        if (!intersectsViewport) return;
+        territories.push({
+          ownerId: row.owner.ownerId,
+          ownerKind: row.owner.ownerKind,
+          chunkId: `z${level}:${row.owner.ownerId}:${componentIndex}:${polygonIndex}`,
+          polygon: boundary,
+          bbox: box,
+          cellCount: componentCellCount,
+          occupied: componentCellCount / Math.max(1, row.owner.cellCount),
+          color: row.owner.color,
+          lat: center.lat,
+          lng: center.lng
         });
       });
+    }
+  }
+  if (!overviewTruncated && territories.length >= maxTerritories) {
+    overviewTruncated = ownerComponentRows.some((row) => row.nextIndex < row.components.length);
   }
 
-  const payload = { version: marketVersion, zoom, level, territories };
+  const payload = { version: marketVersion, zoom, level, territories, truncated: overviewTruncated };
   mapOverviewCache.set(cacheKey, payload);
   if (mapOverviewCache.size > 36) mapOverviewCache.delete(mapOverviewCache.keys().next().value);
   return payload;
 }
 
-function writeMarket(market) {
+function writeMarket(market, { upsertIds = null, deleteIds = null } = {}) {
+  const patchMode = Array.isArray(upsertIds) || Array.isArray(deleteIds);
+  const safeUpsertIds = (Array.isArray(upsertIds) ? upsertIds : []).filter(isPlayableLandId);
+  const safeDeleteIds = (Array.isArray(deleteIds) ? deleteIds : []).filter(isPlayableLandId);
+  // Full maintenance/admin writes still scrub legacy/invalid ids. Hot-path claim/sell writes
+  // already validated their ids, so avoid an O(total occupied cells) copy on every transaction.
+  const land = patchMode
+    ? (market?.land && typeof market.land === "object" ? market.land : {})
+    : cleanMarketLand(market?.land);
+  const clean = { land, resetAt: market?.resetAt || null };
+  const previousVersion = marketVersion;
 
+  if (storage) storage.market = clean;
 
-  const clean = { land: cleanMarketLand(market.land), resetAt: market.resetAt || null };
-  if (storage) {
-    storage.market = clean;
-    persistState("market");
+  if (dbPool) {
+    if (patchMode) {
+      const upserts = Object.fromEntries(safeUpsertIds
+        .filter((id) => clean.land[id])
+        .map((id) => [id, clean.land[id]]));
+      persistMarketPatch(upserts, safeDeleteIds);
+    } else {
+      persistState("market");
+    }
   } else {
+    // In local-file mode storage is still initialized in memory; persist it explicitly.
     ensureDataFiles();
-    fs.writeFileSync(MARKET_FILE, JSON.stringify(clean, null, 2), "utf8");
+    fs.writeFileSync(MARKET_FILE, JSON.stringify(clean), "utf8");
   }
+
+  const indexPatched = patchMode && patchMarketSpatialIndex(safeUpsertIds, safeDeleteIds, clean, previousVersion);
   marketVersion += 1;
+  if (indexPatched) marketSpatialIndexVersion = marketVersion;
 }
 
 function readNewsEvents() {
@@ -1342,8 +1487,8 @@ async function sendPasswordResetEmail(email, resetUrl) {
   return true;
 }
 
-function userCompanyName(user) {
-  const farm = sanitizeFarmState(user?.farm);
+function userCompanyName(user, sanitizedFarm = null) {
+  const farm = sanitizedFarm && typeof sanitizedFarm === "object" ? sanitizedFarm : sanitizeFarmState(user?.farm);
   const name = String(farm.companyName || "").trim();
   if (!name) return user?.username || "Гравець";
   if (user?.username && (name === `${user.username} Земля` || name === `${user.username} Agro`)) return user.username;
@@ -1362,12 +1507,12 @@ function publicPlayerDetails(user, rank = null) {
   return {
     id: user.id,
     username: user.username,
-    companyName: userCompanyName(user),
+    companyName: userCompanyName(user, farm),
     logo: farm.logo || "",
     color: farm.color || "#35c982",
     landCount: Object.keys(farm.land || {}).length,
     cash: farm.coins,
-    score: farmScore(farm),
+    score: farmScoreSanitized(farm, settings),
     income: Object.values(farm.land || {}).reduce((sum, cell) => {
       if (cell.building || cell.buildingId) {
         return isFirstCellInBuildingGroup(cell.id, cell, farm.land) ? sum + buildingDailyIncomeForCell(cell, settings) : sum;
@@ -1383,39 +1528,43 @@ function publicPlayerDetails(user, rank = null) {
   };
 }
 
-function marketEntryForCell(farm, ownerId, ownerName, cell, settings = readSettings()) {
-  const item = buildingItemById(cell?.building || cell?.buildingId, settings);
-  const buildingEmoji = item ? sanitizeMapEmoji(item.mapEmoji || item.icon || "🏗") : null;
-  return {
+function compactMarketEntriesEqual(current, next) {
+  if (!current || !next || typeof current !== "object") return false;
+  // Legacy rows had price/logo/building/timestamp fields. Treat them as changed once so a
+  // normal owner save compacts them instead of carrying that per-cell payload forever.
+  if (Object.keys(current).length !== 4) return false;
+  return current.ownerId === next.ownerId
+    && current.ownerName === next.ownerName
+    && current.ownerColor === next.ownerColor
+    && Number(current.level || 1) === Number(next.level || 1);
+}
+
+function marketEntryForCell(farm, ownerId, ownerName, cell) {
+  // Keep the global ownership index compact. Price, timestamps, buildings and logos live in
+  // the owner's farm state; map queries only need ownership metadata and the land level.
+  return compactMarketEntry({
     ownerId,
     ownerName,
     ownerColor: farm.color || "#35c982",
-    ownerLogo: farm.logo || "",
-    price: Number.isFinite(cell.price) ? Math.max(1, Math.floor(cell.price)) : 100,
-    purchasedAt: typeof cell.purchasedAt === "string" ? cell.purchasedAt : new Date().toISOString(),
-    building: cell.building || cell.buildingId || null,
-    buildingId: cell.buildingId || cell.building || null,
-    buildingGroupId: cell.buildingGroupId || null,
-    buildingBuiltAt: cell.buildingBuiltAt || null,
-    buildingMapEmoji: buildingEmoji,
-    buildingName: item ? item.name : "",
-    cellEmoji: buildingEmoji || "🌾"
-  };
+    level: Number.isFinite(cell?.level) ? cell.level : 1
+  });
 }
 
 function mergeFarmIntoMarket(farm, ownerId, ownerName) {
   const market = readMarket();
   const settings = readSettings();
   let changed = false;
+  const changedIds = [];
   Object.entries(farm.land || {}).forEach(([id, cell]) => {
     if (!isPlayableLandId(id)) return;
     if (market.land[id] && market.land[id].ownerId !== ownerId) return;
     const nextEntry = marketEntryForCell(farm, ownerId, ownerName, cell, settings);
-    if (JSON.stringify(market.land[id] || null) === JSON.stringify(nextEntry)) return;
+    if (compactMarketEntriesEqual(market.land[id], nextEntry)) return;
     market.land[id] = nextEntry;
+    changedIds.push(id);
     changed = true;
   });
-  if (changed) writeMarket(market);
+  if (changed) writeMarket(market, { upsertIds: changedIds });
   return market;
 }
 
@@ -1435,24 +1584,27 @@ function refreshRegisteredMarketEntries(users = readUsers()) {
   const market = readMarket();
   const settings = readSettings();
   const registeredIds = new Set(users.map((user) => user.id));
+  const deleteIds = [];
+  const upsertIds = [];
   Object.entries(market.land || {}).forEach(([id, owner]) => {
-    if (registeredIds.has(owner?.ownerId)) delete market.land[id];
+    if (!registeredIds.has(owner?.ownerId)) return;
+    delete market.land[id];
+    deleteIds.push(id);
   });
   users.forEach((user) => {
     const farm = sanitizeFarmState(user.farm);
-    const ownerName = userCompanyName(user);
+    const ownerName = userCompanyName(user, farm);
     Object.entries(farm.land || {}).forEach(([id, cell]) => {
       if (!isPlayableLandId(id)) return;
       market.land[id] = marketEntryForCell(farm, user.id, ownerName, cell, settings);
+      upsertIds.push(id);
     });
   });
-  writeMarket(market);
+  writeMarket(market, { upsertIds, deleteIds });
   return market;
 }
 
-function farmScore(farm) {
-  const clean = sanitizeFarmState(farm);
-  const settings = readSettings();
+function farmScoreSanitized(clean, settings = readSettings()) {
   const landValue = Object.values(clean.land || {}).reduce((sum, cell) => {
     return sum
       + cell.price
@@ -1460,6 +1612,10 @@ function farmScore(farm) {
       + (isFirstCellInBuildingGroup(cell.id, cell, clean.land) ? buildingCostForCell(cell, settings) : 0);
   }, 0);
   return clean.coins + landValue + inventoryValue(clean.inventory, settings, clean.currentDay);
+}
+
+function farmScore(farm) {
+  return farmScoreSanitized(sanitizeFarmState(farm));
 }
 
 function inventoryValue(inventory, settings = readSettings(), currentDay = 1) {
@@ -1510,12 +1666,32 @@ function buildingDailyIncomeForFarm(farm, settings = readSettings()) {
   }, 0);
 }
 
+const buildingGroupFirstCellCache = new WeakMap();
+
+function firstBuildingCellIds(land) {
+  if (!land || typeof land !== "object") return new Set();
+  const cached = buildingGroupFirstCellCache.get(land);
+  if (cached) return cached;
+  const firstIds = new Set();
+  const seenGroups = new Set();
+  Object.entries(land).forEach(([id, cell]) => {
+    if (!cell?.building && !cell?.buildingId) return;
+    const groupId = cell.buildingGroupId;
+    if (!groupId) {
+      firstIds.add(id);
+      return;
+    }
+    if (seenGroups.has(groupId)) return;
+    seenGroups.add(groupId);
+    firstIds.add(id);
+  });
+  buildingGroupFirstCellCache.set(land, firstIds);
+  return firstIds;
+}
+
 function isFirstCellInBuildingGroup(cellId, cell, land) {
   if (!cell?.building && !cell?.buildingId) return false;
-  const groupId = cell.buildingGroupId;
-  if (!groupId) return true;
-  const firstId = Object.keys(land || {}).find((id) => land[id]?.buildingGroupId === groupId);
-  return firstId === cellId;
+  return firstBuildingCellIds(land).has(cellId);
 }
 
 function improvementCostForLevel(level, settings = readSettings()) {
@@ -1535,10 +1711,10 @@ function leaderboardRows() {
     const farm = sanitizeFarmState(user.farm);
     return {
       id: user.id,
-      name: userCompanyName(user),
+      name: userCompanyName(user, farm),
       landCount: Object.keys(farm.land || {}).length,
       cash: farm.coins,
-      score: farmScore(farm)
+      score: farmScoreSanitized(farm)
     };
   })
     .map((row) => ({ landCount: 0, cash: row.score || 0, ...row }))
@@ -1576,7 +1752,7 @@ function publicUserRow(user) {
     id: user.id,
     username: user.username,
     email: user.email || "",
-    companyName: userCompanyName(user),
+    companyName: userCompanyName(user, farm),
     createdAt: user.createdAt || null,
     updatedAt: user.updatedAt || null,
     coins: farm.coins,
@@ -1592,7 +1768,7 @@ function publicUserRow(user) {
       const base = rangedSettingValue(settings.economy.baseIncomeMin, settings.economy.baseIncomeSpread, cell.id, 8);
       return sum + Math.round(base * fertilizerMultiplier(cell.level || 1, settings) * inventoryIncomeMultiplier(farm.inventory, settings, farm.currentDay));
     }, 0),
-    score: farmScore(farm),
+    score: farmScoreSanitized(farm, settings),
     earned: farm.stats.earned,
     purchased: farm.stats.purchased,
     upgraded: farm.stats.upgraded,
@@ -1611,7 +1787,7 @@ function regionFromCell(cell) {
 }
 
 function companyNameForUser(user, farm) {
-  return userCompanyName(user);
+  return userCompanyName(user, farm);
 }
 
 function adminSummaryUserRow(user) {
@@ -1648,7 +1824,7 @@ function newsRows() {
       company: companyNameForUser(user, farm),
       landCount: Object.keys(farm.land || {}).length,
       cash: farm.coins,
-      assets: farmScore(farm)
+      assets: farmScoreSanitized(farm, settings)
     };
   });
   const rows = [];
@@ -1870,6 +2046,31 @@ function sendJson(res, status, payload, headers = {}) {
   res.end(JSON.stringify(payload));
 }
 
+function sendJsonCompressed(req, res, status, payload, headers = {}) {
+  const content = Buffer.from(JSON.stringify(payload));
+  const baseHeaders = {
+    "content-type": "application/json; charset=utf-8",
+    ...headers
+  };
+  const acceptsGzip = /\bgzip\b/.test(req?.headers?.["accept-encoding"] || "");
+  if (!acceptsGzip || content.length < 4096) {
+    res.writeHead(status, baseHeaders);
+    res.end(content);
+    return;
+  }
+  // Map payloads contain many repeated ids/coordinates and compress extremely well.
+  // Level 3 keeps CPU cost low while avoiding multi-megabyte transfers on overview/detail.
+  zlib.gzip(content, { level: 3 }, (error, compressed) => {
+    if (error) {
+      res.writeHead(status, baseHeaders);
+      res.end(content);
+      return;
+    }
+    res.writeHead(status, { ...baseHeaders, "content-encoding": "gzip", vary: "Accept-Encoding" });
+    res.end(compressed);
+  });
+}
+
 function requestVersion(req) {
   const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
   const clientVersion = Number(url.searchParams.get("version"));
@@ -1981,8 +2182,8 @@ async function handleApi(req, res) {
       const zoom = intIn(Number(url.searchParams.get("zoom")), 13, 1, 20);
       const configuredLimit = readSettings().map?.maxOwnedCellsPerViewport || MAX_VIEWPORT_MARKET_CELLS;
       const limitParam = url.searchParams.get("limit");
-      const requestedLimit = limitParam == null ? configuredLimit : intIn(Number(limitParam), configuredLimit, 6000, 120000);
-      sendJson(res, 200, mapCellsInViewport(bounds, zoom, Math.min(configuredLimit, requestedLimit)));
+      const requestedLimit = limitParam == null ? configuredLimit : intIn(Number(limitParam), configuredLimit, 6000, 500000);
+      sendJsonCompressed(req, res, 200, mapCellsInViewport(bounds, zoom, Math.min(configuredLimit, requestedLimit)));
       return;
     }
 
@@ -1995,7 +2196,7 @@ async function handleApi(req, res) {
       }
       const zoom = intIn(Number(url.searchParams.get("z") || url.searchParams.get("zoom")), 8, 1, 20);
       const playerId = String(url.searchParams.get("playerId") || "").slice(0, 64);
-      sendJson(res, 200, mapOverviewTerritories(bounds, zoom, playerId));
+      sendJsonCompressed(req, res, 200, mapOverviewTerritories(bounds, zoom, playerId));
       return;
     }
 
@@ -2024,7 +2225,7 @@ async function handleApi(req, res) {
           farm,
           landCount: Object.keys(farm.land || {}).length,
           cash: farm.coins,
-          score: farmScore(farm)
+          score: farmScoreSanitized(farm)
         };
       }).sort((a, b) => b.landCount - a.landCount || b.cash - a.cash || b.score - a.score);
       const index = rows.findIndex((row) => row.user.id === id);
@@ -2200,21 +2401,12 @@ async function handleApi(req, res) {
         }
         charged += price;
         prices[id] = price;
-        market.land[id] = {
+        market.land[id] = compactMarketEntry({
           ownerId: session.userId,
           ownerName: session.isGuest ? "Гостьова розвідка" : (farm.companyName || ownerName),
           ownerColor: farm.color,
-          ownerLogo: farm.logo,
-          price,
-          purchasedAt: existing?.purchasedAt || now,
-          building: null,
-          buildingId: null,
-          buildingGroupId: null,
-          buildingBuiltAt: null,
-          buildingMapEmoji: null,
-          buildingName: "",
-          cellEmoji: "🌾"
-        };
+          level: 1
+        });
         claimed.push(id);
       });
 
@@ -2236,7 +2428,7 @@ async function handleApi(req, res) {
       user.farm = sanitizeFarmState(farm);
       user.updatedAt = now;
       writeUsers(users);
-      if (claimed.length) writeMarket(market);
+      if (claimed.length) writeMarket(market, { upsertIds: claimed });
       if (claimed.length) {
         const requestedById = new Map(requestedCells.map((cell) => [cell.id, cell]));
         const regions = [...new Set(claimed.map((id) => String(requestedById.get(id)?.region || "невідомий регіон").trim()).filter(Boolean))];
@@ -2315,7 +2507,7 @@ async function handleApi(req, res) {
       user.farm = sanitizeFarmState(farm);
       user.updatedAt = new Date().toISOString();
       writeUsers(users);
-      writeMarket(market);
+      writeMarket(market, { deleteIds: soldIds });
       if (sold) {
         const region = [...new Set(regions.map((item) => item.trim()).filter(Boolean))][0] || "невідомий регіон";
         appendNewsEvent({
@@ -2368,7 +2560,7 @@ async function handleApi(req, res) {
       user.farm = farm;
       user.updatedAt = new Date().toISOString();
       writeUsers(users);
-      mergeFarmIntoMarket(farm, user.id, userCompanyName(user));
+      mergeFarmIntoMarket(farm, user.id, userCompanyName(user, farm));
       sendJson(res, 200, { ok: true, farm, ...marketVersionPayload() });
       return;
     }
@@ -2651,11 +2843,14 @@ async function handleApi(req, res) {
 
       users = users.filter((item) => item.id !== user.id);
       const market = readMarket();
+      const deletedLandIds = [];
       Object.entries(market.land || {}).forEach(([id, owner]) => {
-        if (owner.ownerId === user.id) delete market.land[id];
+        if (owner.ownerId !== user.id) return;
+        delete market.land[id];
+        deletedLandIds.push(id);
       });
       writeUsers(users);
-      writeMarket(market);
+      writeMarket(market, { deleteIds: deletedLandIds });
       sendJson(res, 200, { ok: true, ...adminPayload(users, readMarket()) });
       return;
     }
@@ -2742,11 +2937,14 @@ async function handleApi(req, res) {
       user.updatedAt = new Date().toISOString();
       writeUsers(users);
       const market = readMarket();
+      const removedLandIds = [];
       Object.entries(market.land || {}).forEach(([id, owner]) => {
-        if (owner.ownerId === user.id) delete market.land[id];
+        if (owner.ownerId !== user.id) return;
+        delete market.land[id];
+        removedLandIds.push(id);
       });
-      writeMarket(market);
-      mergeFarmIntoMarket(farm, user.id, userCompanyName(user));
+      writeMarket(market, { deleteIds: removedLandIds });
+      mergeFarmIntoMarket(farm, user.id, userCompanyName(user, farm));
       sendJson(res, 200, {
         ok: true,
         ...adminPayload(users, readMarket()),
@@ -2933,7 +3131,7 @@ async function handleApi(req, res) {
       user.farm = farm;
       user.updatedAt = new Date().toISOString();
       writeUsers(users);
-      mergeFarmIntoMarket(farm, user.id, userCompanyName(user));
+      mergeFarmIntoMarket(farm, user.id, userCompanyName(user, farm));
       sendJson(res, 200, { ok: true, farm });
       return;
     }

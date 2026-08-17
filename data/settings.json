@@ -242,6 +242,7 @@
     "maxOwnedCellsPerViewport": 50000,
     "cellWidthDegrees": 0.018,
     "cellHeightDegrees": 0.012,
-    "gridCellCount": 363019
+    "gridCellCount": 363019,
+    "overviewMaxTerritories": 8000
   }
 }

@@ -44,6 +44,8 @@ const MAP_VIEW_BOUNDS = {
 };
 const TILE_SIZE = 256;
 const DISPLAY_ZOOM_LEVELS = [5, 7, 10, 12];
+const MAX_CONFIGURED_VISIBLE_CELLS = 500000;
+const MAX_CONFIGURED_OWNED_CELLS = 500000;
 let MAP_ZOOM_LEVELS = [...DISPLAY_ZOOM_LEVELS];
 let MAP_ZOOM_PRESETS = [
   { displayZoom: 5, mapZoom: 5, mode: "overview", showFreeGrid: false, freeGridOpacity: 0, maxVisibleCells: 2500 },
@@ -214,6 +216,7 @@ let activeChatLoading = false;
 let newsRows = [];
 let newsTimer = null;
 let visibleCells = [];
+let visibleCellById = new Map();
 let playableGridRows = null;
 let mapSettledTimer = null;
 let landRenderMode = null;
@@ -223,6 +226,7 @@ let purchaseInProgress = false;
 let landOperationOverlay = null;
 let selectionDrag = null;
 let selectionDragWasEnabled = true;
+let clusterModeDragWasEnabled = true;
 let clusterSelectionMode = false;
 let suppressMapClick = false;
 let adminSettingsLoaded = false;
@@ -242,6 +246,7 @@ let gridTooDenseNotifiedAt = 0;
 let gridSkippedForDensity = false;
 let detailedMapMarkerCount = 0;
 let landClusterCacheKey = "";
+let landMembershipRevision = 0;
 let landClusterCacheMap = null;
 let landClusterCacheClusters = null;
 let farmDerivedStatsCache = null;
@@ -401,7 +406,7 @@ function normalizeMapZoomPresets(mapSettings = {}) {
       mode: displayZoom >= 10 ? "detail" : "overview",
       showFreeGrid: raw.showFreeGrid !== false,
       freeGridOpacity: Math.max(0, Math.min(1, Number(raw.freeGridOpacity) || 0)),
-      maxVisibleCells: Math.max(500, Math.min(120000, Math.floor(Number(raw.maxVisibleCells) || fallback.maxVisibleCells || 10000)))
+      maxVisibleCells: Math.max(500, Math.min(MAX_CONFIGURED_VISIBLE_CELLS, Math.floor(Number(raw.maxVisibleCells) || fallback.maxVisibleCells || 10000)))
     };
   });
 }
@@ -412,7 +417,7 @@ function applyGameSettings(settings) {
   const mapSettings = gameSettings?.map || {};
   const upgrades = gameSettings?.upgrades || {};
   MAX_VISIBLE_GRID_CELLS = Number.isFinite(Number(economy.maxVisibleCells))
-    ? Math.max(1000, Math.min(120000, Number(economy.maxVisibleCells)))
+    ? Math.max(1000, Math.min(MAX_CONFIGURED_VISIBLE_CELLS, Number(economy.maxVisibleCells)))
     : 46000;
   DETAIL_ZOOM_MIN = Number.isFinite(Number(economy.detailZoomMin))
     ? Math.max(10, Math.min(12, Number(economy.detailZoomMin)))
@@ -447,6 +452,8 @@ function applyGameSettings(settings) {
   if (state?.inventory) state.inventory = normalizeMachineryInventory(state.inventory, state.currentDay || 1);
   cellCache = new Map();
   landClusterCacheKey = "";
+  farmDerivedStatsCache = null;
+  invalidateChunkCache();
   if (!DRAW_GRID) {
     visibleCells = [];
     updateLandMapSource([]);
@@ -492,6 +499,8 @@ function normalizePlayableCellId(id) {
 function startGame(nextPlayer, nextState) {
   player = nextPlayer;
   state = normalizeState(nextState);
+  landMembershipRevision += 1;
+  farmDerivedStatsCache = null;
   adminSettingsLoaded = false;
 
   authScreen.classList.add("is-hidden");
@@ -547,6 +556,7 @@ async function logoutPlayer() {
 }
 
 function queueSave() {
+  farmDerivedStatsCache = null;
   clearTimeout(saveTimer);
   saveTimer = setTimeout(saveState, 350);
 }
@@ -850,7 +860,8 @@ function installMapLibreAdapter(instance) {
   };
   instance.dragging = {
     disable: () => instance.dragPan.disable(),
-    enable: () => instance.dragPan.enable()
+    enable: () => instance.dragPan.enable(),
+    enabled: () => instance.dragPan.isEnabled()
   };
   instance.scrollZoom.setWheelZoomRate?.(1 / 260);
   if (nativeSetMinZoom) nativeSetMinZoom(MAP_ZOOM_LEVELS[0]);
@@ -982,8 +993,10 @@ function cellFeature(cell) {
 }
 
 function updateLandMapSource(cells = visibleCells) {
+  const nextCells = Array.isArray(cells) ? cells : [];
+  visibleCellById = new Map(nextCells.map((cell) => [cell.id, cell]));
   const source = map?.getSource?.("game-land");
-  if (source) source.setData({ type: "FeatureCollection", features: (cells || []).map(cellFeature) });
+  if (source) source.setData({ type: "FeatureCollection", features: nextCells.map(cellFeature) });
 }
 
 async function loadPlayableGridMask() {
@@ -1107,6 +1120,8 @@ async function refreshGlobalMarket() {
     marketOwnedCellCount = nextOwnedCount;
     if (resetChanged) {
       state.land = {};
+      landMembershipRevision += 1;
+      farmDerivedStatsCache = null;
       state.lastAdminResetAt = nextMarket.resetAt;
       selectedCellIds = new Set();
       selectedCellId = null;
@@ -1148,7 +1163,7 @@ function mapViewportQuery() {
     minChunkQ: String(minChunkQ), maxChunkQ: String(maxChunkQ),
     minChunkR: String(minChunkR), maxChunkR: String(maxChunkR),
     zoom: String(Math.round(displayZoomForMapZoom(map.getZoom()))),
-    limit: String(Math.max(6000, Math.min(120000, Number(gameSettings?.map?.maxOwnedCellsPerViewport) || 50000))),
+    limit: String(Math.max(6000, Math.min(MAX_CONFIGURED_OWNED_CELLS, Number(gameSettings?.map?.maxOwnedCellsPerViewport) || 50000))),
     version: String(marketVersion || 0),
     playerId: player?.id || ""
   });
@@ -1209,6 +1224,9 @@ async function refreshVisibleLand() {
       if (payload?.notModified) return;
       if (!cached) setChunkCache(cacheKey, payload);
       overviewTerritories = Array.isArray(payload.territories) ? payload.territories : [];
+      if (payload.truncated) {
+        console.warn("Overview territory payload reached its configured cap.", { limit: gameSettings?.map?.overviewMaxTerritories, zoom: query.get("zoom") });
+      }
       if (Number.isFinite(payload.version)) marketVersion = payload.version;
       resetLandLayerForMode(mode);
       updateGrid();
@@ -1285,7 +1303,11 @@ function reconcileLocalLandWithVisibleState() {
       changed = true;
     }
   });
-  if (changed) queueSave();
+  if (changed) {
+    landMembershipRevision += 1;
+    farmDerivedStatsCache = null;
+    queueSave();
+  }
 }
 
 function visibleLandOwner(cellId) {
@@ -1977,6 +1999,9 @@ async function renderCoarseLandFallback(renderJob) {
     const payload = await requestJson(`/api/map/overview?${query.toString()}`);
     if (renderJob !== gridRenderJob || currentLandRenderMode() !== "detail") return;
     overviewTerritories = Array.isArray(payload.territories) ? payload.territories : [];
+    if (payload.truncated) {
+      console.warn("Coarse overview fallback reached its configured territory cap.", { limit: gameSettings?.map?.overviewMaxTerritories, zoom: query.get("zoom") });
+    }
     if (Number.isFinite(payload.version)) marketVersion = payload.version;
     visibleCells = overviewTerritoryCells();
     updateLandMapSource(visibleCells);
@@ -2164,7 +2189,7 @@ function setupShiftSelection() {
       selectionDrag.box?.remove();
       selectionDrag = null;
     }
-    if (selectionDragWasEnabled) map.dragging.enable();
+    if (!clusterSelectionMode && selectionDragWasEnabled) map.dragging.enable();
   });
 }
 
@@ -2527,7 +2552,7 @@ function pointInPolygon(point, polygon) {
 }
 
 function getCell(id) {
-  const visibleCell = visibleCells.find((item) => item.id === id);
+  const visibleCell = visibleCellById.get(id);
   const cell = visibleCell?.region ? visibleCell : makeCell(id);
   if (cell) cell.price = priceForCellId(cell.id);
   return cell;
@@ -2735,7 +2760,7 @@ function clusterByCell() {
 }
 
 function ownedLandKey() {
-  return Object.keys(state.land).join("|");
+  return landMembershipRevision;
 }
 
 function cellDailyIncome(cell, ownership, clusterMap = clusterByCell()) {
@@ -2902,14 +2927,32 @@ function totalDailyIncome() {
   return value;
 }
 
+function firstBuildingCellIdsForLand(land = state.land) {
+  const firstIds = new Set();
+  const seenGroups = new Set();
+  Object.entries(land || {}).forEach(([id, ownership]) => {
+    if (!ownership?.building && !ownership?.buildingId) return;
+    const groupId = ownership.buildingGroupId;
+    if (!groupId) {
+      firstIds.add(id);
+      return;
+    }
+    if (seenGroups.has(groupId)) return;
+    seenGroups.add(groupId);
+    firstIds.add(id);
+  });
+  return firstIds;
+}
+
 function assetsValue() {
   if (Number.isFinite(farmDerivedStatsCache?.assets)) return farmDerivedStatsCache.assets;
+  const firstBuildingCells = firstBuildingCellIdsForLand();
   const value = ownedCells().reduce((sum, cell) => {
     const owned = state.land[cell.id];
     return sum
       + owned.price
       + fertilizerCostThroughLevel(owned.level || 1)
-      + (isFirstCellInBuildingGroup(cell.id, owned) ? buildingCostForCell(owned) : 0);
+      + (firstBuildingCells.has(cell.id) ? buildingCostForCell(owned) : 0);
   }, inventoryValue());
   farmDerivedStatsCache = { ...(farmDerivedStatsCache || {}), assets: value };
   return value;
@@ -2917,10 +2960,7 @@ function assetsValue() {
 
 function isFirstCellInBuildingGroup(cellId, ownership) {
   if (!ownership?.building && !ownership?.buildingId) return false;
-  const groupId = ownership.buildingGroupId;
-  if (!groupId) return true;
-  const firstId = Object.keys(state.land || {}).find((id) => state.land[id]?.buildingGroupId === groupId);
-  return firstId === cellId;
+  return firstBuildingCellIdsForLand().has(cellId);
 }
 
 function inventoryValue() {
@@ -3093,6 +3133,10 @@ async function buySelectedCell() {
     purchaseInProgress = false;
     buyButton.disabled = false;
     hideLandOperationOverlay();
+    // Always leave a purchase attempt in navigation mode. Returns from try/catch still run
+    // finally, so failed/conflicting purchases cannot leave dragPan disabled until F5.
+    if (clusterSelectionMode) setClusterSelectionMode(false);
+    else map?.dragging?.enable?.();
   }
 
   const finalPrice = cells.reduce((sum, cell) => sum + cell.price, 0);
@@ -3112,6 +3156,8 @@ async function buySelectedCell() {
       nickname: `${cell.region}, ${cell.code.slice(-5)}`
     };
   });
+  landMembershipRevision += 1;
+  farmDerivedStatsCache = null;
   state.stats.purchased += cells.length;
   addEvent(cells.length === 1
     ? `Куплено земельну ділянку ${cells[0].code} біля ${cells[0].region}.`
@@ -3122,8 +3168,8 @@ async function buySelectedCell() {
     : `Куплено земельних ділянок: ${cells.length}.`);
   refreshVisibleCellLayers(cells.map((cell) => cell.id));
   scheduleVisibleLandRefresh(20);
-  render();
   queueSave();
+  render();
 }
 
 function upgradeSelectedCell() {
@@ -3161,8 +3207,8 @@ function demolishSelectedBuildings(cells = ownedSelectedCells()) {
   addLedger("building-demolish", `Знесено побудов: ${targets.length}`, 0, 0);
   refreshVisibleCellLayers(targets.map((cell) => cell.id));
   scheduleGridUpdate();
-  render();
   queueSave();
+  render();
 }
 function buyMachinery() {
   if (!Object.keys(state.land || {}).length) {
@@ -3433,8 +3479,8 @@ function buyAsset(event) {
     closeModals();
     showGameMessage(`Побудовано ${item.name}: ${quantity} комірок. Дохід +${money(item.incomePerDay || 0)} / день.`);
     scheduleGridUpdate();
-    render();
     queueSave();
+    render();
     return;
   }
   state.inventory = state.inventory || { machinery: {}, elevators: {} };
@@ -3460,8 +3506,8 @@ function buyAsset(event) {
   closeModals();
   showGameMessage(`Куплено ${item.name}: ${quantity} шт. Витрачено ${money(total)}.`);
   if (bucket === "elevators") scheduleGridUpdate();
-  render();
   queueSave();
+  render();
 }
 
 function buyFertilizerLevel() {
@@ -3491,8 +3537,8 @@ function buyFertilizerLevel() {
   closeModals();
   showGameMessage(`Інвестицію в добрива збережено: ${item.name}.`);
   refreshVisibleCellLayers(cells.map((cell) => cell.id));
-  render();
   queueSave();
+  render();
 }
 
 async function sellSelectedLand() {
@@ -3525,6 +3571,8 @@ async function sellSelectedLand() {
   }
 
   soldCells.forEach((cell) => delete state.land[cell.id]);
+  landMembershipRevision += 1;
+  farmDerivedStatsCache = null;
   state.stats.buildings = Object.values(state.land || {}).filter((owned) => owned.building || owned.buildingId).length;
   selectedCellIds = new Set();
   selectedCellId = null;
@@ -3535,8 +3583,8 @@ async function sellSelectedLand() {
   marketOwnedCellCount = Math.max(0, marketOwnedCellCount - soldCells.length);
   scheduleVisibleLandRefresh(20);
   scheduleGridUpdate();
-  render();
   queueSave();
+  render();
 }
 function collectIncome() {
   const expired = expireMachinery(true);
@@ -3554,8 +3602,8 @@ function collectIncome() {
   addLedger("income", `Денний дохід за день ${state.currentDay}`, income, 0);
   showGameMessage(`Дохід нараховано: ${money(income)}.`);
   if (expired) addLedger("machinery-expired", "Списано техніку після завершення строку дії", 0, 0);
-  render();
   queueSave();
+  render();
 }
 
 function cellTooltip(cell, owner) {
@@ -3671,11 +3719,15 @@ function setClusterSelectionMode(enabled) {
   mapBoard?.classList.toggle("is-cluster-mode", enabled);
   if (!map) return;
   if (enabled) {
-    selectionDragWasEnabled = !!map?.dragging?.enabled?.();
+    clusterModeDragWasEnabled = !!map?.dragging?.enabled?.();
     map.dragging.disable();
     showGameMessage("Режим виділення кластера: проведіть пальцем прямокутник або натискайте ділянки для додавання/зняття.");
   } else {
-    if (selectionDragWasEnabled) map.dragging.enable();
+    // Keep the mode-level drag state separate from selectionDragWasEnabled: every pointer
+    // selection starts while dragPan is intentionally disabled and would otherwise overwrite
+    // the value needed to restore normal map navigation when cluster mode ends.
+    if (clusterModeDragWasEnabled) map.dragging.enable();
+    clusterModeDragWasEnabled = true;
   }
 }
 
@@ -3959,7 +4011,6 @@ function inventoryDescription(kind) {
 }
 
 function render() {
-  farmDerivedStatsCache = null;
   renderHeader();
   renderSelectedCell();
   renderMetrics();
@@ -4241,6 +4292,8 @@ async function saveProfile(event) {
       body: JSON.stringify({ farm: state })
     });
     state = normalizeState(payload.farm || state);
+    landMembershipRevision += 1;
+    farmDerivedStatsCache = null;
     if (Number.isFinite(payload.version)) marketVersion = payload.version;
     invalidateVisibleLandCache();
     scheduleVisibleLandRefresh(20);
@@ -4303,12 +4356,19 @@ function renderAdminSettings(settings) {
     ["sellRefundPercent", "% повернення при продажі", economy.sellRefundPercent, "economy", "number"],
     ["maxVisibleCells", "Глобальний ліміт комірок на екрані", economy.maxVisibleCells, "economy", "number"],
     ["maxOwnedCellsPerViewport", "Ліміт зайнятих комірок API", settings?.map?.maxOwnedCellsPerViewport, "map", "number"],
+    ["overviewMaxTerritories", "Ліміт агрегованих територій zoom 5/7", settings?.map?.overviewMaxTerritories, "map", "number"],
     ["claimBatchSize", "Пакет купівлі", economy.claimBatchSize, "economy", "number"],
     ["elevatorMinSelectedCells", "Ділянок для побудови", upgrades.elevatorMinSelectedCells, "upgrades", "number"],
   ];
-  adminSettingsFields.innerHTML = fields.map(([name, label, value, group, type = "number"]) => `
-    <label title="${escapeHtml(tips[`${group}.${name}`] || "")}">${label}<input name="${group}.${name}" type="${type}" step="0.01" value="${escapeHtml(value == null ? "" : value)}"></label>
-  `).join("") + `
+  adminSettingsFields.innerHTML = fields.map(([name, label, value, group, type = "number"]) => {
+    const max = name === "maxVisibleCells" || name === "maxOwnedCellsPerViewport" ? MAX_CONFIGURED_VISIBLE_CELLS
+      : name === "overviewMaxTerritories" ? 30000
+      : null;
+    const min = name === "overviewMaxTerritories" ? 500 : null;
+    return `
+      <label title="${escapeHtml(tips[`${group}.${name}`] || "")}">${label}<input name="${group}.${name}" type="${type}" step="0.01" ${min != null ? `min="${min}"` : ""} ${max != null ? `max="${max}"` : ""} value="${escapeHtml(value == null ? "" : value)}"></label>
+    `;
+  }).join("") + `
     <label class="settings-checkbox" title="Діагностика продуктивності: вимкніть, щоб бачити тільки карту без шару комірок.">
       <input name="economy.drawGrid" type="checkbox" ${economy.drawGrid !== false ? "checked" : ""}>
       <span>Малювати сітку</span>
@@ -4348,7 +4408,7 @@ function renderMapZoomEditor(mapSettings) {
             </label>
             <label class="settings-checkbox"><input data-field="showFreeGrid" type="checkbox" ${preset.showFreeGrid ? "checked" : ""}><span>Сітка вільних комірок</span></label>
             <label>Прозорість сітки <input data-field="freeGridOpacity" type="number" min="0" max="1" step="0.01" value="${preset.freeGridOpacity}"></label>
-            <label>Макс. комірок цього zoom <input data-field="maxVisibleCells" type="number" min="500" max="120000" step="1" inputmode="numeric" value="${preset.maxVisibleCells}"></label>
+            <label>Макс. комірок цього zoom <input data-field="maxVisibleCells" type="number" min="500" max="500000" step="1" inputmode="numeric" value="${preset.maxVisibleCells}"></label>
           </div>
         `).join("")}
       </div>
@@ -4523,7 +4583,8 @@ function settingTips() {
     "economy.sellRefundPercent": "Скільки % вкладеної вартості повертається при продажі землі.",
     "economy.detailZoomMin": "Застарілий параметр сумісності. Тепер режим кожного масштабу задається у блоці «Масштаби карти».",
     "economy.maxVisibleCells": "Глобальна верхня межа для комірок, які можна намалювати у viewport. Окремий ліміт кожного zoom задається нижче.",
-    "map.maxOwnedCellsPerViewport": "Скільки зайнятих комірок сервер може повернути для поточного viewport. Занадто мале значення спричиняє неповні дані; рекомендовано 50000.",
+    "map.maxOwnedCellsPerViewport": "Скільки зайнятих комірок сервер може повернути для поточного viewport. Діапазон розширено до 500000, але високі значення збільшують JSON і час обробки; для overview використовується окрема агрегація.",
+    "map.overviewMaxTerritories": "Максимальна кількість агрегованих територій у відповіді zoom 5/7. Збільшуйте лише якщо дуже розрізнені володіння обрізаються; надто велике значення збільшує навантаження на MapLibre.",
     "economy.claimBatchSize": "Скільки ділянок купується одним запитом.",
     "upgrades.landMaxLevel": "Максимальний рівень інвестицій у добрива.",
     "upgrades.elevatorMinSelectedCells": "Скільки ваших ділянок треба виділити, щоб побудувати об'єкт.",
@@ -4761,7 +4822,11 @@ async function clearEvents(userId = "") {
     });
     renderAdminSummary(payload.summary || {}, payload.users || []);
     renderAdminUsers(payload.users || []);
-    if (!userId || userId === player?.id) state = normalizeState(payload.farm || { ...state, events: [] });
+    if (!userId || userId === player?.id) {
+      state = normalizeState(payload.farm || { ...state, events: [] });
+      landMembershipRevision += 1;
+      farmDerivedStatsCache = null;
+    }
     render();
     showGameMessage("Журнал очищено.");
   } catch (error) {
@@ -4888,6 +4953,8 @@ async function saveAdminUser(event) {
     renderAdminUsers(payload.users || []);
     if (body.id === player?.id) {
       state = normalizeState(payload.farm || state);
+      landMembershipRevision += 1;
+      farmDerivedStatsCache = null;
     }
     if (body.resetLand) await refreshGlobalMarket();
     scheduleGridUpdate();
@@ -4973,7 +5040,11 @@ async function rebuildPlayableGrid() {
       body: JSON.stringify({ targetCells, confirm: "RESET_LAND" })
     });
     applyGameSettings(payload.settings);
-    if (payload.farm) state = normalizeState(payload.farm);
+    if (payload.farm) {
+      state = normalizeState(payload.farm);
+      landMembershipRevision += 1;
+      farmDerivedStatsCache = null;
+    }
     selectedCellIds = new Set();
     selectedCellId = null;
     visibleLandState = { version: 0, owners: {}, cells: {} };
@@ -5145,6 +5216,8 @@ async function resetAllLand() {
     overviewTerritories = [];
     invalidateGridGeometryCache();
     state = normalizeState(payload.farm || { ...state, land: {} });
+    landMembershipRevision += 1;
+    farmDerivedStatsCache = null;
     selectedCellIds = new Set();
     selectedCellId = null;
     cellLayerById = new Map();
@@ -5163,7 +5236,11 @@ async function resetAllMoney() {
     const payload = await requestJson("/api/admin/reset-money", { method: "POST", body: "{}" });
     renderAdminSummary(payload.summary || {}, payload.users || []);
     renderAdminUsers(payload.users || []);
-    if (payload.farm) state = normalizeState(payload.farm);
+    if (payload.farm) {
+      state = normalizeState(payload.farm);
+      landMembershipRevision += 1;
+      farmDerivedStatsCache = null;
+    }
     refreshLeaderboard();
     render();
     showGameMessage("Гроші всіх учасників обнулено.");
@@ -5178,7 +5255,11 @@ async function resetAllMachinery() {
     const payload = await requestJson("/api/admin/reset-machinery", { method: "POST", body: "{}" });
     renderAdminSummary(payload.summary || {}, payload.users || []);
     renderAdminUsers(payload.users || []);
-    if (payload.farm) state = normalizeState(payload.farm);
+    if (payload.farm) {
+      state = normalizeState(payload.farm);
+      landMembershipRevision += 1;
+      farmDerivedStatsCache = null;
+    }
     refreshLeaderboard();
     render();
     showGameMessage("Техніку всіх учасників обнулено.");
@@ -5199,7 +5280,11 @@ async function resetAllAssets() {
     visibleLandState = { version: 0, owners: {}, cells: {} };
     overviewTerritories = [];
     invalidateGridGeometryCache();
-    if (payload.farm) state = normalizeState(payload.farm);
+    if (payload.farm) {
+      state = normalizeState(payload.farm);
+      landMembershipRevision += 1;
+      farmDerivedStatsCache = null;
+    }
     selectedCellIds = new Set();
     selectedCellId = null;
     scheduleVisibleLandRefresh(true);
