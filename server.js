@@ -110,6 +110,7 @@ let newsCache = { key: "", rows: [] };
 let storage = null;
 let dbPool = null;
 let deferredUsersPersistTimer = null;
+let deferredMarketPersistTimer = null;
 let marketVersion = 1;
 let leaderboardVersion = 1;
 let leaderboardCache = { version: 0, rows: [] };
@@ -244,13 +245,27 @@ function persistUsersToFile() {
   fs.writeFileSync(USERS_FILE, content ? `${content}\n` : "", "utf8");
 }
 
-function scheduleUsersPersistence() {
+function scheduleUsersPersistence(delayMs = 350) {
   clearTimeout(deferredUsersPersistTimer);
   deferredUsersPersistTimer = setTimeout(() => {
     deferredUsersPersistTimer = null;
     if (dbPool) persistState("users");
     else persistUsersToFile();
-  }, 0);
+  }, Math.max(0, delayMs));
+}
+
+function persistMarketToFile() {
+  if (!storage) return;
+  ensureDataFiles();
+  fs.writeFileSync(MARKET_FILE, JSON.stringify(storage.market || { land: {} }), "utf8");
+}
+
+function scheduleMarketPersistence(delayMs = 350) {
+  clearTimeout(deferredMarketPersistTimer);
+  deferredMarketPersistTimer = setTimeout(() => {
+    deferredMarketPersistTimer = null;
+    persistMarketToFile();
+  }, Math.max(0, delayMs));
 }
 
 function persistMarketPatch(upserts = {}, deleteIds = []) {
@@ -722,6 +737,21 @@ function writeUsers(users, { deferPersistence = false } = {}) {
   else if (dbPool) persistState("users");
   else persistUsersToFile();
   leaderboardVersion += 1;
+}
+
+function mutableFarmForLandTransaction(user) {
+  if (!user || typeof user !== "object") return defaultFarmState();
+  if (!user.farm || typeof user.farm !== "object" || Array.isArray(user.farm)) user.farm = defaultFarmState();
+  const farm = user.farm;
+  if (!farm.land || typeof farm.land !== "object" || Array.isArray(farm.land)) farm.land = {};
+  if (!farm.stats || typeof farm.stats !== "object" || Array.isArray(farm.stats)) farm.stats = {};
+  if (!farm.inventory || typeof farm.inventory !== "object" || Array.isArray(farm.inventory)) {
+    farm.inventory = { machinery: {}, elevators: {}, machineryBatches: [] };
+  }
+  if (!Number.isFinite(farm.coins)) farm.coins = defaultFarmState().coins;
+  if (!Number.isFinite(farm.currentDay)) farm.currentDay = 1;
+  if (!/^#[0-9a-f]{6}$/i.test(farm.color || "")) farm.color = "#35c982";
+  return farm;
 }
 
 function ensureAdminUser() {
@@ -1458,7 +1488,7 @@ function mapOverviewTerritories(bounds, zoom, playerId = "") {
   return payload;
 }
 
-function writeMarket(market, { upsertIds = null, deleteIds = null } = {}) {
+function writeMarket(market, { upsertIds = null, deleteIds = null, deferPersistence = false } = {}) {
   const patchMode = Array.isArray(upsertIds) || Array.isArray(deleteIds);
   const safeUpsertIds = (Array.isArray(upsertIds) ? upsertIds : []).filter(isPlayableLandId);
   const safeDeleteIds = (Array.isArray(deleteIds) ? deleteIds : []).filter(isPlayableLandId);
@@ -1482,9 +1512,10 @@ function writeMarket(market, { upsertIds = null, deleteIds = null } = {}) {
       persistState("market");
     }
   } else {
-    // In local-file mode storage is still initialized in memory; persist it explicitly.
-    ensureDataFiles();
-    fs.writeFileSync(MARKET_FILE, JSON.stringify(clean), "utf8");
+    // Bulk claims may arrive as several consecutive batches. Keep the in-memory market
+    // authoritative immediately, but coalesce expensive full-file rewrites until the burst ends.
+    if (deferPersistence) scheduleMarketPersistence();
+    else persistMarketToFile();
   }
 
   const indexPatched = patchMode && patchMarketSpatialIndex(safeUpsertIds, safeDeleteIds, clean, previousVersion);
@@ -2182,18 +2213,30 @@ function conditionalVersionPayload(req, payload, version) {
 function readBody(req) {
   return new Promise((resolve, reject) => {
     let body = "";
+    let tooLarge = false;
     req.on("data", (chunk) => {
+      if (tooLarge) return;
       body += chunk;
-      if (body.length > 25_000_000) {
-        reject(new Error("Request body is too large."));
-        req.destroy();
+      if (Buffer.byteLength(body, "utf8") > 25_000_000) {
+        // Do not destroy the upstream socket here. Nginx reports a destroyed upstream as 502,
+        // which hides the real reason from the browser. Drain the request and return JSON 413.
+        tooLarge = true;
+        body = "";
       }
     });
     req.on("end", () => {
+      if (tooLarge) {
+        const error = new Error("Request body is too large.");
+        error.statusCode = 413;
+        reject(error);
+        return;
+      }
       try {
         resolve(body ? JSON.parse(body) : {});
       } catch {
-        reject(new Error("Invalid JSON."));
+        const error = new Error("Invalid JSON.");
+        error.statusCode = 400;
+        reject(error);
       }
     });
     req.on("error", reject);
@@ -2464,7 +2507,11 @@ async function handleApi(req, res) {
         sendJson(res, 404, { error: "Гравця не знайдено." });
         return;
       }
-      const farm = sanitizeFarmState(user.farm);
+      // Claim is a hot path and can run for players with 90k+ cells. Re-sanitizing the whole
+      // farm twice per 1000-cell batch allocates tens of MB and can make Nginx lose upstream.
+      // Mutate only the already validated transaction fields; full sanitization still happens
+      // on login and explicit full-save routes.
+      const farm = mutableFarmForLandTransaction(user);
       const ownerName = user.username || "Гравець";
       const settings = readSettings();
       const now = new Date().toISOString();
@@ -2484,8 +2531,13 @@ async function handleApi(req, res) {
         }
         const existing = market.land[id];
         if (existing) {
-          if (existing.ownerId === session.userId) alreadyOwned.push(id);
-          else rejected.push(id);
+          if (existing.ownerId === session.userId) {
+            alreadyOwned.push(id);
+            const ownedPrice = Number(farm.land?.[id]?.price);
+            prices[id] = Number.isFinite(ownedPrice) ? ownedPrice : authoritativeLandPrice(id, market, settings);
+          } else {
+            rejected.push(id);
+          }
           return;
         }
         const price = authoritativeLandPrice(id, market, settings);
@@ -2504,8 +2556,10 @@ async function handleApi(req, res) {
         claimed.push(id);
       });
 
-      farm.coins -= charged;
+      farm.coins = Math.max(0, Math.floor(farm.coins - charged));
+      const requestedById = new Map(requestedCells.map((cell) => [cell.id, cell]));
       claimed.forEach((id) => {
+        const requested = requestedById.get(id) || {};
         farm.land[id] = {
           id,
           price: prices[id],
@@ -2514,17 +2568,20 @@ async function handleApi(req, res) {
           building: null,
           buildingId: null,
           buildingGroupId: null,
+          buildingBuiltAt: null,
           buildingLevel: 0,
           machinery: false,
-          machineryLevel: 0
+          machineryLevel: 0,
+          nickname: typeof requested.nickname === "string" ? requested.nickname.slice(0, 36) : ""
         };
       });
-      user.farm = sanitizeFarmState(farm);
+      user.farm = farm;
       user.updatedAt = now;
-      writeUsers(users);
-      if (claimed.length) writeMarket(market, { upsertIds: claimed });
+      // Reply first and persist the large users snapshot after the burst of claim batches.
+      // scheduleUsersPersistence() is debounced, so 4 x 1000-cell requests cause one write.
+      writeUsers(users, { deferPersistence: true });
+      if (claimed.length) writeMarket(market, { upsertIds: claimed, deferPersistence: true });
       if (claimed.length) {
-        const requestedById = new Map(requestedCells.map((cell) => [cell.id, cell]));
         const regions = [...new Set(claimed.map((id) => String(requestedById.get(id)?.region || "невідомий регіон").trim()).filter(Boolean))];
         const region = regions.length === 1 ? regions[0] : regions[0] || "невідомий регіон";
         appendNewsEvent({
@@ -3277,7 +3334,8 @@ async function handleApi(req, res) {
 
     sendJson(res, 404, { error: "Маршрут не знайдено." });
   } catch (error) {
-    sendJson(res, 500, { error: error.message || "Помилка сервера." });
+    const status = Number.isFinite(error?.statusCode) ? Math.max(400, Math.min(599, error.statusCode)) : 500;
+    sendJson(res, status, { error: error.message || "Помилка сервера." });
   }
 }
 

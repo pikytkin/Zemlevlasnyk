@@ -309,16 +309,39 @@ function replaceGameTerms(root = document.body) {
 }
 
 async function requestJson(url, options = {}) {
-  const response = await fetch(url, {
-    headers: { "content-type": "application/json" },
-    credentials: "same-origin",
-    ...options
-  });
+  let response;
+  try {
+    response = await fetch(url, {
+      headers: { "content-type": "application/json" },
+      credentials: "same-origin",
+      ...options
+    });
+  } catch (error) {
+    error.status = 0;
+    throw error;
+  }
+
   const contentType = response.headers.get("content-type") || "";
-  const payload = contentType.includes("application/json")
-    ? await response.json()
-    : { error: response.status === 413 ? "Дані завеликі для сервера. Зменште фото або збільшіть ліміт Nginx." : `Сервер повернув не JSON (${response.status}).` };
-  if (!response.ok) throw new Error(payload.error || "Помилка сервера.");
+  let payload = null;
+  if (contentType.includes("application/json")) {
+    try {
+      payload = await response.json();
+    } catch {
+      payload = { error: `Сервер повернув пошкоджений JSON (${response.status}).` };
+    }
+  } else {
+    payload = {
+      error: response.status === 413
+        ? "Дані завеликі для сервера. Зменште обсяг операції або збільшіть ліміт Nginx."
+        : `Сервер повернув не JSON (${response.status}).`
+    };
+  }
+  if (!response.ok) {
+    const error = new Error(payload?.error || "Помилка сервера.");
+    error.status = response.status;
+    error.url = url;
+    throw error;
+  }
   return payload;
 }
 
@@ -3152,6 +3175,50 @@ function hideLandOperationOverlay() {
   landOperationOverlay?.classList.add("is-hidden");
 }
 
+function mergeClaimResponses(first = {}, second = {}) {
+  return {
+    ok: true,
+    claimed: [...new Set([...(first.claimed || []), ...(second.claimed || [])])],
+    alreadyOwned: [...new Set([...(first.alreadyOwned || []), ...(second.alreadyOwned || [])])],
+    rejected: [...new Set([...(first.rejected || []), ...(second.rejected || [])])],
+    prices: { ...(first.prices || {}), ...(second.prices || {}) },
+    charged: (Number(first.charged) || 0) + (Number(second.charged) || 0),
+    coins: Number.isFinite(second.coins) ? second.coins : first.coins,
+    version: Number.isFinite(second.version) ? second.version : first.version,
+    resetAt: second.resetAt || first.resetAt || null
+  };
+}
+
+function isTransientClaimError(error) {
+  const status = Number(error?.status) || 0;
+  return status === 0 || status === 502 || status === 503 || status === 504;
+}
+
+async function claimLandBatch(batch) {
+  try {
+    return await requestJson("/api/claim", {
+      method: "POST",
+      body: JSON.stringify({
+        cells: batch.map((cell) => ({
+          id: cell.id,
+          price: cell.price,
+          region: cell.region,
+          nickname: `${cell.region || "Ділянка"}, ${String(cell.code || cell.id).slice(-5)}`
+        }))
+      })
+    });
+  } catch (error) {
+    // A gateway can return 502 after the Node process has already committed the first request.
+    // /api/claim is idempotent for the same owner, so retry smaller halves and treat
+    // alreadyOwned as a successful recovery instead of charging twice.
+    if (!isTransientClaimError(error) || batch.length <= 100) throw error;
+    const middle = Math.ceil(batch.length / 2);
+    const first = await claimLandBatch(batch.slice(0, middle));
+    const second = await claimLandBatch(batch.slice(middle));
+    return mergeClaimResponses(first, second);
+  }
+}
+
 async function buySelectedCell() {
   if (purchaseInProgress) return;
   const cells = freeSelectedCells();
@@ -3166,23 +3233,21 @@ async function buySelectedCell() {
   buyButton.disabled = true;
   showLandOperationOverlay(cells.length);
   try {
-    const claimedIds = new Set();
+    const ownedNowIds = new Set();
     const authoritativePrices = new Map();
     for (let index = 0; index < cells.length; index += CLAIM_BATCH_SIZE) {
       const batch = cells.slice(index, index + CLAIM_BATCH_SIZE);
-      const claim = await requestJson("/api/claim", {
-        method: "POST",
-        body: JSON.stringify({ cells: batch.map((cell) => ({ id: cell.id, price: cell.price, region: cell.region })) })
-      });
+      const claim = await claimLandBatch(batch);
       if (Number.isFinite(claim.version)) marketVersion = claim.version;
       if (Number.isFinite(claim.coins)) state.coins = claim.coins;
       Object.entries(claim.prices || {}).forEach(([id, price]) => authoritativePrices.set(id, Number(price)));
-      applyClaimedCellsToVisibleLand(claim.claimed || []);
+      const acceptedIds = [...new Set([...(claim.claimed || []), ...(claim.alreadyOwned || [])])];
+      applyClaimedCellsToVisibleLand(acceptedIds);
       refreshCanvasMapLayers();
-      (claim.claimed || []).forEach((id) => claimedIds.add(id));
+      acceptedIds.forEach((id) => ownedNowIds.add(id));
     }
-    marketOwnedCellCount += claimedIds.size;
-    const claimedCells = cells.filter((cell) => claimedIds.has(cell.id));
+    marketOwnedCellCount += ownedNowIds.size;
+    const claimedCells = cells.filter((cell) => ownedNowIds.has(cell.id));
     if (!claimedCells.length) {
       showGameMessage("Не вдалося купити: ці ділянки вже зайняті.");
       refreshVisibleCellLayers(cells.map((cell) => cell.id));
@@ -3195,6 +3260,9 @@ async function buySelectedCell() {
     cells.length = 0;
     cells.push(...claimedCells.map((cell) => ({ ...cell, price: authoritativePrices.get(cell.id) || cell.price })));
   } catch (error) {
+    // If a proxy lost the response after the server committed a batch, reconcile the viewport
+    // immediately so the UI does not keep showing those cells as free.
+    scheduleVisibleLandRefresh(20);
     showGameMessage(error.message);
     return;
   } finally {
@@ -3236,7 +3304,9 @@ async function buySelectedCell() {
     : `Куплено земельних ділянок: ${cells.length}.`);
   refreshVisibleCellLayers(cells.map((cell) => cell.id));
   scheduleVisibleLandRefresh(20);
-  queueSave();
+  // /api/claim already persisted the land delta. Only the compact stats/events/ledger
+  // changed locally, so avoid uploading the player's entire 90k+ cell farm again.
+  queueSave({ scope: "meta" });
   render();
 }
 
