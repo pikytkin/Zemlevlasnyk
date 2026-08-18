@@ -40,7 +40,7 @@ body.is-booting #gameScreen {
 }
 
 body.is-booting::after {
-  content: "Завантаження Землевласника...";
+  content: "Заванатаження даних земель";
   position: fixed;
   inset: 0;
   display: grid;

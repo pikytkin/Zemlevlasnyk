@@ -250,6 +250,7 @@ let landMembershipRevision = 0;
 let landClusterCacheMap = null;
 let landClusterCacheClusters = null;
 let farmDerivedStatsCache = null;
+let awaitingInitialOverviewLand = false;
 
 function defaultGameState() {
   return {
@@ -502,10 +503,10 @@ function startGame(nextPlayer, nextState) {
   landMembershipRevision += 1;
   farmDerivedStatsCache = null;
   adminSettingsLoaded = false;
+  awaitingInitialOverviewLand = true;
 
   authScreen.classList.add("is-hidden");
   gameScreen.classList.remove("is-hidden");
-  finishBoot();
   renderPlayerHeader();
   render();
   showGameMessage("Карту володінь завантажено.");
@@ -513,6 +514,10 @@ function startGame(nextPlayer, nextState) {
   if (window.location.pathname === "/admin") {
     if (player?.isAdmin) {
       openAdminPanel();
+      if (awaitingInitialOverviewLand) {
+        awaitingInitialOverviewLand = false;
+        finishBoot();
+      }
       return;
     } else {
       window.history.replaceState({}, "", "/");
@@ -520,6 +525,10 @@ function startGame(nextPlayer, nextState) {
       loadGameSettings().then(() => initMap().catch((error) => {
         console.error("initMap failed:", error);
         showGameMessage(error?.message || "Не вдалося завантажити карту.");
+        if (awaitingInitialOverviewLand) {
+          awaitingInitialOverviewLand = false;
+          finishBoot();
+        }
       }));
     }
     return;
@@ -527,6 +536,10 @@ function startGame(nextPlayer, nextState) {
   loadGameSettings().then(() => initMap().catch((error) => {
     console.error("initMap failed:", error);
     showGameMessage(error?.message || "Не вдалося завантажити карту.");
+    if (awaitingInitialOverviewLand) {
+      awaitingInitialOverviewLand = false;
+      finishBoot();
+    }
   }));
 }
 
@@ -1221,7 +1234,13 @@ async function refreshVisibleLand() {
       const cached = getChunkCache(cacheKey);
       const payload = cached || await requestJson(`/api/map/overview?z=${query.get("zoom")}&${query.toString()}`);
       if (requestId !== visibleLandRequestId || currentLandRenderMode() !== "overview") return;
-      if (payload?.notModified) return;
+      if (payload?.notModified) {
+        if (awaitingInitialOverviewLand) {
+          awaitingInitialOverviewLand = false;
+          finishBoot();
+        }
+        return;
+      }
       if (!cached) setChunkCache(cacheKey, payload);
       overviewTerritories = Array.isArray(payload.territories) ? payload.territories : [];
       if (payload.truncated) {
@@ -1230,6 +1249,10 @@ async function refreshVisibleLand() {
       if (Number.isFinite(payload.version)) marketVersion = payload.version;
       resetLandLayerForMode(mode);
       updateGrid();
+      if (awaitingInitialOverviewLand) {
+        awaitingInitialOverviewLand = false;
+        finishBoot();
+      }
       return;
     }
 
@@ -1274,6 +1297,10 @@ async function refreshVisibleLand() {
     updateGrid();
   } catch {
     visibleLandState = visibleLandState || { version: 0, owners: {}, cells: {} };
+    if (awaitingInitialOverviewLand && currentLandRenderMode() === "overview") {
+      awaitingInitialOverviewLand = false;
+      finishBoot();
+    }
   }
 }
 
@@ -4407,7 +4434,7 @@ function renderMapZoomEditor(mapSettings) {
               </select>
             </label>
             <label class="settings-checkbox"><input data-field="showFreeGrid" type="checkbox" ${preset.showFreeGrid ? "checked" : ""}><span>Сітка вільних комірок</span></label>
-            <label>Прозорість сітки <input data-field="freeGridOpacity" type="number" min="0" max="1" step="0.01" value="${preset.freeGridOpacity}"></label>
+            <label>Прозорість сітки <input data-field="freeGridOpacity" type="number" min="0" max="1" step="0.01" inputmode="decimal" value="${preset.freeGridOpacity}"></label>
             <label>Макс. комірок цього zoom <input data-field="maxVisibleCells" type="number" min="500" max="500000" step="1" inputmode="numeric" value="${preset.maxVisibleCells}"></label>
           </div>
         `).join("")}
@@ -4611,7 +4638,7 @@ function settingsFromForm(form) {
     mapZoom: Number(item.mapZoom),
     mode: item.mode === "detail" ? "detail" : "overview",
     showFreeGrid: Boolean(item.showFreeGrid),
-    freeGridOpacity: Number(item.freeGridOpacity) || 0,
+    freeGridOpacity: Math.max(0, Math.min(1, Number.parseFloat(item.freeGridOpacity) || 0)),
     maxVisibleCells: Math.max(500, Math.floor(Number(item.maxVisibleCells) || 500))
   }));
   next.assets = next.assets || {};
