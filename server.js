@@ -85,7 +85,7 @@ const DEFAULT_SETTINGS = {
       { id: "tractor-basic", icon: "🚜", name: "Трактор базовий", cost: 480, incomeBonusPercent: 1, durationDays: 100, photos: [] }
     ],
     elevatorItems: [
-      { id: "elevator-basic", icon: "🏗", mapEmoji: "🏗", name: "Елеватор базовий", cost: 1200, incomePerDay: 75, minCells: 3, maxOwnerLandPercent: 25, photos: [] }
+      { id: "elevator-basic", icon: "🏗", name: "Елеватор базовий", cost: 1200, incomePerDay: 75, minCells: 3, maxOwnerLandPercent: 25, photos: [] }
     ]
   },
   clusters: [
@@ -471,7 +471,6 @@ function sanitizeAssetItems(items, fallback) {
     minCells: intIn(item?.minCells, fallback[index]?.minCells || 1, 1, 1000000),
     maxOwnerLandPercent: numberIn(Number(item?.maxOwnerLandPercent), fallback[index]?.maxOwnerLandPercent ?? 25, 1, 100),
     serviceLifeExtensionDays: intIn(item?.serviceLifeExtensionDays, fallback[index]?.serviceLifeExtensionDays || 0, 0, 1000000),
-    mapEmoji: sanitizeMapEmoji(item?.mapEmoji || fallback[index]?.mapEmoji || (String(item?.icon || "").startsWith("data:image/") ? "🏗" : item?.icon) || fallback[index]?.icon || "•"),
     photos: sanitizeAssetPhotos(item?.photos || fallback[index]?.photos || [])
   }));
 }
@@ -483,10 +482,6 @@ function sanitizeAssetIcon(icon) {
     return storeAssetDataUrl(value);
   }
   return value.slice(0, 12);
-}
-
-function sanitizeMapEmoji(value) {
-  return String(value || "•").replace(/[<>]/g, "").slice(0, 8) || "•";
 }
 
 function sanitizeAssetPhotos(photos) {
@@ -1287,8 +1282,6 @@ function mapOverviewTerritories(bounds, zoom, playerId = "") {
   const preload = level <= 1 ? 36 : level === 2 ? 24 : 12;
 
   const owners = new Map();
-  const buildingGroups = new Set();
-  const buildings = [];
   const overviewSpan = overviewGroupSpanForLevel(level);
   forEachMarketEntryInBounds(market, bounds, preload, ([id, entry]) => {
     if (!isPlayableLandId(id)) return true;
@@ -1296,28 +1289,6 @@ function mapOverviewTerritories(bounds, zoom, playerId = "") {
     const ownerId = String(entry.ownerId || "");
     if (!ownerId) return true;
     const ownerProfile = ownerProfiles.get(ownerId);
-    const farmCell = ownerProfile?.farm?.land?.[id];
-    const buildingId = farmCell?.building || farmCell?.buildingId || null;
-    if (buildingId) {
-      const groupId = typeof farmCell.buildingGroupId === "string" && farmCell.buildingGroupId
-        ? farmCell.buildingGroupId
-        : `cell:${id}`;
-      const markerKey = `${ownerId}:${groupId}`;
-      const center = cellCenterFromGrid(q, r);
-      const centerInViewport = center.lng >= bounds.west && center.lng <= bounds.east
-        && center.lat >= bounds.south && center.lat <= bounds.north;
-      if (centerInViewport && !buildingGroups.has(markerKey)) {
-        buildingGroups.add(markerKey);
-        buildings.push({
-          key: markerKey,
-          groupId,
-          ownerId,
-          buildingId: String(buildingId).slice(0, 40),
-          lat: center.lat,
-          lng: center.lng
-        });
-      }
-    }
     const color = ownerProfile?.color || entry.ownerColor || "#ef7669";
     const key = `${ownerId}:${color}`;
     if (!owners.has(key)) {
@@ -1481,7 +1452,7 @@ function mapOverviewTerritories(bounds, zoom, playerId = "") {
     overviewTruncated = ownerComponentRows.some((row) => row.nextIndex < row.components.length);
   }
 
-  const payload = { version: marketVersion, zoom, level, territories, buildings, truncated: overviewTruncated };
+  const payload = { version: marketVersion, zoom, level, territories, truncated: overviewTruncated };
   mapOverviewCache.set(cacheKey, payload);
   if (mapOverviewCache.size > 36) mapOverviewCache.delete(mapOverviewCache.keys().next().value);
   return payload;
@@ -2011,7 +1982,6 @@ function newsRows() {
       buildings.push({
         company,
         name: item?.name || "Побудова",
-        emoji: item?.mapEmoji || item?.icon || "🏗",
         count: groupCells.length || 1,
         region,
         at: cell.buildingBuiltAt || cell.purchasedAt || now,
@@ -2063,7 +2033,7 @@ function newsRows() {
     .forEach((item) => rows.push({
       type: "building",
       title: "Нова побудова",
-      text: `${item.company} побудувала ${item.emoji} ${item.name} в районі ${item.region}, ${item.count} ділянок.`,
+      text: `${item.company} побудувала ${item.name} в районі ${item.region}, ${item.count} ділянок.`,
       at: item.at,
       tone: "build",
       targetCellId: item.cellId

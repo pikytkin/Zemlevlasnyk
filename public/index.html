@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Землевласник</title>
     <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css">
-    <link rel="stylesheet" href="/styles.css?v=20260818-building-emoji-perf">
+    <link rel="stylesheet" href="/styles.css?v=20260818-overview-selection-fix">
   </head>
   <body class="is-booting">
     <main class="app-shell">
@@ -90,10 +90,11 @@
               </div>
             </div>
             <div class="map-board" id="mapBoard" aria-label="Інтерактивна карта України">
+              <p class="game-message" id="gameMessage" role="status" aria-live="polite"></p>
               <div class="zoom-badge" id="zoomBadge">Zoom</div>
             </div>
             <div class="map-quick-actions">
-              <button class="secondary-action" id="clusterSelectButton" type="button">Виділити кластер</button>
+              <button class="secondary-action is-hidden" id="clusterSelectButton" type="button">Виділити кластер</button>
               <button class="secondary-action" id="newsButton" type="button">Новини</button>
             </div>
             <div class="selection-popup is-hidden" id="selectionPopup">
@@ -125,8 +126,6 @@
             <section><p class="eyebrow">Рейтинг</p><ol class="leaderboard" id="leaderboard"></ol></section>
           </aside>
         </div>
-        <p class="game-message" id="gameMessage" role="status" aria-live="polite"></p>
-
         <div class="modal is-hidden" id="profileModal" role="dialog" aria-modal="true" aria-label="Профіль учасника">
           <form class="modal-panel" id="profileForm">
             <button class="modal-close" type="button" data-close-modal>×</button>
@@ -250,6 +249,6 @@
       </section>
     </main>
     <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
-    <script src="/app.js?v=20260818-building-emoji-perf"></script>
+    <script src="/app.js?v=20260818-overview-selection-fix"></script>
   </body>
 </html>

@@ -433,14 +433,14 @@ select option {
 }
 
 .game-message {
-  position: fixed;
+  position: absolute;
   left: 50%;
-  top: 50%;
+  top: 10px;
   z-index: 5000;
-  width: min(560px, calc(100vw - 32px));
+  width: min(560px, calc(100% - 120px));
   min-height: 0;
   margin: 0;
-  padding: 16px 20px;
+  padding: 12px 18px;
   border: 1px solid rgba(240, 189, 74, 0.72);
   border-radius: 10px;
   background: rgba(9, 22, 18, 0.97);
@@ -448,18 +448,18 @@ select option {
   font-weight: var(--weight-ui);
   line-height: 1.4;
   text-align: center;
-  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.48);
+  box-shadow: 0 16px 44px rgba(0, 0, 0, 0.42);
   opacity: 0;
   visibility: hidden;
   pointer-events: none;
-  transform: translate(-50%, -50%) scale(0.96);
+  transform: translate(-50%, -8px) scale(0.98);
   transition: opacity 140ms ease, transform 140ms ease, visibility 140ms ease;
 }
 
 .game-message.is-visible {
   opacity: 1;
   visibility: visible;
-  transform: translate(-50%, -50%) scale(1);
+  transform: translate(-50%, 0) scale(1);
 }
 
 .game {
@@ -674,34 +674,6 @@ dd {
   inset: 0;
   pointer-events: none;
   z-index: 430;
-}
-
-.building-emoji-layer {
-  position: absolute;
-  inset: 0;
-  z-index: 500;
-  overflow: hidden;
-  pointer-events: none;
-}
-
-.building-map-emoji {
-  position: absolute;
-  left: 0;
-  top: 0;
-  display: block;
-  line-height: 1;
-  text-align: center;
-  user-select: none;
-  will-change: transform;
-  filter: drop-shadow(0 2px 1px rgba(0, 0, 0, 0.4)) drop-shadow(0 0 3px rgba(255, 255, 255, 0.68));
-}
-
-.building-map-emoji.is-overview {
-  font-size: clamp(28px, 3vw, 46px);
-}
-
-.building-map-emoji.is-detail {
-  font-size: clamp(22px, 2.2vw, 36px);
 }
 
 .zoom-badge {

@@ -59,7 +59,6 @@
         "incomePerDay": 0,
         "minCells": 1,
         "maxOwnerLandPercent": 25,
-        "mapEmoji": "data:ima",
         "photos": [
           "/assets/game/06d881ed12bc5608.webp",
           "/assets/game/54f1bc47917ac1e7.webp",
@@ -79,7 +78,6 @@
         "incomePerDay": 0,
         "minCells": 1,
         "maxOwnerLandPercent": 25,
-        "mapEmoji": "data:ima",
         "photos": [
           "/assets/game/cc2b5d38d9d51d10.webp",
           "/assets/game/3dd076670fa8cc91.webp",
@@ -99,7 +97,6 @@
         "incomePerDay": 0,
         "minCells": 1,
         "maxOwnerLandPercent": 25,
-        "mapEmoji": "data:ima",
         "photos": [
           "/assets/game/4cdc0cd8b8456fff.webp",
           "/assets/game/4884528df08909d1.webp",
@@ -117,7 +114,6 @@
         "incomePerDay": 0,
         "minCells": 1,
         "maxOwnerLandPercent": 25,
-        "mapEmoji": "data:ima",
         "photos": [
           "/assets/game/a15a93aaf39a092f.webp",
           "/assets/game/a15a93aaf39a092f.webp",
@@ -137,7 +133,6 @@
         "incomePerDay": 75,
         "minCells": 3,
         "maxOwnerLandPercent": 25,
-        "mapEmoji": "🏗",
         "photos": [
           "/assets/game/5dda1256ea7ca665.webp"
         ]
@@ -151,7 +146,6 @@
         "incomePerDay": 75,
         "minCells": 3,
         "maxOwnerLandPercent": 25,
-        "mapEmoji": "⚡",
         "photos": [
           "/assets/game/3fd95576c6eabca5.webp"
         ]

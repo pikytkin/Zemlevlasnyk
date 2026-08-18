@@ -196,7 +196,6 @@ let settlementGrid = new Map();
 let globalMarketState = { version: 0, resetAt: null, stats: { ownedCells: 0 } };
 let visibleLandState = { version: 0, owners: {}, cells: {} };
 let overviewTerritories = [];
-let overviewBuildingMarkers = [];
 const chunkCache = new Map();
 const CHUNK_CACHE_LIMIT = 220;
 let pendingSettingsImages = 0;
@@ -255,10 +254,6 @@ let landClusterCacheMap = null;
 let landClusterCacheClusters = null;
 let farmDerivedStatsCache = null;
 let awaitingInitialOverviewLand = false;
-let buildingEmojiLayer = null;
-let buildingEmojiFrame = null;
-let buildingOverviewAnchorCacheKey = "";
-let buildingOverviewAnchorCache = [];
 
 function defaultGameState() {
   return {
@@ -451,12 +446,11 @@ function applyGameSettings(settings) {
   if (!gameSettings.assets) {
     gameSettings.assets = {
       machineryItems: [{ id: "tractor-basic", icon: "🚜", name: "Трактор базовий", cost: 480, incomeBonusPercent: 1, durationDays: 100, photos: [] }],
-      elevatorItems: [{ id: "elevator-basic", icon: "🏗", mapEmoji: "🏗", name: "Елеватор базовий", cost: 1200, incomePerDay: 75, minCells: 3, maxOwnerLandPercent: 25, photos: [] }]
+      elevatorItems: [{ id: "elevator-basic", icon: "🏗", name: "Елеватор базовий", cost: 1200, incomePerDay: 75, minCells: 3, maxOwnerLandPercent: 25, photos: [] }]
     };
   }
   gameSettings.assets.elevatorItems = (gameSettings.assets.elevatorItems || []).map((item) => ({
     ...item,
-    mapEmoji: item.mapEmoji || (String(item.icon || "").startsWith("data:image/") ? "🏗" : item.icon) || "🏗",
     incomePerDay: Number.isFinite(Number(item.incomePerDay)) ? Number(item.incomePerDay) : 75,
     minCells: Number.isFinite(Number(item.minCells)) ? Math.max(1, Math.floor(Number(item.minCells))) : 1,
     maxOwnerLandPercent: Number.isFinite(Number(item.maxOwnerLandPercent)) ? Math.min(100, Math.max(1, Number(item.maxOwnerLandPercent))) : 25,
@@ -469,10 +463,8 @@ function applyGameSettings(settings) {
   if (state?.inventory) state.inventory = normalizeMachineryInventory(state.inventory, state.currentDay || 1);
   cellCache = new Map();
   landClusterCacheKey = "";
-  buildingOverviewAnchorCacheKey = "";
   farmDerivedStatsCache = null;
   invalidateChunkCache();
-  scheduleBuildingEmojiRender();
   if (!DRAW_GRID) {
     visibleCells = [];
     updateLandMapSource([]);
@@ -581,7 +573,6 @@ async function logoutPlayer() {
   clearTimeout(saveTimer);
   clearInterval(messagesTimer);
   stopActiveChatPolling();
-  clearBuildingEmojiMarkers();
   document.querySelectorAll(".modal").forEach((modal) => modal.classList.add("is-hidden"));
   hideSelectionPopup();
   hideCellInfoPanel();
@@ -594,7 +585,6 @@ async function logoutPlayer() {
 
 function queueSave({ invalidateDerived = true, scope = "full" } = {}) {
   if (invalidateDerived) farmDerivedStatsCache = null;
-  if (scope === "full") buildingOverviewAnchorCacheKey = "";
   const requestedScope = player?.isGuest ? "full" : scope;
   if (requestedScope === "full" || saveScope !== "full") saveScope = requestedScope;
   clearTimeout(saveTimer);
@@ -689,7 +679,6 @@ async function initMap() {
 
   await new Promise((resolve) => map.once("load", resolve));
   initLandMapLayers();
-  ensureBuildingEmojiLayer();
 
   await Promise.allSettled([loadUkraineBoundary(), loadPlayableGridMask()]);
   useFallbackSettlements();
@@ -714,7 +703,6 @@ async function initMap() {
   });
   map.on("move", () => {
     updateZoomBadge();
-    scheduleBuildingEmojiPosition();
   });
   const handleSettledMapChange = () => {
     scheduleMapSettled();
@@ -1078,7 +1066,6 @@ function updateLandMapSource(cells = visibleCells) {
   visibleCellById = new Map(nextCells.map((cell) => [cell.id, cell]));
   const source = map?.getSource?.("game-land");
   if (source) source.setData({ type: "FeatureCollection", features: nextCells.map(cellFeature) });
-  scheduleBuildingEmojiRender();
 }
 
 async function loadPlayableGridMask() {
@@ -1312,7 +1299,6 @@ async function refreshVisibleLand() {
       }
       if (!cached) setChunkCache(cacheKey, payload);
       overviewTerritories = Array.isArray(payload.territories) ? payload.territories : [];
-      overviewBuildingMarkers = Array.isArray(payload.buildings) ? payload.buildings : [];
       if (payload.truncated) {
         console.warn("Overview territory payload reached its configured cap.", { limit: gameSettings?.map?.overviewMaxTerritories, zoom: query.get("zoom") });
       }
@@ -1327,7 +1313,6 @@ async function refreshVisibleLand() {
     }
 
     overviewTerritories = [];
-    overviewBuildingMarkers = [];
     const query = mapViewportQuery();
     if (!query) return;
     const boundsKey = chunkCacheKey(4, query);
@@ -1834,6 +1819,13 @@ function setGridCanvasVisible(visible) {
 function updateZoomBadge() {
   if (!zoomBadge || !map) return;
   zoomBadge.textContent = `Zoom ${displayZoomForMapZoom(map.getZoom())}`;
+  const overview = isOverviewZoom();
+  if (clusterSelectButton) {
+    clusterSelectButton.disabled = overview;
+    clusterSelectButton.classList.toggle("is-hidden", overview);
+    clusterSelectButton.title = overview ? "Виділення доступне на Zoom 10/12" : "";
+  }
+  if (overview && clusterSelectionMode) setClusterSelectionMode(false);
 }
 
 function updateGridGpuLayer(cells = visibleCells) {
@@ -2135,173 +2127,6 @@ function isLowPowerDevice() {
     || (navigator.hardwareConcurrency && navigator.hardwareConcurrency <= 4);
 }
 
-function cellCenterLatLng(cell) {
-  if (Number.isFinite(cell.lat) && Number.isFinite(cell.lng)) return [cell.lat, cell.lng];
-  if (!Array.isArray(cell.boundary) || !cell.boundary.length) return null;
-  const total = cell.boundary.reduce((sum, point) => [sum[0] + point[0], sum[1] + point[1]], [0, 0]);
-  return [total[0] / cell.boundary.length, total[1] / cell.boundary.length];
-}
-
-function buildingMapEmojiForCell(ownership) {
-  const item = buildingItemForCell(ownership);
-  if (!item) return "";
-  return String(item.mapEmoji || item.icon || "🏗").startsWith("data:image/") ? "🏗" : String(item.mapEmoji || item.icon || "🏗").slice(0, 8);
-}
-
-function ensureBuildingEmojiLayer() {
-  if (buildingEmojiLayer || !mapBoard) return buildingEmojiLayer;
-  buildingEmojiLayer = document.createElement("div");
-  buildingEmojiLayer.className = "building-emoji-layer";
-  buildingEmojiLayer.setAttribute("aria-hidden", "true");
-  mapBoard.appendChild(buildingEmojiLayer);
-  return buildingEmojiLayer;
-}
-
-function clearBuildingEmojiMarkers() {
-  cancelAnimationFrame(buildingEmojiFrame);
-  buildingEmojiFrame = null;
-  if (buildingEmojiLayer) buildingEmojiLayer.replaceChildren();
-}
-
-function buildingOverviewAnchors() {
-  const assetSignature = (gameSettings?.assets?.elevatorItems || [])
-    .map((item) => `${item.id}:${item.mapEmoji || item.icon || ""}`)
-    .join("|");
-  const cacheKey = `${landMembershipRevision}:${state.stats?.buildings || 0}:${assetSignature}`;
-  if (buildingOverviewAnchorCacheKey === cacheKey) return buildingOverviewAnchorCache;
-  const seenGroups = new Set();
-  const anchors = [];
-  Object.entries(state.land || {}).forEach(([id, ownership]) => {
-    const item = buildingItemForCell(ownership);
-    if (!item || !isRegularHexId(id)) return;
-    const groupId = ownership.buildingGroupId || `cell:${id}`;
-    if (seenGroups.has(groupId)) return;
-    seenGroups.add(groupId);
-    const { q, r } = parseHexId(id);
-    const center = cellCenterFromGrid(q, r);
-    anchors.push({
-      key: `group:${groupId}`,
-      groupId,
-      lat: center.lat,
-      lng: center.lng,
-      emoji: buildingMapEmojiForCell(ownership),
-      name: item.name || "Побудова"
-    });
-  });
-  buildingOverviewAnchorCacheKey = cacheKey;
-  buildingOverviewAnchorCache = anchors;
-  return anchors;
-}
-
-function overviewTerritoryContainsPoint(territory, lat, lng) {
-  const box = territory?.bbox;
-  if (box && (lng < box.west || lng > box.east || lat < box.south || lat > box.north)) return false;
-  const ring = Array.isArray(territory?.polygon) ? territory.polygon : [];
-  if (ring.length < 3) return false;
-  return pointInPolygon([lng, lat], ring.map(([ringLat, ringLng]) => [ringLng, ringLat]));
-}
-
-function buildingEmojiPointsForView() {
-  if (!map || !player) return [];
-  if (!isOverviewZoom()) {
-    return visibleCells.flatMap((cell) => {
-      const localOwnership = state.land?.[cell.id];
-      const remoteOwnership = visibleLandOwner(cell.id);
-      const buildingId = localOwnership?.building || localOwnership?.buildingId || remoteOwnership?.b;
-      const item = buildingItemById(buildingId);
-      if (!item) return [];
-      const center = cellCenterLatLng(cell);
-      if (!center) return [];
-      const ownershipForEmoji = localOwnership || { building: buildingId, buildingId };
-      return [{
-        key: `cell:${cell.id}`,
-        lat: center[0],
-        lng: center[1],
-        emoji: buildingMapEmojiForCell(ownershipForEmoji),
-        name: item.name || "Побудова",
-        overview: false
-      }];
-    });
-  }
-
-  const bounds = map.getBounds();
-  const candidates = new Map();
-  (overviewBuildingMarkers || []).forEach((marker) => {
-    const item = buildingItemById(marker?.buildingId);
-    if (!item || !marker?.ownerId || !Number.isFinite(marker.lat) || !Number.isFinite(marker.lng)) return;
-    const groupId = marker.groupId || marker.key || `${marker.lat}:${marker.lng}:${marker.buildingId}`;
-    candidates.set(`${marker.ownerId}:${groupId}`, {
-      key: `server:${marker.ownerId}:${groupId}`,
-      ownerId: marker.ownerId,
-      groupId,
-      lat: marker.lat,
-      lng: marker.lng,
-      emoji: buildingMapEmojiForCell({ building: marker.buildingId, buildingId: marker.buildingId }),
-      name: item.name || "Побудова",
-      overview: true
-    });
-  });
-
-  // Keep the current player's just-built structures visible immediately, before the next server
-  // viewport response. Their anchor is the center of a real occupied building cell.
-  buildingOverviewAnchors().forEach((anchor) => {
-    candidates.set(`${player.id}:${anchor.groupId}`, { ...anchor, ownerId: player.id, overview: true });
-  });
-
-  return [...candidates.values()].filter((anchor) => {
-    if (anchor.lng < bounds.getWest() || anchor.lng > bounds.getEast() || anchor.lat < bounds.getSouth() || anchor.lat > bounds.getNorth()) return false;
-    // Never use a bounding-box/geometric center: the marker comes from a real building cell and
-    // is additionally verified against the exact aggregate polygon currently drawn on screen.
-    return (overviewTerritories || []).some((territory) => territory.ownerId === anchor.ownerId
-      && overviewTerritoryContainsPoint(territory, anchor.lat, anchor.lng));
-  });
-}
-
-function renderBuildingEmojiLayer() {
-  const layer = ensureBuildingEmojiLayer();
-  if (!layer || !map) return;
-  const points = buildingEmojiPointsForView();
-  const fragment = document.createDocumentFragment();
-  points.forEach((point) => {
-    const node = document.createElement("span");
-    node.className = `building-map-emoji${point.overview ? " is-overview" : " is-detail"}`;
-    node.textContent = point.emoji;
-    node.title = point.name;
-    node.dataset.lat = String(point.lat);
-    node.dataset.lng = String(point.lng);
-    fragment.appendChild(node);
-  });
-  layer.replaceChildren(fragment);
-  positionBuildingEmojiMarkers();
-}
-
-function scheduleBuildingEmojiRender() {
-  cancelAnimationFrame(buildingEmojiFrame);
-  buildingEmojiFrame = requestAnimationFrame(() => {
-    buildingEmojiFrame = null;
-    renderBuildingEmojiLayer();
-  });
-}
-
-function scheduleBuildingEmojiPosition() {
-  if (buildingEmojiFrame) return;
-  buildingEmojiFrame = requestAnimationFrame(() => {
-    buildingEmojiFrame = null;
-    positionBuildingEmojiMarkers();
-  });
-}
-
-function positionBuildingEmojiMarkers() {
-  if (!buildingEmojiLayer || !map) return;
-  buildingEmojiLayer.querySelectorAll(".building-map-emoji").forEach((node) => {
-    const lat = Number(node.dataset.lat);
-    const lng = Number(node.dataset.lng);
-    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
-    const point = map.latLngToContainerPoint([lat, lng]);
-    node.style.transform = `translate(${Math.round(point.x)}px, ${Math.round(point.y)}px) translate(-50%, -50%)`;
-  });
-}
-
 function updateSettlementLabelVisibility() {
   return;
 }
@@ -2317,6 +2142,14 @@ function isOverviewZoom() {
 function resetLandLayerForMode(nextMode) {
   if (landRenderMode === nextMode) return;
   landRenderMode = nextMode;
+  if (nextMode === "overview") {
+    selectedCellId = null;
+    selectedCellIds = new Set();
+    selectionPopupDismissed = false;
+    hideSelectionPopup();
+    hideCellInfoPanel();
+    if (clusterSelectionMode) setClusterSelectionMode(false);
+  }
   invalidateGridGeometryCache();
 }
 
@@ -2410,6 +2243,7 @@ function refreshVisibleCellLayers(cellIds = null) {
 
 function setupShiftSelection() {
   mapBoard.addEventListener("pointerdown", (event) => {
+    if (isOverviewZoom()) return;
     if ((!clusterSelectionMode && !event.shiftKey) || event.button !== 0) return;
     event.preventDefault();
     selectionDragWasEnabled = !!map?.dragging?.enabled?.();
@@ -2506,46 +2340,23 @@ function finishShiftSelection(event) {
 }
 
 function selectionCandidateCells() {
-  if (!isOverviewZoom()) return visibleCells;
-  return gridCellsInView(map.getBounds().pad(0.02));
+  // Zoom 5/7 contains aggregated ownership polygons, not canonical grid cells.
+  // Synthesizing q/r cells from the aggregate bounding box used to count land outside the
+  // playable-grid mask too, which is why selecting all of Ukraine could exceed the admin total.
+  return isOverviewZoom() ? [] : visibleCells;
 }
 
-function selectionCellsForDrag(drag) {
-  if (!drag || !map) return selectionCandidateCells();
-  if (!isOverviewZoom()) return selectionCandidateCells();
-  const left = Math.min(drag.startX, drag.endX);
-  const right = Math.max(drag.startX, drag.endX);
-  const top = Math.min(drag.startY, drag.endY);
-  const bottom = Math.max(drag.startY, drag.endY);
-  const northWest = map.containerPointToLatLng([left, top]);
-  const southEast = map.containerPointToLatLng([right, bottom]);
-  const minLat = Math.min(northWest.lat, southEast.lat);
-  const maxLat = Math.max(northWest.lat, southEast.lat);
-  const minLng = Math.min(northWest.lng, southEast.lng);
-  const maxLng = Math.max(northWest.lng, southEast.lng);
-  const startQ = Math.max(0, Math.floor((minLng - MAP_BOUNDS.west) / RECT_CELL_WIDTH_DEGREES) - 2);
-  const endQ = Math.min(Math.ceil((maxLng - MAP_BOUNDS.west) / RECT_CELL_WIDTH_DEGREES) + 2, Math.ceil((MAP_BOUNDS.east - MAP_BOUNDS.west) / RECT_CELL_WIDTH_DEGREES));
-  const startR = Math.max(0, Math.floor((MAP_BOUNDS.north - maxLat) / RECT_CELL_HEIGHT_DEGREES) - 2);
-  const endR = Math.min(Math.ceil((MAP_BOUNDS.north - minLat) / RECT_CELL_HEIGHT_DEGREES) + 2, Math.ceil((MAP_BOUNDS.north - MAP_BOUNDS.south) / RECT_CELL_HEIGHT_DEGREES));
-  const result = [];
-  for (let q = startQ; q <= endQ; q += 1) {
-    for (let r = startR; r <= endR; r += 1) {
-      const cell = makeVisibleCell(hexId(q, r));
-      if (!cell) continue;
-      if (cell.lat == null || cell.lng == null) continue;
-      result.push(cell);
-    }
-  }
-  return result.length ? result : selectionCandidateCells();
+function selectionCellsForDrag() {
+  return selectionCandidateCells();
 }
 
 function selectCellAtMapPoint(event) {
   if (suppressMapClick) return;
   if (!event?.latlng) return;
 
-  if (isOverviewZoom() && !event.originalEvent?.shiftKey && !clusterSelectionMode) {
+  if (isOverviewZoom()) {
     map.setView(event.latlng, detailZoomStart());
-    showGameMessage("Наблизьте карту, щоб обирати окремі земельні ділянки.");
+    showGameMessage("На Zoom 5/7 виділення вимкнено. Карта наближена до Zoom 10.");
     return;
   }
 
@@ -3879,7 +3690,7 @@ function cellTooltip(cell, owner) {
     const buildingItem = buildingItemForCell(state.land[cell.id]);
     if (buildingItem) {
       return `
-        <strong>${buildingMapEmojiForCell(state.land[cell.id])} ${escapeHtml(buildingItem.name)}</strong>
+        <strong>${escapeHtml(buildingItem.name)}</strong>
         <span>${settlementLine}</span>
         <em>Дохід побудови: ${money(breakdown.total)} / день</em>
       `;
@@ -3908,6 +3719,10 @@ function cellTooltip(cell, owner) {
 }
 
 function selectCell(cellId, event = null) {
+  if (isOverviewZoom()) {
+    showGameMessage("На Zoom 5/7 виділення земельних ділянок недоступне.");
+    return;
+  }
   if (clusterSelectionMode && !event?.shiftKey) {
     toggleCellSelection(cellId);
     return;
@@ -3979,6 +3794,13 @@ function hideCellInfoPanel() {
 }
 
 function setClusterSelectionMode(enabled) {
+  if (enabled && isOverviewZoom()) {
+    clusterSelectionMode = false;
+    clusterSelectButton?.classList.remove("is-active");
+    mapBoard?.classList.remove("is-cluster-mode");
+    showGameMessage("Виділення кластера доступне лише на Zoom 10/12.");
+    return;
+  }
   clusterSelectionMode = enabled;
   clusterSelectButton?.classList.toggle("is-active", enabled);
   mapBoard?.classList.toggle("is-cluster-mode", enabled);
@@ -3997,6 +3819,7 @@ function setClusterSelectionMode(enabled) {
 }
 
 function toggleCellSelection(cellId) {
+  if (isOverviewZoom()) return;
   const previousSelection = new Set(selectedCellIds);
   if (selectedCellIds.has(cellId)) {
     selectedCellIds.delete(cellId);
@@ -4020,7 +3843,7 @@ function selectedBuildingInfo() {
   if (buildingIds.size !== 1 || groupIds.size !== 1) return null;
   const item = buildingItemById([...buildingIds][0]);
   if (!item) return null;
-  return { item, emoji: buildingMapEmojiForCell(ownerships[0]), count: ids.length };
+  return { item, count: ids.length };
 }
 
 function renderSelectedCell() {
@@ -4078,7 +3901,7 @@ function renderSelectedCell() {
 
     const selectedBuilding = selectedBuildingInfo();
     cellTitle.textContent = selectedBuilding
-      ? `${selectedBuilding.emoji} ${selectedBuilding.item.name}`
+      ? selectedBuilding.item.name
       : `Виділено ${cells.length} земельних ділянок`;
     cellDetails.innerHTML = [
       ["Вільні", freeCells.length],
@@ -4103,7 +3926,7 @@ function renderSelectedCell() {
     machineryButton.disabled = !summary.canBuyMachinery;
     sellButton.disabled = !summary.ownedCount;
     showSelectionPopup(selectedBuilding
-      ? `${selectedBuilding.emoji} ${selectedBuilding.item.name}`
+      ? selectedBuilding.item.name
       : `Виділено ${cells.length} ділянок · ваші ${ownedCellsList.length} · вільні ${freeCells.length}`);
     if (cellInfoOpen) cellInfoPanel?.classList.remove("is-hidden");
     return;
@@ -4119,7 +3942,7 @@ function renderSelectedCell() {
 
   const selectedBuilding = owned ? buildingItemForCell(owned) : null;
   cellTitle.textContent = selectedBuilding
-    ? `${buildingMapEmojiForCell(owned)} ${selectedBuilding.name}`
+    ? selectedBuilding.name
     : owner === "player"
       ? owned.nickname || "Ваша ділянка"
       : owner === "rival"
@@ -4137,7 +3960,7 @@ function renderSelectedCell() {
     const breakdown = incomeBreakdown(cell, owned);
     const buildingItem = selectedBuilding;
     if (buildingItem) {
-      rows.push(["Побудова", `${escapeHtml(buildingMapEmojiForCell(owned))} ${escapeHtml(buildingItem.name)}`]);
+      rows.push(["Побудова", escapeHtml(buildingItem.name)]);
       rows.push(["Дохід побудови", `${money(buildingItem.incomePerDay || 0)} / день`]);
       rows.push(["Техніка", "не застосовується до комірки з побудовою"]);
     } else {
@@ -4813,7 +4636,6 @@ function renderAssetEditor(key, title, items, tip) {
                 <label>Мінімум комірок <input data-field="minCells" type="number" min="1" value="${item.minCells || 1}"></label>
                 <label>Макс. % землі власника <input data-field="maxOwnerLandPercent" type="number" min="1" max="100" step="0.01" value="${item.maxOwnerLandPercent || 25}"></label>
                 <label>Продовження техніки, днів <input data-field="serviceLifeExtensionDays" type="number" min="0" value="${item.serviceLifeExtensionDays || 0}"></label>
-                <label>Емодзі на карті (Zoom 5/7/10/12) <input data-field="mapEmoji" maxlength="8" value="${escapeHtml(item.mapEmoji || item.icon || "🏗")}"></label>
               `
               : `
                 <label>Бонус доходу землі, % <input data-field="incomeBonusPercent" type="number" min="0" step="0.01" value="${item.incomeBonusPercent || 0}"></label>
@@ -4965,7 +4787,6 @@ function normalizeAssetCard(item) {
   return {
     id: item.id || `asset-${Date.now()}`,
     icon: item.icon || "•",
-    mapEmoji: item.mapEmoji || item.icon || "•",
     name: item.name || "Актив",
     cost: Number(item.cost) || 0,
     incomeBonusPercent: Number(item.incomeBonusPercent) || 0,
@@ -5106,7 +4927,7 @@ function renderAdminBuildingSummary(title, items, inventoryMap) {
       <div class="admin-inventory-grid">
         ${rows.map(({ item, qty }) => `
           <label>
-            <span class="asset-icon"><span>${escapeHtml(item.mapEmoji || "🏗")}</span></span>
+            <span class="asset-icon">${renderIconPreview(item.icon)}</span>
             <span>${escapeHtml(item.name)}</span>
             <strong>${qty} шт.</strong>
           </label>
@@ -5301,7 +5122,7 @@ function defaultSettingsItem(listName) {
   const stamp = Date.now().toString(36);
   const items = {
     machineryItems: { id: `tractor-${stamp}`, icon: "🚜", name: "Новий трактор", cost: 500, incomeBonusPercent: 1, durationDays: 100, photos: [] },
-    elevatorItems: { id: `elevator-${stamp}`, icon: "🏗", mapEmoji: "🏗", name: "Нова побудова", cost: 1200, incomePerDay: 75, minCells: 3, maxOwnerLandPercent: 25, serviceLifeExtensionDays: 0, photos: [] },
+    elevatorItems: { id: `elevator-${stamp}`, icon: "🏗", name: "Нова побудова", cost: 1200, incomePerDay: 75, minCells: 3, maxOwnerLandPercent: 25, serviceLifeExtensionDays: 0, photos: [] },
     landLevels: { level: LAND_LEVELS.length + 1, name: "Новий рівень добрив", cost: 100, incomeBonusPercent: 10 },
     clusters: { min: 10, bonusPercent: 5 },
     stages: { title: "Новий етап", min: 0, text: "Опис етапу" },
