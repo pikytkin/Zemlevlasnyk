@@ -109,6 +109,7 @@ let previousNewsLeaders = { land: null, assets: null };
 let newsCache = { key: "", rows: [] };
 let storage = null;
 let dbPool = null;
+let deferredUsersPersistTimer = null;
 let marketVersion = 1;
 let leaderboardVersion = 1;
 let leaderboardCache = { version: 0, rows: [] };
@@ -234,6 +235,22 @@ function persistState(key) {
   ).catch((error) => {
     console.error(`Failed to persist ${key}:`, error.message);
   });
+}
+
+function persistUsersToFile() {
+  if (!storage) return;
+  ensureDataFiles();
+  const content = (Array.isArray(storage.users) ? storage.users : []).map((user) => JSON.stringify(user)).join("\n");
+  fs.writeFileSync(USERS_FILE, content ? `${content}\n` : "", "utf8");
+}
+
+function scheduleUsersPersistence() {
+  clearTimeout(deferredUsersPersistTimer);
+  deferredUsersPersistTimer = setTimeout(() => {
+    deferredUsersPersistTimer = null;
+    if (dbPool) persistState("users");
+    else persistUsersToFile();
+  }, 0);
 }
 
 function persistMarketPatch(upserts = {}, deleteIds = []) {
@@ -605,6 +622,81 @@ function sanitizeFarmState(state) {
   };
 }
 
+function sanitizeProfilePatch(profile, fallbackFarm = {}) {
+  const source = profile && typeof profile === "object" ? profile : {};
+  const fallback = fallbackFarm && typeof fallbackFarm === "object" ? fallbackFarm : {};
+  const logo = typeof source.logo === "string" ? source.logo : (typeof fallback.logo === "string" ? fallback.logo : "");
+  return {
+    companyName: typeof source.companyName === "string" ? source.companyName.trim().slice(0, 40) : String(fallback.companyName || "").slice(0, 40),
+    color: /^#[0-9a-f]{6}$/i.test(source.color || "") ? source.color : (/^#[0-9a-f]{6}$/i.test(fallback.color || "") ? fallback.color : "#35c982"),
+    logo: /^data:image\/(png|jpeg|webp|svg\+xml);base64,[a-z0-9+/=]+$/i.test(logo) && logo.length < 180000 ? logo : ""
+  };
+}
+
+function sanitizeFarmMetaPatch(meta, fallbackFarm = {}) {
+  const source = meta && typeof meta === "object" ? meta : {};
+  const fallback = fallbackFarm && typeof fallbackFarm === "object" ? fallbackFarm : defaultFarmState();
+  const stats = source.stats && typeof source.stats === "object" ? source.stats : (fallback.stats || {});
+  const inventory = source.inventory && typeof source.inventory === "object" ? source.inventory : (fallback.inventory || {});
+  const events = Array.isArray(source.events) ? source.events.slice(-30) : (Array.isArray(fallback.events) ? fallback.events.slice(-30) : []);
+  const ledger = Array.isArray(source.ledger) ? source.ledger.slice(-1000) : (Array.isArray(fallback.ledger) ? fallback.ledger.slice(-1000) : []);
+  return {
+    coins: Number.isFinite(source.coins) ? Math.max(0, Math.floor(source.coins)) : Math.max(0, Math.floor(Number(fallback.coins) || 0)),
+    currentDay: Number.isFinite(source.currentDay) ? Math.max(1, Math.floor(source.currentDay)) : Math.max(1, Math.floor(Number(fallback.currentDay) || 1)),
+    inventory: {
+      machinery: sanitizeInventoryMap(inventory.machinery),
+      elevators: sanitizeInventoryMap(inventory.elevators),
+      machineryBatches: sanitizeMachineryBatches(inventory.machineryBatches)
+    },
+    lastIncomeAt: typeof source.lastIncomeAt === "string" ? source.lastIncomeAt : (typeof fallback.lastIncomeAt === "string" ? fallback.lastIncomeAt : null),
+    stats: {
+      purchased: Number.isFinite(stats.purchased) ? Math.max(0, Math.floor(stats.purchased)) : 0,
+      upgraded: Number.isFinite(stats.upgraded) ? Math.max(0, Math.floor(stats.upgraded)) : 0,
+      buildings: Number.isFinite(stats.buildings) ? Math.max(0, Math.floor(stats.buildings)) : 0,
+      machinery: Number.isFinite(stats.machinery) ? Math.max(0, Math.floor(stats.machinery)) : 0,
+      earned: Number.isFinite(stats.earned) ? Math.max(0, Math.floor(stats.earned)) : 0
+    },
+    events: events.map((event) => ({
+      text: typeof event?.text === "string" ? event.text.slice(0, 140) : "",
+      at: typeof event?.at === "string" ? event.at : new Date().toISOString()
+    })).filter((event) => event.text),
+    ledger: ledger.map((item) => ({
+      type: typeof item?.type === "string" ? item.type.slice(0, 24) : "info",
+      text: typeof item?.text === "string" ? item.text.slice(0, 180) : "",
+      amount: Number.isFinite(item?.amount) ? Math.floor(item.amount) : 0,
+      balance: Number.isFinite(item?.balance) ? Math.floor(item.balance) : null,
+      landDelta: Number.isFinite(item?.landDelta) ? Math.floor(item.landDelta) : 0,
+      at: typeof item?.at === "string" ? item.at : new Date().toISOString()
+    })).filter((item) => item.text)
+  };
+}
+
+function rawUserCompanyName(user) {
+  const farm = user?.farm && typeof user.farm === "object" ? user.farm : {};
+  const name = String(farm.companyName || "").trim();
+  if (!name) return user?.username || "Гравець";
+  if (user?.username && (name === `${user.username} Земля` || name === `${user.username} Agro`)) return user.username;
+  return name.slice(0, 40);
+}
+
+function touchMapPresentationVersion() {
+  marketVersion += 1;
+  if (marketSpatialIndex) marketSpatialIndexVersion = marketVersion;
+  mapOverviewCache.clear();
+  mapCellsCache.clear();
+}
+
+function mapOwnerPresentationById() {
+  return new Map(readUsers().map((user) => {
+    const farm = user?.farm && typeof user.farm === "object" ? user.farm : {};
+    return [String(user.id || ""), {
+      name: rawUserCompanyName(user),
+      color: /^#[0-9a-f]{6}$/i.test(farm.color || "") ? farm.color : "#ef7669",
+      farm
+    }];
+  }).filter(([id]) => id));
+}
+
 function sanitizeInventoryMap(map) {
   if (!map || typeof map !== "object" || Array.isArray(map)) return {};
   return Object.fromEntries(Object.entries(map)
@@ -628,15 +720,12 @@ function readUsers() {
   return Array.isArray(storage?.users) ? storage.users : [];
 }
 
-function writeUsers(users) {
-  if (storage) {
-    storage.users = users;
-    persistState("users");
-  } else {
-    ensureDataFiles();
-    const content = users.map((user) => JSON.stringify(user)).join("\n");
-    fs.writeFileSync(USERS_FILE, content ? `${content}\n` : "", "utf8");
-  }
+function writeUsers(users, { deferPersistence = false } = {}) {
+  if (!storage) storage = readFileStorageSnapshot();
+  storage.users = users;
+  if (deferPersistence) scheduleUsersPersistence();
+  else if (dbPool) persistState("users");
+  else persistUsersToFile();
   leaderboardVersion += 1;
 }
 
@@ -1124,6 +1213,7 @@ function mapCellsInViewport(bounds, zoom = 13, limit = MAX_VIEWPORT_MARKET_CELLS
   const cached = mapCellsCache.get(cacheKey);
   if (cached) return cached;
   const market = readMarket();
+  const ownerProfiles = mapOwnerPresentationById();
   const owners = {};
   const cells = [];
   const span = chunkCellSpanForLevel(4);
@@ -1140,16 +1230,24 @@ function mapCellsInViewport(bounds, zoom = 13, limit = MAX_VIEWPORT_MARKET_CELLS
       return false;
     }
     if (!owners[ownerId]) {
+      const profile = ownerProfiles.get(ownerId);
       owners[ownerId] = {
-        color: entry.ownerColor || "#ef7669",
-        name: entry.ownerName || "Гравець"
+        color: profile?.color || entry.ownerColor || "#ef7669",
+        name: profile?.name || entry.ownerName || "Гравець"
       };
     }
-    cells.push({
+    const farmCell = ownerProfiles.get(ownerId)?.farm?.land?.[id];
+    const buildingId = farmCell?.building || farmCell?.buildingId || null;
+    const row = {
       id,
       o: ownerId,
       l: Number.isFinite(entry.level) ? entry.level : 1
-    });
+    };
+    if (buildingId) {
+      row.b = String(buildingId).slice(0, 40);
+      row.g = typeof farmCell.buildingGroupId === "string" ? farmCell.buildingGroupId.slice(0, 60) : "";
+    }
+    cells.push(row);
     return true;
   });
   const payload = { version: marketVersion, zoom, level: 4, owners, cells, truncated };
@@ -1184,17 +1282,43 @@ function mapOverviewTerritories(bounds, zoom, playerId = "") {
   const cached = mapOverviewCache.get(cacheKey);
   if (cached) return cached;
   const market = readMarket();
+  const ownerProfiles = mapOwnerPresentationById();
   const level = Math.min(3, chunkLevelForZoom(zoom));
   const preload = level <= 1 ? 36 : level === 2 ? 24 : 12;
 
   const owners = new Map();
+  const buildingGroups = new Set();
+  const buildings = [];
   const overviewSpan = overviewGroupSpanForLevel(level);
   forEachMarketEntryInBounds(market, bounds, preload, ([id, entry]) => {
     if (!isPlayableLandId(id)) return true;
     const { q, r } = parseCellGridId(id);
     const ownerId = String(entry.ownerId || "");
     if (!ownerId) return true;
-    const color = entry.ownerColor || "#ef7669";
+    const ownerProfile = ownerProfiles.get(ownerId);
+    const farmCell = ownerProfile?.farm?.land?.[id];
+    const buildingId = farmCell?.building || farmCell?.buildingId || null;
+    if (buildingId) {
+      const groupId = typeof farmCell.buildingGroupId === "string" && farmCell.buildingGroupId
+        ? farmCell.buildingGroupId
+        : `cell:${id}`;
+      const markerKey = `${ownerId}:${groupId}`;
+      const center = cellCenterFromGrid(q, r);
+      const centerInViewport = center.lng >= bounds.west && center.lng <= bounds.east
+        && center.lat >= bounds.south && center.lat <= bounds.north;
+      if (centerInViewport && !buildingGroups.has(markerKey)) {
+        buildingGroups.add(markerKey);
+        buildings.push({
+          key: markerKey,
+          groupId,
+          ownerId,
+          buildingId: String(buildingId).slice(0, 40),
+          lat: center.lat,
+          lng: center.lng
+        });
+      }
+    }
+    const color = ownerProfile?.color || entry.ownerColor || "#ef7669";
     const key = `${ownerId}:${color}`;
     if (!owners.has(key)) {
       owners.set(key, {
@@ -1357,7 +1481,7 @@ function mapOverviewTerritories(bounds, zoom, playerId = "") {
     overviewTruncated = ownerComponentRows.some((row) => row.nextIndex < row.components.length);
   }
 
-  const payload = { version: marketVersion, zoom, level, territories, truncated: overviewTruncated };
+  const payload = { version: marketVersion, zoom, level, territories, buildings, truncated: overviewTruncated };
   mapOverviewCache.set(cacheKey, payload);
   if (mapOverviewCache.size > 36) mapOverviewCache.delete(mapOverviewCache.keys().next().value);
   return payload;
@@ -2537,13 +2661,12 @@ async function handleApi(req, res) {
       }
 
       const body = await readBody(req);
-      let farm = sanitizeFarmState(body.farm);
-      const marketSnapshot = readMarket();
-      if (marketSnapshot.resetAt && farm.lastAdminResetAt !== marketSnapshot.resetAt) {
-        farm = { ...farm, land: {}, lastAdminResetAt: marketSnapshot.resetAt };
-      }
-
       if (session.isGuest) {
+        let farm = sanitizeFarmState(body.farm);
+        const marketSnapshot = readMarket();
+        if (marketSnapshot.resetAt && farm.lastAdminResetAt !== marketSnapshot.resetAt) {
+          farm = { ...farm, land: {}, lastAdminResetAt: marketSnapshot.resetAt };
+        }
         mergeFarmIntoMarket(farm, session.userId, farm.companyName || "Гостьова розвідка");
         sendJson(res, 200, { ok: true, farm, ...marketVersionPayload() });
         return;
@@ -2556,6 +2679,25 @@ async function handleApi(req, res) {
         return;
       }
 
+      // Profile editing must not upload/sanitize/reconcile the whole land object. A farm with
+      // 90k+ cells made a three-field profile save unnecessarily expensive.
+      if (body.profile && typeof body.profile === "object") {
+        const farm = user.farm && typeof user.farm === "object" ? user.farm : defaultFarmState();
+        const profile = sanitizeProfilePatch(body.profile, farm);
+        user.farm = { ...farm, ...profile };
+        user.updatedAt = new Date().toISOString();
+        writeUsers(users, { deferPersistence: true });
+        touchMapPresentationVersion();
+        sendJson(res, 200, { ok: true, profile, ...marketVersionPayload() });
+        return;
+      }
+
+      // Backward compatibility for older clients that still send the complete farm.
+      let farm = sanitizeFarmState(body.farm);
+      const marketSnapshot = readMarket();
+      if (marketSnapshot.resetAt && farm.lastAdminResetAt !== marketSnapshot.resetAt) {
+        farm = { ...farm, land: {}, lastAdminResetAt: marketSnapshot.resetAt };
+      }
       farm = reconcileFarmLandWithMarket(farm, sanitizeFarmState(user.farm), marketSnapshot, user.id);
       user.farm = farm;
       user.updatedAt = new Date().toISOString();
@@ -3101,6 +3243,31 @@ async function handleApi(req, res) {
       return;
     }
 
+    if (req.method === "POST" && req.url === "/api/save-meta") {
+      const session = getSession(req);
+      if (!session || session.isGuest) {
+        sendJson(res, 401, { error: "Спочатку увійдіть у гру." });
+        return;
+      }
+
+      const body = await readBody(req);
+      const users = readUsers();
+      const user = users.find((item) => item.id === session.userId);
+      if (!user) {
+        sendJson(res, 401, { error: "Користувача не знайдено." });
+        return;
+      }
+      const farm = user.farm && typeof user.farm === "object" ? user.farm : defaultFarmState();
+      const patch = sanitizeFarmMetaPatch(body.farm || body, farm);
+      user.farm = { ...farm, ...patch };
+      user.updatedAt = new Date().toISOString();
+      // Persistence is deferred until after the compact response is written. This keeps the
+      // income button and logout responsive even when the user owns tens of thousands of cells.
+      writeUsers(users, { deferPersistence: true });
+      sendJson(res, 200, { ok: true, coins: user.farm.coins, currentDay: user.farm.currentDay });
+      return;
+    }
+
     if (req.method === "POST" && req.url === "/api/save") {
       const session = getSession(req);
       if (!session) {
@@ -3117,7 +3284,7 @@ async function handleApi(req, res) {
 
       if (session.isGuest) {
         mergeFarmIntoMarket(farm, session.userId, farm.companyName || "Гостьова розвідка");
-        sendJson(res, 200, { ok: true, farm });
+        sendJson(res, 200, { ok: true, coins: farm.coins, currentDay: farm.currentDay });
         return;
       }
 
@@ -3131,8 +3298,10 @@ async function handleApi(req, res) {
       user.farm = farm;
       user.updatedAt = new Date().toISOString();
       writeUsers(users);
+      const mapVersionBeforeSave = marketVersion;
       mergeFarmIntoMarket(farm, user.id, userCompanyName(user, farm));
-      sendJson(res, 200, { ok: true, farm });
+      if (marketVersion === mapVersionBeforeSave) touchMapPresentationVersion();
+      sendJson(res, 200, { ok: true, coins: farm.coins, currentDay: farm.currentDay });
       return;
     }
 

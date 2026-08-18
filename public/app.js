@@ -176,6 +176,9 @@ let player = null;
 let state = defaultGameState();
 let selectedCellId = null;
 let saveTimer = null;
+let saveScope = null;
+let saveInFlight = null;
+let gameMessageTimer = null;
 let map = null;
 let mapTilesCanvas = null;
 let gridCanvas = null;
@@ -193,6 +196,7 @@ let settlementGrid = new Map();
 let globalMarketState = { version: 0, resetAt: null, stats: { ownedCells: 0 } };
 let visibleLandState = { version: 0, owners: {}, cells: {} };
 let overviewTerritories = [];
+let overviewBuildingMarkers = [];
 const chunkCache = new Map();
 const CHUNK_CACHE_LIMIT = 220;
 let pendingSettingsImages = 0;
@@ -251,6 +255,10 @@ let landClusterCacheMap = null;
 let landClusterCacheClusters = null;
 let farmDerivedStatsCache = null;
 let awaitingInitialOverviewLand = false;
+let buildingEmojiLayer = null;
+let buildingEmojiFrame = null;
+let buildingOverviewAnchorCacheKey = "";
+let buildingOverviewAnchorCache = [];
 
 function defaultGameState() {
   return {
@@ -280,7 +288,15 @@ function showAuthMessage(message) {
 }
 
 function showGameMessage(message) {
-  gameMessage.textContent = landLabel(message);
+  if (!gameMessage) return;
+  const text = landLabel(message);
+  clearTimeout(gameMessageTimer);
+  gameMessage.textContent = text;
+  gameMessage.classList.toggle("is-visible", Boolean(text));
+  if (!text) return;
+  gameMessageTimer = window.setTimeout(() => {
+    gameMessage.classList.remove("is-visible");
+  }, 4200);
 }
 
 function landLabel(value) {
@@ -453,8 +469,10 @@ function applyGameSettings(settings) {
   if (state?.inventory) state.inventory = normalizeMachineryInventory(state.inventory, state.currentDay || 1);
   cellCache = new Map();
   landClusterCacheKey = "";
+  buildingOverviewAnchorCacheKey = "";
   farmDerivedStatsCache = null;
   invalidateChunkCache();
+  scheduleBuildingEmojiRender();
   if (!DRAW_GRID) {
     visibleCells = [];
     updateLandMapSource([]);
@@ -504,6 +522,8 @@ function startGame(nextPlayer, nextState) {
   farmDerivedStatsCache = null;
   adminSettingsLoaded = false;
   awaitingInitialOverviewLand = true;
+  saveScope = null;
+  clearTimeout(saveTimer);
 
   authScreen.classList.add("is-hidden");
   gameScreen.classList.remove("is-hidden");
@@ -544,7 +564,8 @@ function startGame(nextPlayer, nextState) {
 }
 
 async function logoutPlayer() {
-  if (player) {
+  clearTimeout(saveTimer);
+  if (player && (saveScope || saveInFlight)) {
     await saveState();
   }
   try {
@@ -554,10 +575,13 @@ async function logoutPlayer() {
   }
   player = null;
   selectedCellId = null;
+  selectedCellIds = new Set();
   activeChatUserId = null;
+  saveScope = null;
   clearTimeout(saveTimer);
   clearInterval(messagesTimer);
   stopActiveChatPolling();
+  clearBuildingEmojiMarkers();
   document.querySelectorAll(".modal").forEach((modal) => modal.classList.add("is-hidden"));
   hideSelectionPopup();
   hideCellInfoPanel();
@@ -568,28 +592,70 @@ async function logoutPlayer() {
   showAuthMessage("Ви вийшли з акаунта.");
 }
 
-function queueSave() {
-  farmDerivedStatsCache = null;
+function queueSave({ invalidateDerived = true, scope = "full" } = {}) {
+  if (invalidateDerived) farmDerivedStatsCache = null;
+  if (scope === "full") buildingOverviewAnchorCacheKey = "";
+  const requestedScope = player?.isGuest ? "full" : scope;
+  if (requestedScope === "full" || saveScope !== "full") saveScope = requestedScope;
   clearTimeout(saveTimer);
-  saveTimer = setTimeout(saveState, 350);
+  saveTimer = setTimeout(() => saveState(), 350);
+}
+
+function compactFarmMeta() {
+  return {
+    coins: state.coins,
+    currentDay: state.currentDay,
+    inventory: state.inventory,
+    lastIncomeAt: state.lastIncomeAt,
+    stats: state.stats,
+    events: state.events,
+    ledger: state.ledger
+  };
 }
 
 async function saveState() {
   if (!player) return;
+  clearTimeout(saveTimer);
+  if (saveInFlight) {
+    let inFlightFailed = false;
+    try {
+      await saveInFlight;
+    } catch {
+      inFlightFailed = true;
+    }
+    if (!inFlightFailed && saveScope) return saveState();
+    return;
+  }
+  const scope = saveScope;
+  if (!scope) return;
+  saveScope = null;
 
-  try {
-    const payload = await requestJson("/api/save", {
+  saveInFlight = (async () => {
+    const metaOnly = scope === "meta" && !player.isGuest;
+    const payload = await requestJson(metaOnly ? "/api/save-meta" : "/api/save", {
       method: "POST",
-      body: JSON.stringify({ farm: state })
+      body: JSON.stringify(metaOnly ? { farm: compactFarmMeta() } : { farm: state })
     });
-    if (payload.farm && Number.isFinite(payload.farm.coins) && payload.farm.coins !== state.coins) {
-      state.coins = payload.farm.coins;
+    if (Number.isFinite(payload.coins) && payload.coins !== state.coins) {
+      state.coins = payload.coins;
       renderPlayerHeader();
     }
-    refreshLeaderboard();
-    refreshNews();
+  })();
+
+  let saveFailed = false;
+  try {
+    await saveInFlight;
   } catch (error) {
+    saveFailed = true;
+    saveScope = scope === "full" ? "full" : (saveScope || "meta");
     showGameMessage(error.message);
+  } finally {
+    saveInFlight = null;
+  }
+  if (saveScope && !saveFailed) return saveState();
+  if (saveFailed && player) {
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => saveState(), 1200);
   }
 }
 
@@ -623,6 +689,7 @@ async function initMap() {
 
   await new Promise((resolve) => map.once("load", resolve));
   initLandMapLayers();
+  ensureBuildingEmojiLayer();
 
   await Promise.allSettled([loadUkraineBoundary(), loadPlayableGridMask()]);
   useFallbackSettlements();
@@ -647,6 +714,7 @@ async function initMap() {
   });
   map.on("move", () => {
     updateZoomBadge();
+    scheduleBuildingEmojiPosition();
   });
   const handleSettledMapChange = () => {
     scheduleMapSettled();
@@ -1010,6 +1078,7 @@ function updateLandMapSource(cells = visibleCells) {
   visibleCellById = new Map(nextCells.map((cell) => [cell.id, cell]));
   const source = map?.getSource?.("game-land");
   if (source) source.setData({ type: "FeatureCollection", features: nextCells.map(cellFeature) });
+  scheduleBuildingEmojiRender();
 }
 
 async function loadPlayableGridMask() {
@@ -1243,6 +1312,7 @@ async function refreshVisibleLand() {
       }
       if (!cached) setChunkCache(cacheKey, payload);
       overviewTerritories = Array.isArray(payload.territories) ? payload.territories : [];
+      overviewBuildingMarkers = Array.isArray(payload.buildings) ? payload.buildings : [];
       if (payload.truncated) {
         console.warn("Overview territory payload reached its configured cap.", { limit: gameSettings?.map?.overviewMaxTerritories, zoom: query.get("zoom") });
       }
@@ -1257,6 +1327,7 @@ async function refreshVisibleLand() {
     }
 
     overviewTerritories = [];
+    overviewBuildingMarkers = [];
     const query = mapViewportQuery();
     if (!query) return;
     const boundsKey = chunkCacheKey(4, query);
@@ -1280,7 +1351,12 @@ async function refreshVisibleLand() {
     };
     (payload.cells || []).forEach((cell) => {
       if (!cell?.id) return;
-      visibleLandState.cells[cell.id] = { o: cell.o, l: cell.l || 1 };
+      visibleLandState.cells[cell.id] = {
+        o: cell.o,
+        l: cell.l || 1,
+        b: typeof cell.b === "string" ? cell.b : null,
+        g: typeof cell.g === "string" ? cell.g : null
+      };
       if (cell.o && payload.owners?.[cell.o] && !visibleLandState.owners[cell.o]) {
         visibleLandState.owners[cell.o] = payload.owners[cell.o];
       }
@@ -2070,6 +2146,160 @@ function buildingMapEmojiForCell(ownership) {
   const item = buildingItemForCell(ownership);
   if (!item) return "";
   return String(item.mapEmoji || item.icon || "🏗").startsWith("data:image/") ? "🏗" : String(item.mapEmoji || item.icon || "🏗").slice(0, 8);
+}
+
+function ensureBuildingEmojiLayer() {
+  if (buildingEmojiLayer || !mapBoard) return buildingEmojiLayer;
+  buildingEmojiLayer = document.createElement("div");
+  buildingEmojiLayer.className = "building-emoji-layer";
+  buildingEmojiLayer.setAttribute("aria-hidden", "true");
+  mapBoard.appendChild(buildingEmojiLayer);
+  return buildingEmojiLayer;
+}
+
+function clearBuildingEmojiMarkers() {
+  cancelAnimationFrame(buildingEmojiFrame);
+  buildingEmojiFrame = null;
+  if (buildingEmojiLayer) buildingEmojiLayer.replaceChildren();
+}
+
+function buildingOverviewAnchors() {
+  const assetSignature = (gameSettings?.assets?.elevatorItems || [])
+    .map((item) => `${item.id}:${item.mapEmoji || item.icon || ""}`)
+    .join("|");
+  const cacheKey = `${landMembershipRevision}:${state.stats?.buildings || 0}:${assetSignature}`;
+  if (buildingOverviewAnchorCacheKey === cacheKey) return buildingOverviewAnchorCache;
+  const seenGroups = new Set();
+  const anchors = [];
+  Object.entries(state.land || {}).forEach(([id, ownership]) => {
+    const item = buildingItemForCell(ownership);
+    if (!item || !isRegularHexId(id)) return;
+    const groupId = ownership.buildingGroupId || `cell:${id}`;
+    if (seenGroups.has(groupId)) return;
+    seenGroups.add(groupId);
+    const { q, r } = parseHexId(id);
+    const center = cellCenterFromGrid(q, r);
+    anchors.push({
+      key: `group:${groupId}`,
+      groupId,
+      lat: center.lat,
+      lng: center.lng,
+      emoji: buildingMapEmojiForCell(ownership),
+      name: item.name || "Побудова"
+    });
+  });
+  buildingOverviewAnchorCacheKey = cacheKey;
+  buildingOverviewAnchorCache = anchors;
+  return anchors;
+}
+
+function overviewTerritoryContainsPoint(territory, lat, lng) {
+  const box = territory?.bbox;
+  if (box && (lng < box.west || lng > box.east || lat < box.south || lat > box.north)) return false;
+  const ring = Array.isArray(territory?.polygon) ? territory.polygon : [];
+  if (ring.length < 3) return false;
+  return pointInPolygon([lng, lat], ring.map(([ringLat, ringLng]) => [ringLng, ringLat]));
+}
+
+function buildingEmojiPointsForView() {
+  if (!map || !player) return [];
+  if (!isOverviewZoom()) {
+    return visibleCells.flatMap((cell) => {
+      const localOwnership = state.land?.[cell.id];
+      const remoteOwnership = visibleLandOwner(cell.id);
+      const buildingId = localOwnership?.building || localOwnership?.buildingId || remoteOwnership?.b;
+      const item = buildingItemById(buildingId);
+      if (!item) return [];
+      const center = cellCenterLatLng(cell);
+      if (!center) return [];
+      const ownershipForEmoji = localOwnership || { building: buildingId, buildingId };
+      return [{
+        key: `cell:${cell.id}`,
+        lat: center[0],
+        lng: center[1],
+        emoji: buildingMapEmojiForCell(ownershipForEmoji),
+        name: item.name || "Побудова",
+        overview: false
+      }];
+    });
+  }
+
+  const bounds = map.getBounds();
+  const candidates = new Map();
+  (overviewBuildingMarkers || []).forEach((marker) => {
+    const item = buildingItemById(marker?.buildingId);
+    if (!item || !marker?.ownerId || !Number.isFinite(marker.lat) || !Number.isFinite(marker.lng)) return;
+    const groupId = marker.groupId || marker.key || `${marker.lat}:${marker.lng}:${marker.buildingId}`;
+    candidates.set(`${marker.ownerId}:${groupId}`, {
+      key: `server:${marker.ownerId}:${groupId}`,
+      ownerId: marker.ownerId,
+      groupId,
+      lat: marker.lat,
+      lng: marker.lng,
+      emoji: buildingMapEmojiForCell({ building: marker.buildingId, buildingId: marker.buildingId }),
+      name: item.name || "Побудова",
+      overview: true
+    });
+  });
+
+  // Keep the current player's just-built structures visible immediately, before the next server
+  // viewport response. Their anchor is the center of a real occupied building cell.
+  buildingOverviewAnchors().forEach((anchor) => {
+    candidates.set(`${player.id}:${anchor.groupId}`, { ...anchor, ownerId: player.id, overview: true });
+  });
+
+  return [...candidates.values()].filter((anchor) => {
+    if (anchor.lng < bounds.getWest() || anchor.lng > bounds.getEast() || anchor.lat < bounds.getSouth() || anchor.lat > bounds.getNorth()) return false;
+    // Never use a bounding-box/geometric center: the marker comes from a real building cell and
+    // is additionally verified against the exact aggregate polygon currently drawn on screen.
+    return (overviewTerritories || []).some((territory) => territory.ownerId === anchor.ownerId
+      && overviewTerritoryContainsPoint(territory, anchor.lat, anchor.lng));
+  });
+}
+
+function renderBuildingEmojiLayer() {
+  const layer = ensureBuildingEmojiLayer();
+  if (!layer || !map) return;
+  const points = buildingEmojiPointsForView();
+  const fragment = document.createDocumentFragment();
+  points.forEach((point) => {
+    const node = document.createElement("span");
+    node.className = `building-map-emoji${point.overview ? " is-overview" : " is-detail"}`;
+    node.textContent = point.emoji;
+    node.title = point.name;
+    node.dataset.lat = String(point.lat);
+    node.dataset.lng = String(point.lng);
+    fragment.appendChild(node);
+  });
+  layer.replaceChildren(fragment);
+  positionBuildingEmojiMarkers();
+}
+
+function scheduleBuildingEmojiRender() {
+  cancelAnimationFrame(buildingEmojiFrame);
+  buildingEmojiFrame = requestAnimationFrame(() => {
+    buildingEmojiFrame = null;
+    renderBuildingEmojiLayer();
+  });
+}
+
+function scheduleBuildingEmojiPosition() {
+  if (buildingEmojiFrame) return;
+  buildingEmojiFrame = requestAnimationFrame(() => {
+    buildingEmojiFrame = null;
+    positionBuildingEmojiMarkers();
+  });
+}
+
+function positionBuildingEmojiMarkers() {
+  if (!buildingEmojiLayer || !map) return;
+  buildingEmojiLayer.querySelectorAll(".building-map-emoji").forEach((node) => {
+    const lat = Number(node.dataset.lat);
+    const lng = Number(node.dataset.lng);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+    const point = map.latLngToContainerPoint([lat, lng]);
+    node.style.transform = `translate(${Math.round(point.x)}px, ${Math.round(point.y)}px) translate(-50%, -50%)`;
+  });
 }
 
 function updateSettlementLabelVisibility() {
@@ -3614,7 +3844,7 @@ async function sellSelectedLand() {
   render();
 }
 function collectIncome() {
-  const expired = expireMachinery(true);
+  const expiredBeforeIncome = expireMachinery(true);
   const income = totalDailyIncome();
   if (income <= 0) {
     showGameMessage("Спочатку купіть землю, щоб отримувати пасивний дохід.");
@@ -3625,12 +3855,20 @@ function collectIncome() {
   state.currentDay += 1;
   state.stats.earned += income;
   state.lastIncomeAt = new Date().toISOString();
+  const expiredAfterDayAdvance = expireMachinery(true);
   addEvent(`Отримано денний дохід: ${money(income)}.`);
   addLedger("income", `Денний дохід за день ${state.currentDay}`, income, 0);
   showGameMessage(`Дохід нараховано: ${money(income)}.`);
-  if (expired) addLedger("machinery-expired", "Списано техніку після завершення строку дії", 0, 0);
-  queueSave();
-  render();
+  if (expiredBeforeIncome || expiredAfterDayAdvance) {
+    addLedger("machinery-expired", "Списано техніку після завершення строку дії", 0, 0);
+    farmDerivedStatsCache = null;
+  }
+  // Income changes only compact farm metadata. Avoid serializing tens of thousands of land
+  // cells and avoid invalidating cached farm totals on every click.
+  queueSave({ invalidateDerived: Boolean(expiredBeforeIncome || expiredAfterDayAdvance), scope: "meta" });
+  renderMetrics();
+  renderLeaderboard();
+  if (expiredBeforeIncome || expiredAfterDayAdvance) renderSelectedCell();
 }
 
 function cellTooltip(cell, owner) {
@@ -3772,6 +4010,19 @@ function toggleCellSelection(cellId) {
   render();
 }
 
+function selectedBuildingInfo() {
+  const ids = selectedCellIds.size ? [...selectedCellIds] : (selectedCellId ? [selectedCellId] : []);
+  if (!ids.length) return null;
+  const ownerships = ids.map((id) => state.land?.[id]);
+  if (ownerships.some((ownership) => !ownership || (!ownership.building && !ownership.buildingId))) return null;
+  const buildingIds = new Set(ownerships.map((ownership) => ownership.building || ownership.buildingId));
+  const groupIds = new Set(ownerships.map((ownership, index) => ownership.buildingGroupId || `cell:${ids[index]}`));
+  if (buildingIds.size !== 1 || groupIds.size !== 1) return null;
+  const item = buildingItemById([...buildingIds][0]);
+  if (!item) return null;
+  return { item, emoji: buildingMapEmojiForCell(ownerships[0]), count: ids.length };
+}
+
 function renderSelectedCell() {
   if (!selectedCellId) {
     hideSelectionPopup();
@@ -3825,7 +4076,10 @@ function renderSelectedCell() {
     const totalPrice = summary.totalPrice;
     const totalIncome = summary.totalIncome;
 
-    cellTitle.textContent = `Виділено ${cells.length} земельних ділянок`;
+    const selectedBuilding = selectedBuildingInfo();
+    cellTitle.textContent = selectedBuilding
+      ? `${selectedBuilding.emoji} ${selectedBuilding.item.name}`
+      : `Виділено ${cells.length} земельних ділянок`;
     cellDetails.innerHTML = [
       ["Вільні", freeCells.length],
       ["Ваші", ownedCellsList.length],
@@ -3848,7 +4102,9 @@ function renderSelectedCell() {
     buildingButton.disabled = !(summary.canBuild || builtCount);
     machineryButton.disabled = !summary.canBuyMachinery;
     sellButton.disabled = !summary.ownedCount;
-    showSelectionPopup(`Виділено ${cells.length} ділянок · ваші ${ownedCellsList.length} · вільні ${freeCells.length}`);
+    showSelectionPopup(selectedBuilding
+      ? `${selectedBuilding.emoji} ${selectedBuilding.item.name}`
+      : `Виділено ${cells.length} ділянок · ваші ${ownedCellsList.length} · вільні ${freeCells.length}`);
     if (cellInfoOpen) cellInfoPanel?.classList.remove("is-hidden");
     return;
   }
@@ -3861,11 +4117,14 @@ function renderSelectedCell() {
   const pressure = nearbyOwnedPressure(selectedCellId);
   const neighborGrowthPercent = Number.isFinite(gameSettings?.economy?.nearbyPriceGrowthPercent) ? gameSettings.economy.nearbyPriceGrowthPercent : 8;
 
-  cellTitle.textContent = owner === "player"
-    ? owned.nickname || "Ваша ділянка"
-    : owner === "rival"
-      ? rivalName(selectedCellId)
-      : "Вільна земля";
+  const selectedBuilding = owned ? buildingItemForCell(owned) : null;
+  cellTitle.textContent = selectedBuilding
+    ? `${buildingMapEmojiForCell(owned)} ${selectedBuilding.name}`
+    : owner === "player"
+      ? owned.nickname || "Ваша ділянка"
+      : owner === "rival"
+        ? rivalName(selectedCellId)
+        : "Вільна земля";
 
   const rows = [
     ["ID ділянки", cell.code],
@@ -3876,7 +4135,7 @@ function renderSelectedCell() {
 
   if (owned) {
     const breakdown = incomeBreakdown(cell, owned);
-    const buildingItem = buildingItemForCell(owned);
+    const buildingItem = selectedBuilding;
     if (buildingItem) {
       rows.push(["Побудова", `${escapeHtml(buildingMapEmojiForCell(owned))} ${escapeHtml(buildingItem.name)}`]);
       rows.push(["Дохід побудови", `${money(buildingItem.incomePerDay || 0)} / день`]);
@@ -3927,7 +4186,7 @@ function renderMetrics() {
   ownedMetric.textContent = ownedCount;
   largestClusterMetric.textContent = clusters[0] ? clusters[0].length : 0;
   incomeMetric.textContent = money(income);
-  assetMetric.textContent = `${inventoryCount("machinery")} тех. · ${money(buildingDailyIncome())}/день побуд. · ${money(value)}`;
+  assetMetric.innerHTML = `<span class="asset-metric-line">${inventoryCount("machinery")} тех. · ${money(buildingDailyIncome())}/день побуд.</span><span class="asset-metric-line">${money(value)}</span>`;
   stageTitle.textContent = currentStage.title;
   stageText.textContent = nextStage
     ? `${currentStage.text} До наступного етапу: ${nextStage.min - ownedCount} зем.`
@@ -4309,22 +4568,32 @@ function inventoryCount(kind) {
 async function saveProfile(event) {
   event.preventDefault();
   const restoreButton = setSavingButton(event.submitter, true);
-  state.companyName = profileCompanyName.value.trim() || state.companyName;
-  state.color = profileColor.value;
+  const profile = {
+    companyName: profileCompanyName.value.trim() || state.companyName,
+    color: profileColor.value,
+    logo: state.logo || ""
+  };
+  state.companyName = profile.companyName;
+  state.color = profile.color;
   renderPlayerHeader();
 
   try {
     const payload = await requestJson("/api/profile", {
       method: "POST",
-      body: JSON.stringify({ farm: state })
+      body: JSON.stringify(player?.isGuest ? { farm: state } : { profile })
     });
-    state = normalizeState(payload.farm || state);
-    landMembershipRevision += 1;
-    farmDerivedStatsCache = null;
+    if (payload.profile) {
+      state.companyName = payload.profile.companyName || state.companyName;
+      state.color = payload.profile.color || state.color;
+      state.logo = typeof payload.profile.logo === "string" ? payload.profile.logo : state.logo;
+    } else if (payload.farm) {
+      state = normalizeState(payload.farm);
+    }
     if (Number.isFinite(payload.version)) marketVersion = payload.version;
     invalidateVisibleLandCache();
+    invalidateGridGeometryCache();
     scheduleVisibleLandRefresh(20);
-    refreshVisibleCellLayers(Object.keys(state.land));
+    updateLandMapSource(visibleCells);
     renderHeader();
     renderSelectedCell();
     closeModals();
@@ -4387,7 +4656,7 @@ function renderAdminSettings(settings) {
     ["claimBatchSize", "Пакет купівлі", economy.claimBatchSize, "economy", "number"],
     ["elevatorMinSelectedCells", "Ділянок для побудови", upgrades.elevatorMinSelectedCells, "upgrades", "number"],
   ];
-  adminSettingsFields.innerHTML = fields.map(([name, label, value, group, type = "number"]) => {
+  const generalFieldsHtml = fields.map(([name, label, value, group, type = "number"]) => {
     const max = name === "maxVisibleCells" || name === "maxOwnedCellsPerViewport" ? MAX_CONFIGURED_VISIBLE_CELLS
       : name === "overviewMaxTerritories" ? 30000
       : null;
@@ -4395,11 +4664,18 @@ function renderAdminSettings(settings) {
     return `
       <label title="${escapeHtml(tips[`${group}.${name}`] || "")}">${label}<input name="${group}.${name}" type="${type}" step="0.01" ${min != null ? `min="${min}"` : ""} ${max != null ? `max="${max}"` : ""} value="${escapeHtml(value == null ? "" : value)}"></label>
     `;
-  }).join("") + `
-    <label class="settings-checkbox" title="Діагностика продуктивності: вимкніть, щоб бачити тільки карту без шару комірок.">
-      <input name="economy.drawGrid" type="checkbox" ${economy.drawGrid !== false ? "checked" : ""}>
-      <span>Малювати сітку</span>
-    </label>
+  }).join("");
+  adminSettingsFields.innerHTML = `
+    <details class="settings-section settings-disclosure wide-field">
+      <summary class="settings-disclosure-summary"><span>Налаштування гри</span><small>Основна економіка та ліміти</small></summary>
+      <div class="settings-section-body settings-general-grid">
+        ${generalFieldsHtml}
+        <label class="settings-checkbox" title="Діагностика продуктивності: вимкніть, щоб бачити тільки карту без шару комірок.">
+          <input name="economy.drawGrid" type="checkbox" ${economy.drawGrid !== false ? "checked" : ""}>
+          <span>Малювати сітку</span>
+        </label>
+      </div>
+    </details>
     ${renderMapZoomEditor(settings?.map || {})}
     ${renderGridDensityEditor(settings?.map || {})}
     ${renderLandLevelEditor(settings?.upgrades?.landLevels || LAND_LEVELS)}
@@ -4414,33 +4690,31 @@ function renderAdminSettings(settings) {
 function renderMapZoomEditor(mapSettings) {
   const presets = normalizeMapZoomPresets(mapSettings);
   return `
-    <section class="settings-section wide-field" data-list="mapZoomPresets">
-      <div class="settings-section-head">
-        <div>
-          <h5>Масштаби карти</h5>
-          <p class="muted-text">Display Zoom — число у бейджі. MapLibre zoom — реальний масштаб рушія. Режим detail малює окремі комірки.</p>
+    <details class="settings-section settings-disclosure wide-field" data-list="mapZoomPresets">
+      <summary class="settings-disclosure-summary"><span>Масштаби карти</span><small>Zoom 5/7 — агрегація, Zoom 10/12 — комірки</small></summary>
+      <div class="settings-section-body">
+        <p class="muted-text">Display Zoom — число у бейджі. MapLibre zoom — реальний масштаб рушія. Режим detail малює окремі комірки.</p>
+        <div class="settings-list compact-list">
+          ${presets.map((preset) => `
+            <div class="settings-card compact-card map-zoom-settings-card" data-item="mapZoomPresets">
+              <input data-field="displayZoom" type="hidden" value="${preset.displayZoom}">
+              <strong>Zoom ${preset.displayZoom}</strong>
+              <label>MapLibre zoom <input data-field="mapZoom" type="number" min="3" max="16" step="1" inputmode="numeric" value="${preset.mapZoom}"></label>
+              <label>Режим
+                <select data-field="mode">
+                  <option value="overview" ${preset.mode === "overview" ? "selected" : ""}>Огляд (агрегація)</option>
+                  <option value="detail" ${preset.mode === "detail" ? "selected" : ""}>Детальні комірки</option>
+                </select>
+              </label>
+              <label class="settings-checkbox"><input data-field="showFreeGrid" type="checkbox" ${preset.showFreeGrid ? "checked" : ""}><span>Сітка вільних комірок</span></label>
+              <label>Прозорість сітки <input data-field="freeGridOpacity" type="number" min="0" max="1" step="0.01" inputmode="decimal" value="${preset.freeGridOpacity}"></label>
+              <label>Макс. комірок цього zoom <input data-field="maxVisibleCells" type="number" min="500" max="500000" step="1" inputmode="numeric" value="${preset.maxVisibleCells}"></label>
+            </div>
+          `).join("")}
         </div>
+        <p class="muted-text">Рекомендація: Zoom 5/7 — overview без вільної сітки; Zoom 10/12 — detail. Реальні MapLibre zoom мають зростати зліва направо.</p>
       </div>
-      <div class="settings-list compact-list">
-        ${presets.map((preset) => `
-          <div class="settings-card compact-card map-zoom-settings-card" data-item="mapZoomPresets">
-            <input data-field="displayZoom" type="hidden" value="${preset.displayZoom}">
-            <strong>Zoom ${preset.displayZoom}</strong>
-            <label>MapLibre zoom <input data-field="mapZoom" type="number" min="3" max="16" step="1" inputmode="numeric" value="${preset.mapZoom}"></label>
-            <label>Режим
-              <select data-field="mode">
-                <option value="overview" ${preset.mode === "overview" ? "selected" : ""}>Огляд (агрегація)</option>
-                <option value="detail" ${preset.mode === "detail" ? "selected" : ""}>Детальні комірки</option>
-              </select>
-            </label>
-            <label class="settings-checkbox"><input data-field="showFreeGrid" type="checkbox" ${preset.showFreeGrid ? "checked" : ""}><span>Сітка вільних комірок</span></label>
-            <label>Прозорість сітки <input data-field="freeGridOpacity" type="number" min="0" max="1" step="0.01" inputmode="decimal" value="${preset.freeGridOpacity}"></label>
-            <label>Макс. комірок цього zoom <input data-field="maxVisibleCells" type="number" min="500" max="500000" step="1" inputmode="numeric" value="${preset.maxVisibleCells}"></label>
-          </div>
-        `).join("")}
-      </div>
-      <p class="muted-text">Рекомендація: Zoom 5/7 — overview без вільної сітки; Zoom 10/12 — detail. Реальні MapLibre zoom мають зростати зліва направо.</p>
-    </section>
+    </details>
   `;
 }
 
@@ -4449,27 +4723,28 @@ function renderGridDensityEditor(mapSettings) {
   const width = Number(mapSettings.cellWidthDegrees) || 0.018;
   const height = Number(mapSettings.cellHeightDegrees) || 0.012;
   return `
-    <section class="settings-section wide-field grid-density-settings">
-      <div class="settings-section-head"><h5>Кількість комірок на карті України</h5></div>
-      <div class="settings-card compact-card">
-        <div><span class="muted-text">Поточна фактична кількість</span><strong>${actual.toLocaleString("uk-UA")}</strong></div>
-        <label>Цільова кількість <input data-grid-target type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="off" value="${actual}"></label>
-        <div><span class="muted-text">Розмір комірки</span><strong>${width.toFixed(6)}° × ${height.toFixed(6)}°</strong></div>
-        <button class="danger-action" type="button" data-rebuild-grid>Перебудувати сітку</button>
+    <details class="settings-section settings-disclosure wide-field grid-density-settings">
+      <summary class="settings-disclosure-summary"><span>Кількість комірок на карті України</span><small>${actual.toLocaleString("uk-UA")} комірок</small></summary>
+      <div class="settings-section-body">
+        <div class="settings-card compact-card">
+          <div><span class="muted-text">Поточна фактична кількість</span><strong>${actual.toLocaleString("uk-UA")}</strong></div>
+          <label>Цільова кількість <input data-grid-target type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="off" value="${actual}"></label>
+          <div><span class="muted-text">Розмір комірки</span><strong>${width.toFixed(6)}° × ${height.toFixed(6)}°</strong></div>
+          <button class="danger-action" type="button" data-rebuild-grid>Перебудувати сітку</button>
+        </div>
+        <p class="muted-text">Перебудова не додає постійних обчислень у кадр, але більша кількість комірок збільшує навантаження на detail-zoom. Через зміну ID/геометрії ця операція обнуляє всю землю всіх гравців.</p>
       </div>
-      <p class="muted-text">Перебудова не додає постійних обчислень у кадр, але більша кількість комірок збільшує навантаження на detail-zoom. Через зміну ID/геометрії ця операція обнуляє всю землю всіх гравців.</p>
-    </section>
+    </details>
   `;
 }
 
 function renderLandLevelEditor(items) {
   return `
-    <section class="settings-section wide-field" data-list="landLevels" title="Рівні інвестицій у добрива: рівень, назва, вартість і % впливу на дохід.">
-      <div class="settings-section-head">
-        <h5>Інвестиції в добрива</h5>
-        <button class="secondary-action" type="button" data-add-item="landLevels">Додати</button>
-      </div>
-      <div class="settings-list compact-list">
+    <details class="settings-section settings-disclosure wide-field" data-list="landLevels" title="Рівні інвестицій у добрива: рівень, назва, вартість і % впливу на дохід.">
+      <summary class="settings-disclosure-summary"><span>Інвестиції в добрива</span><small>${items.length} рівнів</small></summary>
+      <div class="settings-section-body">
+        <div class="settings-section-head"><span></span><button class="secondary-action" type="button" data-add-item="landLevels">Додати</button></div>
+        <div class="settings-list compact-list">
         ${items.map((item) => `
           <div class="settings-card compact-card" data-item="landLevels">
             <label>Рівень <input data-field="level" type="number" min="1" value="${item.level || 1}"></label>
@@ -4479,9 +4754,10 @@ function renderLandLevelEditor(items) {
             <button class="danger-action" type="button" data-remove-item>Видалити</button>
           </div>
         `).join("")}
+        </div>
+        <button class="primary-action settings-section-save" type="submit">Зберегти добрива</button>
       </div>
-      <button class="primary-action settings-section-save" type="submit">Зберегти добрива</button>
-    </section>
+    </details>
   `;
 }
 
@@ -4518,12 +4794,11 @@ function renderAssetGallery(photos) {
 function renderAssetEditor(key, title, items, tip) {
   const isBuilding = key === "elevatorItems";
   return `
-    <section class="settings-section wide-field" data-list="${key}" title="${escapeHtml(tip || "")}">
-      <div class="settings-section-head">
-        <h5>${title}</h5>
-        <button class="secondary-action" type="button" data-add-item="${key}">Додати</button>
-      </div>
-      <div class="settings-list">
+    <details class="settings-section settings-disclosure wide-field" data-list="${key}" title="${escapeHtml(tip || "")}">
+      <summary class="settings-disclosure-summary"><span>${title}</span><small>${items.length} позицій</small></summary>
+      <div class="settings-section-body">
+        <div class="settings-section-head"><span></span><button class="secondary-action" type="button" data-add-item="${key}">Додати</button></div>
+        <div class="settings-list">
         ${items.map((item) => `
           <div class="settings-card asset-settings-card" data-item="${key}">
             <div class="icon-preview" data-icon-preview>${renderIconPreview(item.icon)}</div>
@@ -4538,7 +4813,7 @@ function renderAssetEditor(key, title, items, tip) {
                 <label>Мінімум комірок <input data-field="minCells" type="number" min="1" value="${item.minCells || 1}"></label>
                 <label>Макс. % землі власника <input data-field="maxOwnerLandPercent" type="number" min="1" max="100" step="0.01" value="${item.maxOwnerLandPercent || 25}"></label>
                 <label>Продовження техніки, днів <input data-field="serviceLifeExtensionDays" type="number" min="0" value="${item.serviceLifeExtensionDays || 0}"></label>
-                <label>Емоджі на карті <input data-field="mapEmoji" maxlength="8" value="${escapeHtml(item.mapEmoji || item.icon || "🏗")}"></label>
+                <label>Емодзі на карті (Zoom 5/7/10/12) <input data-field="mapEmoji" maxlength="8" value="${escapeHtml(item.mapEmoji || item.icon || "🏗")}"></label>
               `
               : `
                 <label>Бонус доходу землі, % <input data-field="incomeBonusPercent" type="number" min="0" step="0.01" value="${item.incomeBonusPercent || 0}"></label>
@@ -4551,50 +4826,51 @@ function renderAssetEditor(key, title, items, tip) {
             <button class="danger-action" type="button" data-remove-item>Видалити</button>
           </div>
         `).join("")}
+        </div>
+        <button class="primary-action settings-section-save" type="submit">Зберегти ${title.toLowerCase()}</button>
       </div>
-      <button class="primary-action settings-section-save" type="submit">Зберегти ${title.toLowerCase()}</button>
-    </section>
+    </details>
   `;
 }
 
 function renderClusterEditor(items) {
   return `
-    <section class="settings-section wide-field" data-list="clusters">
-      <div class="settings-section-head">
-        <h5>Бонуси господарств</h5>
-        <button class="secondary-action" type="button" data-add-item="clusters">Додати</button>
+    <details class="settings-section settings-disclosure wide-field" data-list="clusters">
+      <summary class="settings-disclosure-summary"><span>Бонуси господарств</span><small>${items.length} правил</small></summary>
+      <div class="settings-section-body">
+        <div class="settings-section-head"><span></span><button class="secondary-action" type="button" data-add-item="clusters">Додати</button></div>
+        <div class="settings-list compact-list">
+          ${items.map((item) => `
+            <div class="settings-card compact-card" data-item="clusters">
+              <label>Від кількості ділянок <input data-field="min" type="number" min="1" value="${item.min || 1}"></label>
+              <label>Бонус доходу, % <input data-field="bonusPercent" type="number" min="0" step="0.01" value="${item.bonusPercent || 0}"></label>
+              <button class="danger-action" type="button" data-remove-item>Видалити</button>
+            </div>
+          `).join("")}
+        </div>
       </div>
-      <div class="settings-list compact-list">
-        ${items.map((item) => `
-          <div class="settings-card compact-card" data-item="clusters">
-            <label>Від кількості ділянок <input data-field="min" type="number" min="1" value="${item.min || 1}"></label>
-            <label>Бонус доходу, % <input data-field="bonusPercent" type="number" min="0" step="0.01" value="${item.bonusPercent || 0}"></label>
-            <button class="danger-action" type="button" data-remove-item>Видалити</button>
-          </div>
-        `).join("")}
-      </div>
-    </section>
+    </details>
   `;
 }
 
 function renderStageEditor(items) {
   return `
-    <section class="settings-section wide-field" data-list="stages">
-      <div class="settings-section-head">
-        <h5>Етапи гри</h5>
-        <button class="secondary-action" type="button" data-add-item="stages">Додати</button>
+    <details class="settings-section settings-disclosure wide-field" data-list="stages">
+      <summary class="settings-disclosure-summary"><span>Етапи гри</span><small>${items.length} етапів</small></summary>
+      <div class="settings-section-body">
+        <div class="settings-section-head"><span></span><button class="secondary-action" type="button" data-add-item="stages">Додати</button></div>
+        <div class="settings-list">
+          ${items.map((item) => `
+            <div class="settings-card stage-card" data-item="stages">
+              <label>Назва <input data-field="title" value="${escapeHtml(item.title || "")}"></label>
+              <label>Мін. землі <input data-field="min" type="number" min="0" value="${item.min || 0}"></label>
+              <label class="wide-field">Опис <input data-field="text" value="${escapeHtml(item.text || "")}"></label>
+              <button class="danger-action" type="button" data-remove-item>Видалити</button>
+            </div>
+          `).join("")}
+        </div>
       </div>
-      <div class="settings-list">
-        ${items.map((item) => `
-          <div class="settings-card stage-card" data-item="stages">
-            <label>Назва <input data-field="title" value="${escapeHtml(item.title || "")}"></label>
-            <label>Мін. землі <input data-field="min" type="number" min="0" value="${item.min || 0}"></label>
-            <label class="wide-field">Опис <input data-field="text" value="${escapeHtml(item.text || "")}"></label>
-            <button class="danger-action" type="button" data-remove-item>Видалити</button>
-          </div>
-        `).join("")}
-      </div>
-    </section>
+    </details>
   `;
 }
 

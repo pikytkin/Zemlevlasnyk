@@ -425,12 +425,41 @@ select option {
   margin-top: 12px;
 }
 
-.status-line,
-.game-message {
+.status-line {
   min-height: 24px;
   margin: 12px 0 0;
   color: var(--amber);
   font-weight: var(--weight-ui);
+}
+
+.game-message {
+  position: fixed;
+  left: 50%;
+  top: 50%;
+  z-index: 5000;
+  width: min(560px, calc(100vw - 32px));
+  min-height: 0;
+  margin: 0;
+  padding: 16px 20px;
+  border: 1px solid rgba(240, 189, 74, 0.72);
+  border-radius: 10px;
+  background: rgba(9, 22, 18, 0.97);
+  color: var(--amber);
+  font-weight: var(--weight-ui);
+  line-height: 1.4;
+  text-align: center;
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.48);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transform: translate(-50%, -50%) scale(0.96);
+  transition: opacity 140ms ease, transform 140ms ease, visibility 140ms ease;
+}
+
+.game-message.is-visible {
+  opacity: 1;
+  visibility: visible;
+  transform: translate(-50%, -50%) scale(1);
 }
 
 .game {
@@ -545,6 +574,16 @@ dt,
   color: var(--muted);
 }
 
+.metric-list strong .asset-metric-line {
+  display: block;
+  color: var(--text);
+  text-align: right;
+}
+
+.metric-list strong .asset-metric-line + .asset-metric-line {
+  margin-top: 3px;
+}
+
 dd {
   margin: 0;
   text-align: right;
@@ -635,6 +674,34 @@ dd {
   inset: 0;
   pointer-events: none;
   z-index: 430;
+}
+
+.building-emoji-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 500;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.building-map-emoji {
+  position: absolute;
+  left: 0;
+  top: 0;
+  display: block;
+  line-height: 1;
+  text-align: center;
+  user-select: none;
+  will-change: transform;
+  filter: drop-shadow(0 2px 1px rgba(0, 0, 0, 0.4)) drop-shadow(0 0 3px rgba(255, 255, 255, 0.68));
+}
+
+.building-map-emoji.is-overview {
+  font-size: clamp(28px, 3vw, 46px);
+}
+
+.building-map-emoji.is-detail {
+  font-size: clamp(22px, 2.2vw, 36px);
 }
 
 .zoom-badge {
@@ -1456,6 +1523,60 @@ dd {
   background: rgba(255, 255, 255, 0.025);
 }
 
+.settings-disclosure {
+  display: block;
+}
+
+.settings-disclosure-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 38px;
+  color: var(--text);
+  font-size: 0.95rem;
+  font-weight: var(--weight-ui);
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+
+.settings-disclosure-summary::-webkit-details-marker {
+  display: none;
+}
+
+.settings-disclosure-summary small {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 0.76rem;
+  font-weight: 500;
+  text-align: right;
+}
+
+.settings-disclosure-summary::after {
+  content: "▸";
+  flex: 0 0 auto;
+  color: var(--amber);
+  font-size: 1rem;
+  transition: transform 140ms ease;
+}
+
+.settings-disclosure[open] > .settings-disclosure-summary::after {
+  transform: rotate(90deg);
+}
+
+.settings-section-body {
+  display: grid;
+  gap: 10px;
+  padding-top: 10px;
+}
+
+.settings-general-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
 .settings-section-head {
   display: flex;
   align-items: center;
@@ -2034,7 +2155,8 @@ input:focus-visible {
   .compact-list .settings-card,
   .settings-card.compact-card,
   .settings-card.stage-card,
-  .settings-card.asset-settings-card {
+  .settings-card.asset-settings-card,
+  .settings-general-grid {
     grid-template-columns: 1fr;
   }
 
