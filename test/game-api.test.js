@@ -121,3 +121,62 @@ test("admin reset clears land and restores the configured starting balance", asy
   assert.equal(Object.keys(current.payload.farm.land).length, 0);
   assert.equal(current.payload.farm.coins, 50000);
 });
+
+async function configureLandValueScenario() {
+  const admin = await request("POST", "/api/login", { username: "Admin", password: "Admin" });
+  assert.equal(admin.response.status, 200, admin.payload.error);
+  const current = await request("GET", "/api/settings");
+  current.payload.economy.startingCoins = 50000;
+  current.payload.economy.baseLandPriceMin = 100;
+  current.payload.economy.baseLandPriceSpread = 0;
+  current.payload.economy.nearbyPriceGrowthPercent = 100;
+  current.payload.economy.nearbyPriceRadius = 1;
+  current.payload.economy.sellRefundPercent = 50;
+  current.payload.stages = current.payload.stages.map((stage) => ({ ...stage, landPriceMultiplier: 1 }));
+  const saved = await request("POST", "/api/admin/settings", { settings: current.payload }, admin.cookie);
+  assert.equal(saved.response.status, 200, saved.payload.error);
+}
+
+test("a compact purchase package does not make its own cells more expensive", async () => {
+  await configureLandValueScenario();
+  const cookie = await register("package-buyer");
+  const cells = ["cell-700-80", "cell-701-80"];
+  const bought = await request("POST", "/api/claim", { cells: cells.map((id) => ({ id, region: "Тест" })) }, cookie);
+  assert.equal(bought.response.status, 200, bought.payload.error);
+  assert.equal(bought.payload.claimed.length, 2);
+  assert.equal(bought.payload.charged, 200);
+});
+
+test("land sale uses the current neighbourhood value instead of historical purchase price", async () => {
+  await configureLandValueScenario();
+  const seller = await register("market-seller");
+  const neighbour = await register("market-neighbour");
+  const cell = "cell-710-80";
+  const adjacentCell = "cell-711-80";
+  await request("POST", "/api/claim", { cells: [{ id: cell, region: "Тест" }] }, seller);
+  await request("POST", "/api/claim", { cells: [{ id: adjacentCell, region: "Тест" }] }, neighbour);
+  const sale = await request("POST", "/api/sell", { cells: [cell] }, seller);
+  assert.equal(sale.response.status, 200, sale.payload.error);
+  assert.equal(sale.payload.refund, 100);
+});
+
+test("machinery respects the configurable active-unit limit", async () => {
+  await configureLandValueScenario();
+  const admin = await request("POST", "/api/login", { username: "Admin", password: "Admin" });
+  const current = await request("GET", "/api/settings");
+  current.payload.assets.machineryItems[0].cost = 100;
+  current.payload.assets.machineryItems[0].minCells = 1;
+  current.payload.assets.machineryItems[0].maxActiveUnits = 2;
+  const saved = await request("POST", "/api/admin/settings", { settings: current.payload }, admin.cookie);
+  assert.equal(saved.response.status, 200, saved.payload.error);
+
+  const cookie = await register("machine-limit");
+  await request("POST", "/api/claim", { cells: [{ id: "cell-720-80", region: "Тест" }] }, cookie);
+  const itemId = current.payload.assets.machineryItems[0].id;
+  const first = await request("POST", "/api/purchase-asset", { kind: "machinery", itemId }, cookie);
+  const second = await request("POST", "/api/purchase-asset", { kind: "machinery", itemId }, cookie);
+  const third = await request("POST", "/api/purchase-asset", { kind: "machinery", itemId }, cookie);
+  assert.equal(first.response.status, 200, first.payload.error);
+  assert.equal(second.response.status, 200, second.payload.error);
+  assert.equal(third.response.status, 400);
+});

@@ -503,7 +503,8 @@ function applyGameSettings(settings) {
   }));
   gameSettings.assets.machineryItems = (gameSettings.assets.machineryItems || []).map((item) => ({
     ...item,
-    durationDays: Number.isFinite(Number(item.durationDays)) ? Math.max(1, Math.floor(Number(item.durationDays))) : 80
+    durationDays: Number.isFinite(Number(item.durationDays)) ? Math.max(1, Math.floor(Number(item.durationDays))) : 80,
+    maxActiveUnits: Number.isFinite(Number(item.maxActiveUnits)) ? Math.max(1, Math.floor(Number(item.maxActiveUnits))) : 1
   }));
   if (state?.inventory) state.inventory = normalizeMachineryInventory(state.inventory, state.currentDay || 1);
   cellCache = new Map();
@@ -2600,19 +2601,21 @@ function playerOwnedCellCount() {
 }
 
 function ownershipPriceMultiplierForCount(ownedCount = playerOwnedCellCount()) {
-  const rules = Array.isArray(gameSettings?.economy?.ownershipPriceMultipliers)
-    ? gameSettings.economy.ownershipPriceMultipliers
-    : [{ minOwned: 0, multiplier: 1 }];
-  return rules
-    .filter((rule) => ownedCount >= (Number(rule.minOwned) || 0))
-    .reduce((value, rule) => Math.max(value, Number(rule.multiplier) || 1), 1);
+  return GameRules.stagePriceMultiplier(ownedCount, gameSettings?.stages || []);
 }
 
-function priceForCellId(id, ownedCount = playerOwnedCellCount()) {
+function priceForCellId(id, ownedCount = playerOwnedCellCount(), excludedIds = null) {
+  const basePrice = basePriceForCellId(id);
+  const pressure = nearbyOwnedPressure(id, excludedIds);
+  const growth = Number.isFinite(gameSettings?.economy?.nearbyPriceGrowthPercent) ? gameSettings.economy.nearbyPriceGrowthPercent / 100 : 0.06;
+  return GameRules.landPrice(basePrice, pressure, growth * 100, ownershipPriceMultiplierForCount(ownedCount));
+}
+
+function marketPriceForCellId(id) {
   const basePrice = basePriceForCellId(id);
   const pressure = nearbyOwnedPressure(id);
   const growth = Number.isFinite(gameSettings?.economy?.nearbyPriceGrowthPercent) ? gameSettings.economy.nearbyPriceGrowthPercent / 100 : 0.06;
-  return Math.round(basePrice * (1 + pressure * growth) * ownershipPriceMultiplierForCount(ownedCount));
+  return GameRules.landPrice(basePrice, pressure, growth * 100, 1);
 }
 
 function basePriceForCellId(id) {
@@ -2620,8 +2623,9 @@ function basePriceForCellId(id) {
   return rangedSettingValue(gameSettings?.economy?.baseLandPriceMin, gameSettings?.economy?.baseLandPriceSpread, 1800, seed);
 }
 
-function nearbyOwnedPressure(id) {
+function nearbyOwnedPressure(id, excludedIds = null) {
   return neighborIdsWithinRadius(id, gameSettings?.economy?.nearbyPriceRadius || 2).reduce((sum, neighborId) => {
+    if (excludedIds?.has(neighborId)) return sum;
     const owner = visibleLandOwner(neighborId) || state.land?.[neighborId];
     return sum + (owner ? 1 : 0);
   }, 0);
@@ -2747,6 +2751,7 @@ function buildableSelectedCells() {
 
 function selectedGroupSummary() {
   const ids = [...selectedCellIds];
+  const selectedFreeIds = new Set(ids.filter((id) => getOwner(id) === "free"));
   const clusterMap = clusterByCell();
   const countedBuildings = new Set();
   let freeCount = 0;
@@ -2766,7 +2771,7 @@ function selectedGroupSummary() {
     const owner = getOwner(id);
     const income = incomeForCellId(id);
     if (owner === "free") {
-      totalPrice += priceForCellId(id, playerOwnedCellCount() + freeCount);
+      totalPrice += priceForCellId(id, playerOwnedCellCount() + freeCount, selectedFreeIds);
       freeCount += 1;
       totalIncome += income;
       return;
@@ -3004,7 +3009,7 @@ function inventoryBonusPercents() {
 
 function assetBonusPercent(settingsKey, inventoryMap) {
   return (gameSettings?.assets?.[settingsKey] || []).reduce((sum, item) => {
-    return sum + Math.min(1, inventoryMap[item.id] || 0) * (item.incomeBonusPercent || 0);
+    return sum + Math.min(item.maxActiveUnits || 1, inventoryMap[item.id] || 0) * (item.incomeBonusPercent || 0);
   }, 0);
 }
 
@@ -3169,7 +3174,7 @@ function maxBuildingCellsForOwner(item) {
 
 function sellValue(cell, owned) {
   const buildingValue = isFirstCellInBuildingGroup(cell?.id, owned) ? buildingCostForCell(owned) : 0;
-  return Math.floor((owned.price + fertilizerCostThroughLevel(owned.level || 1) + buildingValue) * SELL_REFUND_RATE);
+  return Math.floor((marketPriceForCellId(cell.id) + fertilizerCostThroughLevel(owned.level || 1) + buildingValue) * SELL_REFUND_RATE);
 }
 
 function addEvent(text) {
@@ -3342,7 +3347,8 @@ async function buySelectedCell() {
   const cells = freeSelectedCells();
   if (!cells.length) return;
   const ownedBeforePurchase = playerOwnedCellCount();
-  const totalPrice = cells.reduce((sum, cell, index) => sum + priceForCellId(cell.id, ownedBeforePurchase + index), 0);
+  const packageFreeIds = new Set(cells.map((cell) => cell.id));
+  const totalPrice = cells.reduce((sum, cell, index) => sum + priceForCellId(cell.id, ownedBeforePurchase + index, packageFreeIds), 0);
   if (state.coins < totalPrice) {
     showGameMessage(`Потрібно ${money(totalPrice)}, на балансі ${money(state.coins)}.`);
     return;
@@ -3735,8 +3741,9 @@ async function buyAsset(event) {
       showGameMessage(`Для "${item.name}" потрібно мати щонайменше ${requiredLand} земельних ділянок.`);
       return;
     }
-    if ((activeMachineryMap()?.[item.id] || 0) >= 1) {
-      showGameMessage(`Можна мати лише 1 активну одиницю техніки "${item.name}".`);
+    const maxActiveUnits = Math.max(1, Number(item.maxActiveUnits) || 1);
+    if ((activeMachineryMap()?.[item.id] || 0) >= maxActiveUnits) {
+      showGameMessage(`Ліміт техніки "${item.name}": ${maxActiveUnits} активн. од.`);
       return;
     }
   }
@@ -4873,6 +4880,7 @@ function renderAssetEditor(key, title, items, tip) {
               : `
                 <label>Бонус доходу землі, % <input data-field="incomeBonusPercent" type="number" min="0" step="0.01" value="${item.incomeBonusPercent || 0}"></label>
                 <label>Термін дії, днів <input data-field="durationDays" type="number" min="1" value="${item.durationDays || 80}"></label>
+                <label>Ліміт активних одиниць <input data-field="maxActiveUnits" type="number" min="1" value="${item.maxActiveUnits || 1}"></label>
               `}
             <label class="asset-photos-upload">Фото для перегляду (можна обрати кілька одразу) <input type="file" accept="image/png,image/jpeg,image/webp,image/svg+xml" multiple data-photos-upload></label>
             <input type="hidden" data-field="photos" value="${escapeHtml(JSON.stringify(item.photos || []))}">
@@ -4919,6 +4927,7 @@ function renderStageEditor(items) {
             <div class="settings-card stage-card" data-item="stages">
               <label>Назва <input data-field="title" value="${escapeHtml(item.title || "")}"></label>
               <label>Мін. землі <input data-field="min" type="number" min="0" value="${item.min || 0}"></label>
+              <label>Коефіцієнт ціни землі <input data-field="landPriceMultiplier" type="number" min="0.1" step="0.01" value="${item.landPriceMultiplier || 1}"></label>
               <label class="wide-field">Опис <input data-field="text" value="${escapeHtml(item.text || "")}"></label>
               <button class="danger-action" type="button" data-remove-item>Видалити</button>
             </div>
@@ -4948,7 +4957,7 @@ function settingTips() {
     "economy.claimBatchSize": "Скільки ділянок купується одним запитом.",
     "upgrades.landMaxLevel": "Максимальний рівень інвестицій у добрива.",
     "upgrades.elevatorMinSelectedCells": "Скільки ваших ділянок треба виділити, щоб побудувати об'єкт.",
-    machineryItems: "Налаштування техніки: іконка, назва, вартість, бонус до доходу земель, термін дії і фото для перегляду під час купівлі.",
+    machineryItems: "Налаштування техніки: іконка, назва, вартість, бонус до доходу земель, термін дії, ліміт активних одиниць і фото для перегляду під час купівлі.",
     elevatorItems: "Налаштування побудов: іконка, назва, вартість, дохід за добу, мінімум ділянок, максимальна частка від землі власника, продовження строку техніки і фото."
   };
 }
@@ -4992,6 +5001,7 @@ function settingsFromForm(form) {
   next.stages = collectSettingsCards("stages").map((item) => ({
     title: item.title || "Етап",
     min: Number(item.min) || 0,
+    landPriceMultiplier: Math.max(0.1, Number(item.landPriceMultiplier) || 1),
     text: item.text || ""
   }));
   next.rivals = [];
@@ -5030,6 +5040,7 @@ function normalizeAssetCard(item) {
     minCells: Math.max(1, Math.floor(Number(item.minCells) || 1)),
     maxOwnerLandPercent: Math.min(100, Math.max(1, Number(item.maxOwnerLandPercent) || 25)),
     serviceLifeExtensionDays: Math.max(0, Math.floor(Number(item.serviceLifeExtensionDays) || 0)),
+    maxActiveUnits: Math.max(1, Math.floor(Number(item.maxActiveUnits) || 1)),
     photos: parsePhotosValue(item.photos).slice(0, 8)
   };
 }
@@ -5355,11 +5366,11 @@ async function saveAdminSettings(event) {
 function defaultSettingsItem(listName) {
   const stamp = Date.now().toString(36);
   const items = {
-    machineryItems: { id: `tractor-${stamp}`, icon: "🚜", name: "Новий трактор", cost: 3600, incomeBonusPercent: 8, durationDays: 80, minCells: 10, photos: [] },
+    machineryItems: { id: `tractor-${stamp}`, icon: "🚜", name: "Новий трактор", cost: 3600, incomeBonusPercent: 8, durationDays: 80, minCells: 10, maxActiveUnits: 1, photos: [] },
     elevatorItems: { id: `elevator-${stamp}`, icon: "🏗", name: "Нова побудова", cost: 9000, incomePerDay: 900, minCells: 3, maxOwnerLandPercent: 20, serviceLifeExtensionDays: 0, photos: [] },
     landLevels: { level: LAND_LEVELS.length + 1, name: "Новий рівень добрив", cost: 100, incomeBonusPercent: 10 },
     clusters: { min: 10, bonusPercent: 5 },
-    stages: { title: "Новий етап", min: 0, text: "Опис етапу" },
+    stages: { title: "Новий етап", min: 0, landPriceMultiplier: 1, text: "Опис етапу" },
   };
   return items[listName] || {};
 }

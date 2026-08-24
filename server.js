@@ -116,12 +116,12 @@ const DEFAULT_SETTINGS = {
     { min: 500, bonusPercent: 28 }
   ],
   stages: [
-    { title: "Початок", min: 0, text: "Купуйте перші ділянки та формуйте базу господарства." },
-    { title: "Господарство", min: 5, text: "Земля поруч підвищує ціну наступної покупки, а з'єднані ділянки дають бонус до доходу." },
-    { title: "Компанія", min: 15, text: "З'єднані ділянки дають відчутний бонус до доходу." },
-    { title: "Агрохолдинг", min: 40, text: "Розвивайте побудови, техніку і рівні землі." },
-    { title: "Корпорація", min: 100, text: "Масштабуйте виробництво та баланс між землею й активами." },
-    { title: "Національна корпорація", min: 250, text: "Гравець бореться за лідерство на карті України." }
+    { title: "Початок", min: 0, text: "Купуйте перші ділянки та формуйте базу господарства.", landPriceMultiplier: 1 },
+    { title: "Господарство", min: 5, text: "Земля поруч підвищує ціну наступної покупки, а з'єднані ділянки дають бонус до доходу.", landPriceMultiplier: 1 },
+    { title: "Компанія", min: 15, text: "З'єднані ділянки дають відчутний бонус до доходу.", landPriceMultiplier: 1.1 },
+    { title: "Агрохолдинг", min: 40, text: "Розвивайте побудови, техніку і рівні землі.", landPriceMultiplier: 1.5 },
+    { title: "Корпорація", min: 100, text: "Масштабуйте виробництво та баланс між землею й активами.", landPriceMultiplier: 2.2 },
+    { title: "Національна корпорація", min: 250, text: "Гравець бореться за лідерство на карті України.", landPriceMultiplier: 2.8 }
   ],
   rivals: BASE_RIVALS
 };
@@ -493,11 +493,20 @@ function sanitizeSettings(settings) {
       .sort((a, b) => a.min - b.min),
     stages: (Array.isArray(source.stages) ? source.stages : defaults.stages)
       .slice(0, 10)
-      .map((item, index) => ({
-        title: String(item?.title || defaults.stages[index]?.title || "Етап").slice(0, 40),
-        min: intIn(item?.min, defaults.stages[index]?.min || 0, 0, 1000000),
-        text: String(item?.text || defaults.stages[index]?.text || "").slice(0, 180)
-      }))
+      .map((item, index) => {
+        const min = intIn(item?.min, defaults.stages[index]?.min || 0, 0, 1000000);
+        return {
+          title: String(item?.title || defaults.stages[index]?.title || "Етап").slice(0, 40),
+          min,
+          text: String(item?.text || defaults.stages[index]?.text || "").slice(0, 180),
+          landPriceMultiplier: numberIn(
+            Number(item?.landPriceMultiplier),
+            GameRules.ownershipPriceMultiplier(min, sanitizeOwnershipPriceMultipliers(economy.ownershipPriceMultipliers, defaults.economy.ownershipPriceMultipliers)),
+            0.1,
+            100
+          )
+        };
+      })
       .sort((a, b) => a.min - b.min),
     rivals: (Array.isArray(source.rivals) ? source.rivals : defaults.rivals)
       .slice(0, 12)
@@ -599,6 +608,7 @@ function sanitizeAssetItems(items, fallback) {
     durationDays: intIn(item?.durationDays, fallback[index]?.durationDays || 80, 1, 1000000),
     incomePerDay: intIn(item?.incomePerDay, fallback[index]?.incomePerDay || 0, 0),
     minCells: intIn(item?.minCells, fallback[index]?.minCells || 1, 1, 1000000),
+    maxActiveUnits: intIn(item?.maxActiveUnits, fallback[index]?.maxActiveUnits || 1, 1, 1000000),
     maxOwnerLandPercent: numberIn(Number(item?.maxOwnerLandPercent), fallback[index]?.maxOwnerLandPercent ?? 25, 1, 100),
     serviceLifeExtensionDays: intIn(item?.serviceLifeExtensionDays, fallback[index]?.serviceLifeExtensionDays || 0, 0, 1000000),
     photos: sanitizeAssetPhotos(item?.photos || fallback[index]?.photos || [])
@@ -1014,13 +1024,10 @@ function hashStringServer(value) {
 }
 
 function ownershipPriceMultiplier(ownedCount, settings = readSettings()) {
-  const rules = Array.isArray(settings.economy?.ownershipPriceMultipliers)
-    ? settings.economy.ownershipPriceMultipliers
-    : DEFAULT_SETTINGS.economy.ownershipPriceMultipliers;
-  return GameRules.ownershipPriceMultiplier(ownedCount, rules);
+  return GameRules.stagePriceMultiplier(ownedCount, settings.stages || []);
 }
 
-function authoritativeLandPrice(id, market, settings = readSettings(), buyerOwnedCount = 0) {
+function landPriceForMarket(id, market, settings = readSettings(), buyerOwnedCount = null, excludedIds = null) {
   const economy = settings.economy || {};
   const base = Number.isFinite(economy.baseLandPriceMin) ? economy.baseLandPriceMin : 1800;
   const spread = Number.isFinite(economy.baseLandPriceSpread) ? Math.max(0, Math.floor(economy.baseLandPriceSpread)) : 0;
@@ -1032,11 +1039,16 @@ function authoritativeLandPrice(id, market, settings = readSettings(), buyerOwne
   let pressure = 0;
   for (let dq = -radius; dq <= radius; dq += 1) {
     for (let dr = -radius; dr <= radius; dr += 1) {
-      if ((dq || dr) && market.land[`cell-${q + dq}-${r + dr}`]) pressure += 1;
+      const neighborId = `cell-${q + dq}-${r + dr}`;
+      if ((dq || dr) && !excludedIds?.has(neighborId) && market.land[neighborId]) pressure += 1;
     }
   }
-  const scale = ownershipPriceMultiplier(buyerOwnedCount, settings);
-  return Math.max(1, Math.round(basePrice * (1 + pressure * growth) * scale));
+  const scale = Number.isFinite(buyerOwnedCount) ? ownershipPriceMultiplier(buyerOwnedCount, settings) : 1;
+  return GameRules.landPrice(basePrice, pressure, growth * 100, scale);
+}
+
+function authoritativeLandPrice(id, market, settings = readSettings(), buyerOwnedCount = 0, excludedIds = null) {
+  return landPriceForMarket(id, market, settings, buyerOwnedCount, excludedIds);
 }
 
 function scanlineGridRanges(ring, lat) {
@@ -1889,7 +1901,7 @@ function inventoryValue(inventory, settings = readSettings(), currentDay = 1) {
 
 function inventoryIncomeMultiplier(inventory, settings = readSettings(), currentDay = 1) {
   const machineryMap = activeMachineryMap(inventory, currentDay);
-  const machineryBonus = settings.assets.machineryItems.reduce((sum, item) => sum + Math.min(1, (machineryMap || {})[item.id] || 0) * item.incomeBonusPercent, 0);
+  const machineryBonus = settings.assets.machineryItems.reduce((sum, item) => sum + Math.min(item.maxActiveUnits || 1, (machineryMap || {})[item.id] || 0) * item.incomeBonusPercent, 0);
   return 1 + machineryBonus / 100;
 }
 
@@ -2817,6 +2829,9 @@ async function handleApi(req, res) {
       const prices = {};
       let charged = 0;
       const ownedBeforeClaim = Object.keys(farm.land || {}).length;
+      const packageFreeIds = new Set(requestedCells
+        .map((cell) => typeof cell?.id === "string" ? cell.id.slice(0, 48) : "")
+        .filter((id) => isPlayableLandId(id) && !market.land[id]));
 
       requestedCells.forEach((cell) => {
         const id = typeof cell.id === "string" ? cell.id.slice(0, 48) : "";
@@ -2837,7 +2852,7 @@ async function handleApi(req, res) {
           }
           return;
         }
-        const price = authoritativeLandPrice(id, market, settings, ownedBeforeClaim + claimed.length);
+        const price = authoritativeLandPrice(id, market, settings, ownedBeforeClaim + claimed.length, packageFreeIds);
         if (farm.coins - charged < price) {
           rejected.push(id);
           return;
@@ -2955,7 +2970,7 @@ async function handleApi(req, res) {
             ? buildingCostForCell(farmCell, settings)
             : 0;
           if (buildingKey) refundedBuildingGroups.add(buildingKey);
-          const baseValue = (Number(farmCell.price) || 0)
+          const baseValue = landPriceForMarket(id, market, settings)
             + improvementCostForLevel(farmCell.level || 1, settings)
             + buildingValue;
           const refundRate = Number.isFinite(settings.economy?.sellRefundPercent) ? settings.economy.sellRefundPercent / 100 : 0.50;
@@ -3066,8 +3081,9 @@ async function handleApi(req, res) {
           return;
         }
         const active = activeMachineryMap(farm.inventory, farm.currentDay || 1);
-        if ((active[item.id] || 0) >= 1) {
-          sendJson(res, 400, { error: "Можна мати лише 1 активну одиницю техніки цього типу." });
+        const maxActiveUnits = Math.max(1, Number(item.maxActiveUnits) || 1);
+        if ((active[item.id] || 0) >= maxActiveUnits) {
+          sendJson(res, 400, { error: `Ліміт цієї техніки: ${maxActiveUnits} активн. од.` });
           return;
         }
         charged = Math.max(0, Number(item.cost) || 0);

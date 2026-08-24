@@ -40,5 +40,18 @@
       .reduce((value, rule) => Math.max(value, Number(rule.multiplier) || 1), 1);
   }
 
-  return { hashString, incomeForLandId, fertilizerMultiplier, improvementCostForLevel, fertilizerUpgradeCost, ownershipPriceMultiplier };
+  function stagePriceMultiplier(ownedCount, stages = []) {
+    return stages
+      .filter((stage) => Math.max(0, ownedCount || 0) >= (Number(stage.min) || 0))
+      .reduce((value, stage) => Math.max(value, Number(stage.landPriceMultiplier) || 1), 1);
+  }
+
+  function landPrice(basePrice, pressure = 0, nearbyGrowthPercent = 0, ownershipMultiplier = 1) {
+    const base = Math.max(1, Number(basePrice) || 1);
+    const growth = Number(nearbyGrowthPercent) || 0;
+    const nearbyFactor = Math.max(0.05, 1 + Math.max(0, Number(pressure) || 0) * growth / 100);
+    return Math.max(1, Math.round(base * nearbyFactor * Math.max(0.1, Number(ownershipMultiplier) || 1)));
+  }
+
+  return { hashString, incomeForLandId, fertilizerMultiplier, improvementCostForLevel, fertilizerUpgradeCost, ownershipPriceMultiplier, stagePriceMultiplier, landPrice };
 }));
