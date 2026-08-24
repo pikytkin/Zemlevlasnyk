@@ -3111,7 +3111,8 @@ async function handleApi(req, res) {
           return;
         }
         const ownedCount = Object.keys(farm.land || {}).length;
-        const maxAllowed = Math.max(1, Math.floor(ownedCount * Math.min(100, Math.max(1, Number(item.maxOwnerLandPercent) || 25)) / 100));
+        // A building must be allowed to occupy at least its own required footprint.
+        const maxAllowed = Math.max(required, Math.floor(ownedCount * Math.min(100, Math.max(1, Number(item.maxOwnerLandPercent) || 25)) / 100));
         const existingCells = Object.values(farm.land || {}).filter((cell) => (cell.building || cell.buildingId) === item.id).length;
         if (existingCells + required > maxAllowed) {
           sendJson(res, 400, { error: `Ліміт цієї побудови: максимум ${maxAllowed} ділянок.` });

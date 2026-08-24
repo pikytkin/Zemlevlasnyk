@@ -565,7 +565,7 @@ function startGame(nextPlayer, nextState) {
       return;
     }
     document.body.classList.add("is-admin-page");
-    gameScreen.classList.add("is-hidden");
+    gameScreen.classList.remove("is-hidden");
     adminModal.classList.remove("is-hidden");
     finishBoot();
     openAdminPanel();
@@ -743,12 +743,15 @@ async function initMap() {
     });
   });
   initLandMapLayers();
-
-  await Promise.allSettled([loadUkraineBoundary(), loadPlayableGridMask()]);
+  // Ownership aggregation is small and should appear before the large playable-grid mask.
+  // On the production map that mask contains hundreds of thousands of cells.
+  refreshVisibleLand();
+  Promise.allSettled([loadUkraineBoundary(), loadPlayableGridMask()]).then(() => {
+    scheduleGridUpdate(true);
+  });
   useFallbackSettlements();
   updateSettlementMapSource();
   loadSettlementsInBackground();
-  refreshVisibleLand();
   Promise.allSettled([refreshGlobalMarket(), refreshLeaderboard(), refreshNews(), refreshMessageSummary()]);
   requestIdleWork(addDeferredRayonLayer);
 
@@ -3158,7 +3161,7 @@ function buildingCellCountForItem(itemId) {
 function maxBuildingCellsForOwner(item) {
   const percent = Math.min(100, Math.max(1, Number(item?.maxOwnerLandPercent) || 25));
   const ownedCount = Object.keys(state.land || {}).length;
-  return Math.max(1, Math.floor((ownedCount * percent) / 100));
+  return Math.max(minCellsForBuilding(item), Math.floor((ownedCount * percent) / 100));
 }
 
 function sellValue(cell, owned) {

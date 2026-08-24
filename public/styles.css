@@ -1168,6 +1168,10 @@ body.is-admin-page {
   background: var(--bg);
 }
 
+body.is-admin-page #gameScreen > :not(#adminModal) {
+  display: none;
+}
+
 body.is-admin-page #adminModal {
   position: static;
   display: block;
