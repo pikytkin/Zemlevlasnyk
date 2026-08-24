@@ -1166,6 +1166,7 @@ dd {
 body.is-admin-page {
   min-height: 100vh;
   background: var(--bg);
+  overflow-y: auto;
 }
 
 body.is-admin-page #gameScreen > :not(#adminModal) {
@@ -1178,6 +1179,7 @@ body.is-admin-page #adminModal {
   min-height: 100vh;
   padding: 24px;
   background: transparent;
+  overflow: visible;
 }
 
 body.is-admin-page #adminModal .admin-panel {
@@ -1185,6 +1187,7 @@ body.is-admin-page #adminModal .admin-panel {
   width: min(1180px, 100%);
   max-height: none;
   margin: 0 auto;
+  overflow: visible;
 }
 
 body.is-admin-page #adminModal .modal-close {

@@ -3267,11 +3267,20 @@ function showLandOperationOverlay(count = 1, operation = "buy") {
   if (operation === "sell") {
     if (title) title.textContent = "Йде переоформлення права власності";
     if (text) text.textContent = "Повертаємо ділянки системі, оновлюємо земельний реєстр і нараховуємо кошти.";
+  } else if (operation === "fertilizer") {
+    if (title) title.textContent = "Застосовуємо добрива";
+    if (text) text.textContent = "Перевіряємо вибрані ділянки та оновлюємо їхній рівень родючості.";
+  } else if (operation === "building") {
+    if (title) title.textContent = "Оформлюємо побудову";
+    if (text) text.textContent = "Перевіряємо ділянки, реєструємо об'єкт і оновлюємо господарство.";
+  } else if (operation === "machinery") {
+    if (title) title.textContent = "Оформлюємо купівлю техніки";
+    if (text) text.textContent = "Перевіряємо доступність техніки та вносимо її до господарства.";
   } else {
     if (title) title.textContent = "Йде реєстрація права власності";
     if (text) text.textContent = "Перевіряємо ділянки, готуємо документи та вносимо запис у земельний реєстр.";
   }
-  if (counter) counter.textContent = count > 1 ? `У пакеті: ${count} ділянок` : "Одна ділянка";
+  if (counter) counter.textContent = count > 1 ? `У пакеті: ${count} позицій` : "Одна позиція";
   overlay.classList.remove("is-hidden");
 }
 
@@ -3452,6 +3461,7 @@ async function demolishSelectedBuildings(cells = ownedSelectedCells()) {
 
   let payload;
   try {
+    showLandOperationOverlay(targets.length, "building");
     payload = await requestJson("/api/purchase-asset", {
       method: "POST",
       body: JSON.stringify({ kind: "demolish", cellIds: targets.map((cell) => cell.id) })
@@ -3459,6 +3469,8 @@ async function demolishSelectedBuildings(cells = ownedSelectedCells()) {
   } catch (error) {
     showGameMessage(error.message);
     return;
+  } finally {
+    hideLandOperationOverlay();
   }
   applyServerEconomyPatch(payload);
   const changedIds = Object.keys(payload.landPatch || {});
@@ -3726,6 +3738,10 @@ async function buyAsset(event) {
 
   let payload;
   try {
+    showLandOperationOverlay(
+      activeAssetKind === "elevators" ? requiredBuildingCells : 1,
+      activeAssetKind === "elevators" ? "building" : "machinery"
+    );
     payload = await requestJson("/api/purchase-asset", {
       method: "POST",
       body: JSON.stringify(activeAssetKind === "elevators"
@@ -3735,6 +3751,8 @@ async function buyAsset(event) {
   } catch (error) {
     showGameMessage(error.message);
     return;
+  } finally {
+    hideLandOperationOverlay();
   }
 
   applyServerEconomyPatch(payload);
@@ -3775,6 +3793,7 @@ async function buyFertilizerLevel() {
 
   let payload;
   try {
+    showLandOperationOverlay(cells.length, "fertilizer");
     payload = await requestJson("/api/purchase-asset", {
       method: "POST",
       body: JSON.stringify({ kind: "fertilizer", level: item.level, cellIds: cells.map((cell) => cell.id) })
@@ -3782,6 +3801,8 @@ async function buyFertilizerLevel() {
   } catch (error) {
     showGameMessage(error.message);
     return;
+  } finally {
+    hideLandOperationOverlay();
   }
   applyServerEconomyPatch(payload);
   const changedIds = Object.keys(payload.landPatch || {});
@@ -4128,8 +4149,8 @@ function renderSelectedCell() {
     buyButton.disabled = !freeCells.length;
     if (contactOwnerButton) contactOwnerButton.disabled = true;
     upgradeButton.disabled = !summary.canUpgrade;
-    buildingButton.disabled = !(summary.canBuild || builtCount);
-    machineryButton.disabled = !summary.canBuyMachinery;
+    buildingButton.disabled = !(summary.buildableCount >= minBuildingCells() || builtCount);
+    machineryButton.disabled = playerOwnedCellCount() < 1;
     sellButton.disabled = !summary.ownedCount;
     showSelectionPopup(selectedBuilding
       ? selectedBuilding.item.name
@@ -5834,6 +5855,7 @@ document.querySelectorAll("[data-close-image-preview]").forEach((button) => butt
 document.querySelectorAll(".modal").forEach((modal) => {
   modal.addEventListener("click", (event) => {
     if (event.target !== modal) return;
+    if (modal === adminModal && document.body.classList.contains("is-admin-page")) return;
     closeModal(modal);
   });
 });
