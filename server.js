@@ -42,7 +42,9 @@ const ADMIN_USERNAME = process.env.ADMIN_USERNAME || "Admin";
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "Admin";
 const DATABASE_URL = process.env.DATABASE_URL || "";
 const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || "https://zemlevlasnyk.com";
-const IS_PRODUCTION = process.env.NODE_ENV === "production" || (Boolean(DATABASE_URL) && /^https:\/\//i.test(PUBLIC_BASE_URL));
+// Deployment mode must be explicit. A production database URL is also useful for local
+// maintenance, where refusing to boot because NODE_ENV was omitted is needlessly disruptive.
+const IS_PRODUCTION = process.env.NODE_ENV === "production";
 const SESSION_COOKIE_SECURE = IS_PRODUCTION || process.env.SESSION_COOKIE_SECURE === "true";
 const BASE_RIVALS = [];
 
