@@ -164,6 +164,7 @@ const newsList = document.querySelector("#newsList");
 const gameMessage = document.querySelector("#gameMessage");
 
 function finishBoot() {
+  awaitingInitialOverviewLand = false;
   document.body.classList.remove("is-booting");
 }
 
@@ -540,6 +541,12 @@ function startGame(nextPlayer, nextState) {
   farmDerivedStatsCache = null;
   adminSettingsLoaded = false;
   awaitingInitialOverviewLand = true;
+  window.setTimeout(() => {
+    if (!awaitingInitialOverviewLand) return;
+    console.warn("Initial land payload is still loading; showing the game shell.");
+    showGameMessage("Карта ще довантажує землі. Можна користуватися грою, дані оновляться автоматично.");
+    finishBoot();
+  }, 7000);
   saveScope = null;
   clearTimeout(saveTimer);
 
@@ -768,7 +775,8 @@ function stopBackgroundPolling() {
   clearInterval(leaderboardTimer);
   clearInterval(newsTimer);
   clearInterval(messagesTimer);
-  marketTimer = leaderboardTimer = newsTimer = messagesTimer = null;
+  clearInterval(incomeTimer);
+  marketTimer = leaderboardTimer = newsTimer = messagesTimer = incomeTimer = null;
 }
 
 function startBackgroundPolling() {

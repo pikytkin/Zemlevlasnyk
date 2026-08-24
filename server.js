@@ -3810,12 +3810,6 @@ async function startServer() {
   applyRuntimeMapSettings(readSettings());
   ensureAdminUser();
 
-  // Income is automatic: every completed 24-hour period is credited by the server.
-  // The UI button only forces a sync and can be removed later without changing balance.
-  settleAllDailyIncome();
-  const dailyIncomeTimer = setInterval(() => settleAllDailyIncome(), 60 * 1000);
-  if (typeof dailyIncomeTimer.unref === "function") dailyIncomeTimer.unref();
-
   const server = http.createServer((req, res) => {
     if (req.url.startsWith("/api/")) {
       handleApi(req, res);
@@ -3830,6 +3824,21 @@ async function startServer() {
     console.log(DATABASE_URL ? "Сховище гри: PostgreSQL." : "Сховище гри: локальні файли data.");
     console.log("Карта: математична прямокутна canvas-сітка.");
   });
+
+  // Income is automatic: every completed 24-hour period is credited by the server.
+  // Run the first global sweep after the server starts accepting requests, otherwise a farm
+  // with many cells can keep browsers on the boot overlay while Node calculates income.
+  const runIncomeSweep = () => {
+    try {
+      settleAllDailyIncome();
+    } catch (error) {
+      console.error("Daily income sweep failed:", error.message);
+    }
+  };
+  const initialIncomeTimer = setTimeout(runIncomeSweep, 15000);
+  const dailyIncomeTimer = setInterval(runIncomeSweep, 60 * 1000);
+  if (typeof initialIncomeTimer.unref === "function") initialIncomeTimer.unref();
+  if (typeof dailyIncomeTimer.unref === "function") dailyIncomeTimer.unref();
 }
 
 startServer().catch((error) => {
