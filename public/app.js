@@ -2490,14 +2490,14 @@ function makeCell(id) {
   const { lat, lng } = cellCenterFromGrid(q, r);
   const basePrice = basePriceForCellId(id);
   const income = incomeForCellId(id);
-  const settlement = nearestSettlement(lat, lng);
+  const settlement = nearestSettlement(lat, lng) || {};
   const cell = {
     id,
     code: id,
     lat,
     lng,
-    region: settlement.name,
-    settlementDistanceKm: settlement.distanceKm,
+    region: safePlaceName(settlement.name) || "вибрана місцевість",
+    settlementDistanceKm: Number.isFinite(settlement.distanceKm) ? settlement.distanceKm : null,
     basePrice,
     price: priceForCellId(id),
     income,
@@ -3125,7 +3125,39 @@ function addLedger(type, text, amount = 0, landDelta = 0) {
 }
 
 function money(value) {
-  return `${Math.floor(value).toLocaleString("uk-UA")} мон.`;
+  const number = Number(value);
+  return `${Math.floor(Number.isFinite(number) ? number : 0).toLocaleString("uk-UA")} мон.`;
+}
+
+function safePlaceName(value) {
+  const text = String(value || "").trim();
+  if (!text || text.toLowerCase() === "undefined" || text.toLowerCase() === "null") return "";
+  return text;
+}
+
+function cellLocationName(cell) {
+  const existing = safePlaceName(cell?.region);
+  if (existing) return existing;
+  if (Number.isFinite(cell?.lat) && Number.isFinite(cell?.lng)) {
+    return safePlaceName(nearestSettlement(cell.lat, cell.lng)?.name) || "вибрана місцевість";
+  }
+  return "вибрана місцевість";
+}
+
+function cellLocationPhrase(cell) {
+  const name = cellLocationName(cell);
+  return name === "вибрана місцевість" ? "у вибраній місцевості" : `біля ${name}`;
+}
+
+function cellSettlementLine(cell) {
+  const distance = Number(cell?.settlementDistanceKm);
+  return `${cellLocationName(cell)}${Number.isFinite(distance) ? ` - ${distance.toFixed(1)} км` : ""}`;
+}
+
+function cellBaseIncome(cell) {
+  const income = Number(cell?.income);
+  if (Number.isFinite(income)) return income;
+  return cell?.id ? incomeForCellId(cell.id) : 0;
 }
 
 function setActionButton(button, title, note = "") {
@@ -3164,9 +3196,18 @@ function ensureLandOperationOverlay() {
   return landOperationOverlay;
 }
 
-function showLandOperationOverlay(count = 1) {
+function showLandOperationOverlay(count = 1, operation = "buy") {
   const overlay = ensureLandOperationOverlay();
+  const title = overlay.querySelector("strong");
+  const text = overlay.querySelector("p");
   const counter = overlay.querySelector("#landOperationCount");
+  if (operation === "sell") {
+    if (title) title.textContent = "Йде переоформлення права власності";
+    if (text) text.textContent = "Повертаємо ділянки системі, оновлюємо земельний реєстр і нараховуємо кошти.";
+  } else {
+    if (title) title.textContent = "Йде реєстрація права власності";
+    if (text) text.textContent = "Перевіряємо ділянки, готуємо документи та вносимо запис у земельний реєстр.";
+  }
   if (counter) counter.textContent = count > 1 ? `У пакеті: ${count} ділянок` : "Одна ділянка";
   overlay.classList.remove("is-hidden");
 }
@@ -3202,8 +3243,8 @@ async function claimLandBatch(batch) {
         cells: batch.map((cell) => ({
           id: cell.id,
           price: cell.price,
-          region: cell.region,
-          nickname: `${cell.region || "Ділянка"}, ${String(cell.code || cell.id).slice(-5)}`
+          region: cellLocationName(cell),
+          nickname: `${cellLocationName(cell)}, ${String(cell.code || cell.id).slice(-5)}`
         }))
       })
     });
@@ -3278,6 +3319,7 @@ async function buySelectedCell() {
   const finalPrice = cells.reduce((sum, cell) => sum + cell.price, 0);
   const purchasedAt = new Date().toISOString();
   cells.forEach((cell) => {
+    const placeName = cellLocationName(cell);
     state.land[cell.id] = {
       id: cell.id,
       price: cell.price,
@@ -3289,14 +3331,14 @@ async function buySelectedCell() {
       buildingLevel: 0,
       machinery: false,
       machineryLevel: 0,
-      nickname: `${cell.region}, ${cell.code.slice(-5)}`
+      nickname: `${placeName}, ${cell.code.slice(-5)}`
     };
   });
   landMembershipRevision += 1;
   farmDerivedStatsCache = null;
   state.stats.purchased += cells.length;
   addEvent(cells.length === 1
-    ? `Куплено земельну ділянку ${cells[0].code} біля ${cells[0].region}.`
+    ? `Куплено земельну ділянку ${cells[0].code} ${cellLocationPhrase(cells[0])}.`
     : `Куплено земельних ділянок: ${cells.length} за ${money(finalPrice)}.`);
   addLedger("buy", `Купівля землі: ${cells.length} ділянок`, -finalPrice, cells.length);
   showGameMessage(cells.length === 1
@@ -3685,10 +3727,11 @@ async function sellSelectedLand() {
   let soldCells = [];
   let payload = null;
 
+  showLandOperationOverlay(cells.length, "sell");
   try {
     payload = await requestJson("/api/sell", {
       method: "POST",
-      body: JSON.stringify({ cells: cells.map((cell) => ({ id: cell.id, region: cell.region })) })
+      body: JSON.stringify({ cells: cells.map((cell) => ({ id: cell.id, region: cellLocationName(cell) })) })
     });
     if (Number.isFinite(payload.version)) marketVersion = payload.version;
     removeCellsFromVisibleLand(Array.isArray(payload.soldIds) ? payload.soldIds : []);
@@ -3699,6 +3742,8 @@ async function sellSelectedLand() {
   } catch (error) {
     showGameMessage(error.message);
     return;
+  } finally {
+    hideLandOperationOverlay();
   }
 
   if (!soldCells.length) {
@@ -3753,7 +3798,7 @@ function collectIncome() {
 }
 
 function cellTooltip(cell, owner) {
-  const settlementLine = `${cell.region}${Number.isFinite(cell.settlementDistanceKm) ? ` - ${cell.settlementDistanceKm.toFixed(1)} км` : ""}`;
+  const settlementLine = cellSettlementLine(cell);
   const displayPrice = owner === "free" ? priceForCellId(cell.id) : cell.price;
   if (owner === "player") {
     const breakdown = incomeBreakdown(cell, state.land[cell.id]);
@@ -3784,7 +3829,7 @@ function cellTooltip(cell, owner) {
     <strong>Вільна земля</strong>
     <span>${settlementLine}</span>
     <em>Ціна: ${money(displayPrice)}</em>
-    <em>Базовий дохід: ${money(cell.income)} / день</em>
+    <em>Базовий дохід: ${money(cellBaseIncome(cell))} / день</em>
   `;
 }
 
@@ -3822,7 +3867,7 @@ function selectCell(cellId, event = null) {
   const cell = getCell(cellId);
   showGameMessage(selectedCellIds.size > 1
     ? `Обрано земельних ділянок: ${selectedCellIds.size}.`
-    : `Обрано земельну ділянку ${cell.code} біля ${cell.region}.`);
+    : `Обрано земельну ділянку ${cell.code} ${cellLocationPhrase(cell)}.`);
 }
 
 function buildingGroupCellIds(cellId) {
@@ -4031,22 +4076,16 @@ function renderSelectedCell() {
     const buildingItem = selectedBuilding;
     if (buildingItem) {
       rows.push(["Побудова", escapeHtml(buildingItem.name)]);
-      rows.push(["Дохід побудови", `${money(buildingItem.incomePerDay || 0)} / день`]);
-      rows.push(["Техніка", "не застосовується до комірки з побудовою"]);
+      rows.push(["Дохід", `${money(buildingItem.incomePerDay || 0)} / день`]);
     } else {
       rows.push(["Рівень добрив", `${owned.level} · ${escapeHtml(fertilizerLevel(owned.level)?.name || "")}`]);
-      rows.push(["Господарство", `${cluster ? cluster.size : 1} зем. у групі, бонус ${Math.round((cluster ? cluster.bonus : 0) * 100)}%`]);
-      rows.push(["Базовий дохід", `${money(breakdown.base)} / день`]);
-      rows.push(["Інвестиції в добрива", `+${money(breakdown.landGain)} / день (${fertilizerLevel(owned.level)?.incomeBonusPercent || 0}%)`]);
+      rows.push(["Дохід", `${money(breakdown.total)} / день`]);
       rows.push(["Техніка", `+${money(breakdown.machineryGain)} / день (${breakdown.machineryPercent}%)`]);
-      rows.push(["Бонус господарства", `+${money(breakdown.clusterGain)} / день`]);
     }
-    rows.push(["Дохід", `${money(breakdown.total)} / день`]);
     rows.push(["Побудови загалом", inventoryDescription("elevators")]);
-    rows.push(["Техніка", inventoryDescription("machinery")]);
     rows.push(["Продаж системі", money(sellValue(cell, owned))]);
   } else {
-    rows.push(["Базовий дохід", `${money(cell.income)} / день`]);
+    rows.push(["Базовий дохід", `${money(cellBaseIncome(cell))} / день`]);
   }
 
   cellDetails.innerHTML = rows.map(([key, value]) => `<div><dt>${key}</dt><dd>${value}</dd></div>`).join("");
