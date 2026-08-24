@@ -7,7 +7,8 @@
     "start": "node server.js",
     "test": "node --test test/land-connectivity.test.js test/game-api.test.js",
     "generate:grid-mask": "node scripts/generate-playable-grid.js",
-    "extract:assets": "node scripts/extract-settings-assets.js"
+    "extract:assets": "node scripts/extract-settings-assets.js",
+    "sync:settings": "node scripts/sync-production-settings.js"
   },
   "dependencies": {
     "nodemailer": "^6.9.14",
