@@ -555,6 +555,23 @@ function startGame(nextPlayer, nextState) {
   landMembershipRevision += 1;
   farmDerivedStatsCache = null;
   adminSettingsLoaded = false;
+  saveScope = null;
+  clearTimeout(saveTimer);
+
+  authScreen.classList.add("is-hidden");
+  if (window.location.pathname === "/admin") {
+    if (!player?.isAdmin) {
+      window.location.replace("/");
+      return;
+    }
+    document.body.classList.add("is-admin-page");
+    gameScreen.classList.add("is-hidden");
+    adminModal.classList.remove("is-hidden");
+    finishBoot();
+    openAdminPanel();
+    return;
+  }
+
   awaitingInitialOverviewLand = true;
   window.setTimeout(() => {
     if (!awaitingInitialOverviewLand) return;
@@ -562,39 +579,11 @@ function startGame(nextPlayer, nextState) {
     showGameMessage("Карта ще довантажує землі. Можна користуватися грою, дані оновляться автоматично.");
     finishBoot();
   }, 7000);
-  saveScope = null;
-  clearTimeout(saveTimer);
-
-  authScreen.classList.add("is-hidden");
   gameScreen.classList.remove("is-hidden");
   renderPlayerHeader();
   render();
   showGameMessage("Карту володінь завантажено.");
   refreshMessageSummary();
-  if (window.location.pathname === "/admin") {
-    if (player?.isAdmin) {
-      document.body.classList.add("is-admin-page");
-      gameScreen.classList.add("is-hidden");
-      openAdminPanel();
-      if (awaitingInitialOverviewLand) {
-        awaitingInitialOverviewLand = false;
-        finishBoot();
-      }
-      return;
-    } else {
-      window.history.replaceState({}, "", "/");
-      showGameMessage("Адмін-панель доступна тільки адміністратору.");
-      loadGameSettings().then(() => initMap().catch((error) => {
-        console.error("initMap failed:", error);
-        showGameMessage(error?.message || "Не вдалося завантажити карту.");
-        if (awaitingInitialOverviewLand) {
-          awaitingInitialOverviewLand = false;
-          finishBoot();
-        }
-      }));
-    }
-    return;
-  }
   loadGameSettings().then(() => initMap().catch((error) => {
     console.error("initMap failed:", error);
     showGameMessage(error?.message || "Не вдалося завантажити карту.");
