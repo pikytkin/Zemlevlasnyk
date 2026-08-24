@@ -43,14 +43,26 @@ const BASE_RIVALS = [];
 
 const DEFAULT_SETTINGS = {
   economy: {
-    startingCoins: 500,
-    baseLandPriceMin: 70,
+    startingCoins: 11700,
+    baseLandPriceMin: 1800,
     baseLandPriceSpread: 0,
-    baseIncomeMin: 8,
+    baseIncomeMin: 180,
     baseIncomeSpread: 0,
-    nearbyPriceGrowthPercent: 8,
+    nearbyPriceGrowthPercent: 6,
     nearbyPriceRadius: 2,
-    sellRefundPercent: 62,
+    sellRefundPercent: 50,
+    incomeCycleMinutes: 1440,
+    offlineIncomeCapHours: 168,
+    ownershipPriceMultipliers: [
+      { minOwned: 0, multiplier: 1 },
+      { minOwned: 6, multiplier: 1.1 },
+      { minOwned: 16, multiplier: 1.25 },
+      { minOwned: 31, multiplier: 1.5 },
+      { minOwned: 61, multiplier: 1.8 },
+      { minOwned: 101, multiplier: 2.2 },
+      { minOwned: 201, multiplier: 2.8 },
+      { minOwned: 501, multiplier: 3.5 }
+    ],
     maxVisibleCells: 46000,
     detailZoomMin: 10,
     claimBatchSize: 1000,
@@ -73,33 +85,36 @@ const DEFAULT_SETTINGS = {
     landMaxLevel: 5,
     landLevels: [
       { level: 1, name: "Без добрив", cost: 0, incomeBonusPercent: 0 },
-      { level: 2, name: "Базові добрива", cost: 165, incomeBonusPercent: 18 },
-      { level: 3, name: "Посилені добрива", cost: 260, incomeBonusPercent: 42 },
-      { level: 4, name: "Преміум добрива", cost: 380, incomeBonusPercent: 72 },
-      { level: 5, name: "Агрохімія повного циклу", cost: 540, incomeBonusPercent: 108 }
+      { level: 2, name: "Базові добрива", cost: 900, incomeBonusPercent: 25 },
+      { level: 3, name: "Посилені добрива", cost: 1500, incomeBonusPercent: 60 },
+      { level: 4, name: "Преміум добрива", cost: 2400, incomeBonusPercent: 110 },
+      { level: 5, name: "Агрохімія повного циклу", cost: 3600, incomeBonusPercent: 175 }
     ],
     elevatorMinSelectedCells: 3,
   },
   assets: {
     machineryItems: [
-      { id: "tractor-basic", icon: "🚜", name: "Трактор базовий", cost: 480, incomeBonusPercent: 1, durationDays: 100, photos: [] }
+      { id: "tractor-basic", icon: "🚜", name: "Трактор базовий", cost: 3600, incomeBonusPercent: 8, durationDays: 80, minCells: 10, photos: [] }
     ],
     elevatorItems: [
-      { id: "elevator-basic", icon: "🏗", name: "Елеватор базовий", cost: 1200, incomePerDay: 75, minCells: 3, maxOwnerLandPercent: 25, photos: [] }
+      { id: "elevator-basic", icon: "🏗", name: "Елеватор базовий", cost: 9000, incomePerDay: 900, minCells: 3, maxOwnerLandPercent: 20, photos: [] }
     ]
   },
   clusters: [
-    { min: 11, bonusPercent: 5 },
-    { min: 51, bonusPercent: 12 },
-    { min: 201, bonusPercent: 25 },
-    { min: 1001, bonusPercent: 50 }
+    { min: 5, bonusPercent: 2 },
+    { min: 15, bonusPercent: 5 },
+    { min: 40, bonusPercent: 9 },
+    { min: 100, bonusPercent: 15 },
+    { min: 250, bonusPercent: 22 },
+    { min: 500, bonusPercent: 28 }
   ],
   stages: [
     { title: "Початок", min: 0, text: "Купуйте перші ділянки та формуйте базу господарства." },
     { title: "Господарство", min: 5, text: "Земля поруч підвищує ціну наступної покупки, а з'єднані ділянки дають бонус до доходу." },
-    { title: "Компанія", min: 12, text: "З'єднані ділянки дають відчутний бонус до доходу." },
-    { title: "Агрохолдинг", min: 24, text: "Розвивайте побудови, техніку і рівні землі." },
-    { title: "Національна корпорація", min: 42, text: "Гравець бореться за лідерство на карті України." }
+    { title: "Компанія", min: 15, text: "З'єднані ділянки дають відчутний бонус до доходу." },
+    { title: "Агрохолдинг", min: 40, text: "Розвивайте побудови, техніку і рівні землі." },
+    { title: "Корпорація", min: 100, text: "Масштабуйте виробництво та баланс між землею й активами." },
+    { title: "Національна корпорація", min: 250, text: "Гравець бореться за лідерство на карті України." }
   ],
   rivals: BASE_RIVALS
 };
@@ -336,6 +351,17 @@ function numberArray(value, fallback, maxLength = 12) {
   return source.slice(0, maxLength).map((item, index) => numberIn(Number(item), Number.isFinite(fallback[index]) ? fallback[index] : 0, 0, 100_000_000));
 }
 
+function sanitizeOwnershipPriceMultipliers(items, fallback = DEFAULT_SETTINGS.economy.ownershipPriceMultipliers) {
+  const source = Array.isArray(items) && items.length ? items : fallback;
+  return source
+    .slice(0, 16)
+    .map((item, index) => ({
+      minOwned: intIn(item?.minOwned, fallback[index]?.minOwned || 0, 0, 1000000),
+      multiplier: numberIn(Number(item?.multiplier), fallback[index]?.multiplier || 1, 0.1, 100)
+    }))
+    .sort((a, b) => a.minOwned - b.minOwned);
+}
+
 function sanitizeSettings(settings) {
   const source = settings && typeof settings === "object" ? settings : {};
   const economy = source.economy && typeof source.economy === "object" ? source.economy : {};
@@ -354,6 +380,9 @@ function sanitizeSettings(settings) {
       nearbyPriceGrowthPercent: numberIn(Number(economy.nearbyPriceGrowthPercent), defaults.economy.nearbyPriceGrowthPercent, -95, 1000),
       nearbyPriceRadius: intIn(economy.nearbyPriceRadius, defaults.economy.nearbyPriceRadius, 1, 5),
       sellRefundPercent: numberIn(Number(economy.sellRefundPercent), defaults.economy.sellRefundPercent, 0, 100),
+      incomeCycleMinutes: intIn(economy.incomeCycleMinutes, defaults.economy.incomeCycleMinutes, 5, 1440),
+      offlineIncomeCapHours: intIn(economy.offlineIncomeCapHours, defaults.economy.offlineIncomeCapHours, 1, 168),
+      ownershipPriceMultipliers: sanitizeOwnershipPriceMultipliers(economy.ownershipPriceMultipliers, defaults.economy.ownershipPriceMultipliers),
       maxVisibleCells: intIn(economy.maxVisibleCells, defaults.economy.maxVisibleCells, 1000, 500000),
       detailZoomMin: intIn(economy.detailZoomMin, defaults.economy.detailZoomMin, 10, 12),
       claimBatchSize: intIn(economy.claimBatchSize, defaults.economy.claimBatchSize, 1, 3000),
@@ -481,7 +510,7 @@ function sanitizeAssetItems(items, fallback) {
     name: String(item?.name || fallback[index]?.name || `Актив ${index + 1}`).slice(0, 60),
     cost: intIn(item?.cost, fallback[index]?.cost || 0, 0),
     incomeBonusPercent: numberIn(Number(item?.incomeBonusPercent), fallback[index]?.incomeBonusPercent || 0, 0, 1000),
-    durationDays: intIn(item?.durationDays, fallback[index]?.durationDays || 100, 1, 1000000),
+    durationDays: intIn(item?.durationDays, fallback[index]?.durationDays || 80, 1, 1000000),
     incomePerDay: intIn(item?.incomePerDay, fallback[index]?.incomePerDay || 0, 0),
     minCells: intIn(item?.minCells, fallback[index]?.minCells || 1, 1, 1000000),
     maxOwnerLandPercent: numberIn(Number(item?.maxOwnerLandPercent), fallback[index]?.maxOwnerLandPercent ?? 25, 1, 100),
@@ -884,14 +913,23 @@ function hashStringServer(value) {
   return hash;
 }
 
-function authoritativeLandPrice(id, market, settings = readSettings()) {
+function ownershipPriceMultiplier(ownedCount, settings = readSettings()) {
+  const rules = Array.isArray(settings.economy?.ownershipPriceMultipliers)
+    ? settings.economy.ownershipPriceMultipliers
+    : DEFAULT_SETTINGS.economy.ownershipPriceMultipliers;
+  return rules
+    .filter((rule) => Math.max(0, ownedCount || 0) >= (rule.minOwned || 0))
+    .reduce((value, rule) => Math.max(value, Number(rule.multiplier) || 1), 1);
+}
+
+function authoritativeLandPrice(id, market, settings = readSettings(), buyerOwnedCount = 0) {
   const economy = settings.economy || {};
-  const base = Number.isFinite(economy.baseLandPriceMin) ? economy.baseLandPriceMin : 70;
+  const base = Number.isFinite(economy.baseLandPriceMin) ? economy.baseLandPriceMin : 1800;
   const spread = Number.isFinite(economy.baseLandPriceSpread) ? Math.max(0, Math.floor(economy.baseLandPriceSpread)) : 0;
   const seed = Math.abs(hashStringServer(id)) || 1;
   const basePrice = Math.round(base + (spread ? seed % spread : 0));
   const radius = Math.max(1, Math.floor(economy.nearbyPriceRadius || 2));
-  const growth = Number.isFinite(economy.nearbyPriceGrowthPercent) ? economy.nearbyPriceGrowthPercent / 100 : 0.08;
+  const growth = Number.isFinite(economy.nearbyPriceGrowthPercent) ? economy.nearbyPriceGrowthPercent / 100 : 0.06;
   const { q, r } = parseCellGridId(id);
   let pressure = 0;
   for (let dq = -radius; dq <= radius; dq += 1) {
@@ -899,7 +937,8 @@ function authoritativeLandPrice(id, market, settings = readSettings()) {
       if ((dq || dr) && market.land[`cell-${q + dq}-${r + dr}`]) pressure += 1;
     }
   }
-  return Math.max(1, Math.round(basePrice * (1 + pressure * growth)));
+  const scale = ownershipPriceMultiplier(buyerOwnedCount, settings);
+  return Math.max(1, Math.round(basePrice * (1 + pressure * growth) * scale));
 }
 
 function scanlineGridRanges(ring, lat) {
@@ -1643,7 +1682,7 @@ function publicPlayerDetails(user, rank = null) {
       if (cell.building || cell.buildingId) {
         return isFirstCellInBuildingGroup(cell.id, cell, farm.land) ? sum + buildingDailyIncomeForCell(cell, settings) : sum;
       }
-      const base = rangedSettingValue(settings.economy.baseIncomeMin, settings.economy.baseIncomeSpread, cell.id, 8);
+      const base = rangedSettingValue(settings.economy.baseIncomeMin, settings.economy.baseIncomeSpread, cell.id, 180);
       return sum + Math.round(base * fertilizerMultiplier(cell.level || 1, settings) * inventoryIncomeMultiplier(farm.inventory, settings, farm.currentDay));
     }, 0),
     machineryCount: Object.values(machineryMap || {}).reduce((sum, qty) => sum + (Number(qty) || 0), 0),
@@ -1752,7 +1791,7 @@ function inventoryValue(inventory, settings = readSettings(), currentDay = 1) {
 
 function inventoryIncomeMultiplier(inventory, settings = readSettings(), currentDay = 1) {
   const machineryMap = activeMachineryMap(inventory, currentDay);
-  const machineryBonus = settings.assets.machineryItems.reduce((sum, item) => sum + ((machineryMap || {})[item.id] || 0) * item.incomeBonusPercent, 0);
+  const machineryBonus = settings.assets.machineryItems.reduce((sum, item) => sum + Math.min(1, (machineryMap || {})[item.id] || 0) * item.incomeBonusPercent, 0);
   return 1 + machineryBonus / 100;
 }
 
@@ -1789,6 +1828,18 @@ function buildingDailyIncomeForFarm(farm, settings = readSettings()) {
     if (counted.has(key)) return sum;
     counted.add(key);
     return sum + (item.incomePerDay || 0);
+  }, 0);
+}
+
+function machineryServiceExtensionForFarm(farm, settings = readSettings()) {
+  const counted = new Set();
+  return Object.values(farm.land || {}).reduce((sum, cell) => {
+    const item = buildingItemById(cell?.building || cell?.buildingId, settings);
+    if (!item) return sum;
+    const key = cell.buildingGroupId || `${cell.id}:${item.id}`;
+    if (counted.has(key)) return sum;
+    counted.add(key);
+    return sum + Math.max(0, Number(item.serviceLifeExtensionDays) || 0);
   }, 0);
 }
 
@@ -1829,6 +1880,143 @@ function improvementCostForLevel(level, settings = readSettings()) {
 function fertilizerMultiplier(level, settings = readSettings()) {
   const rule = [...settings.upgrades.landLevels].reverse().find((item) => (level || 1) >= item.level) || settings.upgrades.landLevels[0];
   return 1 + ((rule?.incomeBonusPercent || 0) / 100);
+}
+
+function incomeForLandIdServer(id, settings = readSettings()) {
+  const economy = settings.economy || {};
+  const base = Number.isFinite(economy.baseIncomeMin) ? economy.baseIncomeMin : 180;
+  const spread = Number.isFinite(economy.baseIncomeSpread) ? Math.max(0, Math.floor(economy.baseIncomeSpread)) : 0;
+  const seed = Math.abs(hashStringServer(String(id))) || 1;
+  return Math.round(base + (spread ? seed % spread : 0));
+}
+
+function clusterBonusMapForFarm(farm, settings = readSettings()) {
+  const remaining = new Set(Object.keys(farm.land || {}));
+  const bonusMap = new Map();
+  const rules = Array.isArray(settings.clusters) ? settings.clusters : [];
+
+  while (remaining.size) {
+    const start = remaining.values().next().value;
+    const queue = [start];
+    const cluster = [];
+    remaining.delete(start);
+    let cursor = 0;
+    while (cursor < queue.length) {
+      const id = queue[cursor++];
+      cluster.push(id);
+      const { q, r } = parseCellGridId(id);
+      for (let dq = -1; dq <= 1; dq += 1) {
+        for (let dr = -1; dr <= 1; dr += 1) {
+          if (!dq && !dr) continue;
+          const neighborId = `cell-${q + dq}-${r + dr}`;
+          if (!remaining.has(neighborId)) continue;
+          remaining.delete(neighborId);
+          queue.push(neighborId);
+        }
+      }
+    }
+    const bonus = rules
+      .filter((rule) => cluster.length >= (rule.min || 0))
+      .reduce((best, rule) => Math.max(best, (Number(rule.bonusPercent) || 0) / 100), 0);
+    cluster.forEach((id) => bonusMap.set(id, bonus));
+  }
+
+  return bonusMap;
+}
+
+function farmDailyIncomeServer(farm, settings = readSettings(), clusterMap = null) {
+  const bonuses = clusterMap || clusterBonusMapForFarm(farm, settings);
+  const machineryMultiplier = inventoryIncomeMultiplier(farm.inventory, settings, farm.currentDay || 1);
+  const countedBuildings = new Set();
+  let rawIncome = 0;
+
+  Object.entries(farm.land || {}).forEach(([id, cell]) => {
+    const buildingItem = buildingItemById(cell?.building || cell?.buildingId, settings);
+    if (buildingItem) {
+      const key = cell.buildingGroupId || `${id}:${buildingItem.id}`;
+      if (!countedBuildings.has(key)) {
+        countedBuildings.add(key);
+        rawIncome += Number(buildingItem.incomePerDay) || 0;
+      }
+      return;
+    }
+    const base = incomeForLandIdServer(id, settings);
+    const landMultiplier = fertilizerMultiplier(cell?.level || 1, settings);
+    const clusterMultiplier = 1 + (bonuses.get(id) || 0);
+    rawIncome += base * landMultiplier * machineryMultiplier * clusterMultiplier;
+  });
+
+  return Math.max(0, Math.floor(rawIncome));
+}
+
+function incomeIntervalMs(settings = readSettings()) {
+  return Math.max(60, Number(settings.economy?.incomeCycleMinutes) || 1440) * 60 * 1000;
+}
+
+function offlineIncomeCapMs(settings = readSettings()) {
+  return Math.max(24, Number(settings.economy?.offlineIncomeCapHours) || 168) * 60 * 60 * 1000;
+}
+
+function settleDailyIncomeForFarm(farm, settings = readSettings(), nowMs = Date.now()) {
+  const intervalMs = incomeIntervalMs(settings);
+  const capMs = offlineIncomeCapMs(settings);
+  const parsedLast = Date.parse(farm.lastIncomeAt || "");
+
+  if (!Number.isFinite(parsedLast)) {
+    farm.lastIncomeAt = new Date(nowMs).toISOString();
+    return { changed: true, income: 0, days: 0, nextInMs: intervalMs };
+  }
+
+  const elapsedMs = Math.max(0, nowMs - parsedLast);
+  const cappedElapsedMs = Math.min(elapsedMs, capMs);
+  const days = Math.floor(cappedElapsedMs / intervalMs);
+  if (days < 1) {
+    return { changed: false, income: 0, days: 0, nextInMs: Math.max(0, intervalMs - elapsedMs) };
+  }
+
+  const clusterMap = clusterBonusMapForFarm(farm, settings);
+  let income = 0;
+  for (let index = 0; index < days; index += 1) {
+    income += farmDailyIncomeServer(farm, settings, clusterMap);
+    farm.currentDay = Math.max(1, Number(farm.currentDay) || 1) + 1;
+  }
+
+  farm.coins = Math.max(0, Math.floor((farm.coins || 0) + income));
+  farm.stats = farm.stats || {};
+  farm.stats.earned = Math.max(0, Math.floor((farm.stats.earned || 0) + income));
+  farm.lastIncomeAt = new Date(elapsedMs > capMs ? nowMs : parsedLast + days * intervalMs).toISOString();
+
+  return {
+    changed: true,
+    income,
+    days,
+    nextInMs: Math.max(0, intervalMs - Math.max(0, nowMs - Date.parse(farm.lastIncomeAt)))
+  };
+}
+
+function settleAllDailyIncome(nowMs = Date.now()) {
+  const users = readUsers();
+  const settings = readSettings();
+  const intervalMs = incomeIntervalMs(settings);
+  let changed = false;
+
+  users.forEach((user) => {
+    const rawFarm = user?.farm && typeof user.farm === "object" ? user.farm : null;
+    const parsedLast = Date.parse(rawFarm?.lastIncomeAt || "");
+    if (!Number.isFinite(parsedLast) || nowMs - parsedLast < intervalMs) return;
+
+    const farm = sanitizeFarmState(rawFarm);
+    if (!Object.keys(farm.land || {}).length) return;
+    const settlement = settleDailyIncomeForFarm(farm, settings, nowMs);
+    if (!settlement.changed) return;
+
+    user.farm = farm;
+    user.updatedAt = new Date(nowMs).toISOString();
+    changed = true;
+  });
+
+  if (changed) writeUsers(users, { deferPersistence: true });
+  return changed;
 }
 
 function leaderboardRows() {
@@ -1891,7 +2079,7 @@ function publicUserRow(user) {
           ? sum + buildingDailyIncomeForCell(cell, settings)
           : sum;
       }
-      const base = rangedSettingValue(settings.economy.baseIncomeMin, settings.economy.baseIncomeSpread, cell.id, 8);
+      const base = rangedSettingValue(settings.economy.baseIncomeMin, settings.economy.baseIncomeSpread, cell.id, 180);
       return sum + Math.round(base * fertilizerMultiplier(cell.level || 1, settings) * inventoryIncomeMultiplier(farm.inventory, settings, farm.currentDay));
     }, 0),
     score: farmScoreSanitized(farm, settings),
@@ -2520,6 +2708,7 @@ async function handleApi(req, res) {
       const alreadyOwned = [];
       const prices = {};
       let charged = 0;
+      const ownedBeforeClaim = Object.keys(farm.land || {}).length;
 
       requestedCells.forEach((cell) => {
         const id = typeof cell.id === "string" ? cell.id.slice(0, 48) : "";
@@ -2534,13 +2723,13 @@ async function handleApi(req, res) {
           if (existing.ownerId === session.userId) {
             alreadyOwned.push(id);
             const ownedPrice = Number(farm.land?.[id]?.price);
-            prices[id] = Number.isFinite(ownedPrice) ? ownedPrice : authoritativeLandPrice(id, market, settings);
+            prices[id] = Number.isFinite(ownedPrice) ? ownedPrice : authoritativeLandPrice(id, market, settings, ownedBeforeClaim + claimed.length);
           } else {
             rejected.push(id);
           }
           return;
         }
-        const price = authoritativeLandPrice(id, market, settings);
+        const price = authoritativeLandPrice(id, market, settings, ownedBeforeClaim + claimed.length);
         if (farm.coins - charged < price) {
           rejected.push(id);
           return;
@@ -2557,6 +2746,8 @@ async function handleApi(req, res) {
       });
 
       farm.coins = Math.max(0, Math.floor(farm.coins - charged));
+      farm.stats.purchased = Math.max(0, (farm.stats.purchased || 0) + claimed.length);
+      if (ownedBeforeClaim === 0 && claimed.length) farm.lastIncomeAt = now;
       const requestedById = new Map(requestedCells.map((cell) => [cell.id, cell]));
       claimed.forEach((id) => {
         const requested = requestedById.get(id) || {};
@@ -2592,7 +2783,7 @@ async function handleApi(req, res) {
           targetCellId: claimed[0]
         });
       }
-      sendJson(res, 200, { ok: true, claimed, rejected, alreadyOwned, prices, charged, coins: farm.coins, ...marketVersionPayload() });
+      sendJson(res, 200, { ok: true, claimed, rejected, alreadyOwned, prices, charged, coins: farm.coins, stats: farm.stats, lastIncomeAt: farm.lastIncomeAt, ...marketVersionPayload() });
       return;
     }
 
@@ -2627,22 +2818,42 @@ async function handleApi(req, res) {
       let targetCellId = null;
       const regions = [];
       let totalRefund = 0;
+      const requestedIdSet = new Set(ids);
+      const invalidBuildingGroups = new Set();
+      const refundedBuildingGroups = new Set();
+
+      Object.entries(farm.land || {}).forEach(([id, cell]) => {
+        const groupId = cell?.buildingGroupId;
+        if (!groupId || !requestedIdSet.has(id)) return;
+        const groupIds = Object.entries(farm.land || {})
+          .filter(([, candidate]) => candidate?.buildingGroupId === groupId)
+          .map(([candidateId]) => candidateId);
+        if (groupIds.some((candidateId) => !requestedIdSet.has(candidateId))) invalidBuildingGroups.add(groupId);
+      });
 
       ids.forEach((id) => {
         const marketCell = market.land[id];
         const farmCell = farm.land?.[id];
+        if (farmCell?.buildingGroupId && invalidBuildingGroups.has(farmCell.buildingGroupId)) return;
         if (marketCell?.ownerId === session.userId && farmCell) {
           sellerName = marketCell.ownerName || sellerName;
           targetCellId = targetCellId || id;
           const requestRow = requestedCells.find((cell) => typeof cell !== "string" && cell?.id === id);
           if (requestRow?.region) regions.push(String(requestRow.region));
-          delete market.land[id];
-          delete farm.land[id];
+          const buildingKey = (farmCell.building || farmCell.buildingId)
+            ? (farmCell.buildingGroupId || `cell:${id}`)
+            : null;
+          const buildingValue = buildingKey && !refundedBuildingGroups.has(buildingKey)
+            ? buildingCostForCell(farmCell, settings)
+            : 0;
+          if (buildingKey) refundedBuildingGroups.add(buildingKey);
           const baseValue = (Number(farmCell.price) || 0)
             + improvementCostForLevel(farmCell.level || 1, settings)
-            + buildingCostForCell(farmCell, settings);
-          const refundRate = Number.isFinite(settings.economy?.sellRefundPercent) ? settings.economy.sellRefundPercent / 100 : 0.62;
+            + buildingValue;
+          const refundRate = Number.isFinite(settings.economy?.sellRefundPercent) ? settings.economy.sellRefundPercent / 100 : 0.50;
           const refund = Math.max(0, Math.floor(baseValue * refundRate));
+          delete market.land[id];
+          delete farm.land[id];
           totalRefund += refund;
           sold += 1;
           soldIds.push(id);
@@ -2676,6 +2887,239 @@ async function handleApi(req, res) {
         refund: totalRefund,
         coins: farm.coins,
         ...marketVersionPayload()
+      });
+      return;
+    }
+
+    if (req.method === "POST" && req.url === "/api/purchase-asset") {
+      const session = getSession(req);
+      if (!session || session.isGuest) {
+        sendJson(res, 401, { error: "Спочатку увійдіть у гру." });
+        return;
+      }
+
+      const body = await readBody(req);
+      const kind = String(body.kind || "");
+      const users = readUsers();
+      const user = users.find((item) => item.id === session.userId);
+      if (!user) {
+        sendJson(res, 404, { error: "Гравця не знайдено." });
+        return;
+      }
+      const settings = readSettings();
+      const farm = sanitizeFarmState(user.farm);
+      const now = new Date().toISOString();
+      const landPatch = {};
+      let charged = 0;
+      let marketChangedIds = [];
+
+      if (kind === "fertilizer") {
+        const targetLevel = Math.max(1, Math.floor(Number(body.level) || 1));
+        const targetRule = settings.upgrades.landLevels.find((item) => item.level === targetLevel);
+        if (!targetRule || targetLevel <= 1) {
+          sendJson(res, 400, { error: "Некоректний рівень добрив." });
+          return;
+        }
+        const cellIds = [...new Set((Array.isArray(body.cellIds) ? body.cellIds : []).filter((id) => isPlayableLandId(id)))];
+        const targets = cellIds.filter((id) => {
+          const cell = farm.land?.[id];
+          return cell && !cell.building && !cell.buildingId && (cell.level || 1) < targetLevel;
+        });
+        if (!targets.length) {
+          sendJson(res, 400, { error: "Немає ділянок, які можна покращити до цього рівня." });
+          return;
+        }
+        charged = targets.reduce((sum, id) => {
+          const currentLevel = farm.land[id].level || 1;
+          return sum + settings.upgrades.landLevels
+            .filter((item) => item.level > currentLevel && item.level <= targetLevel)
+            .reduce((subtotal, item) => subtotal + (item.cost || 0), 0);
+        }, 0);
+        if (farm.coins < charged) {
+          sendJson(res, 400, { error: `Для добрив потрібно ${charged} мон.` });
+          return;
+        }
+        farm.coins -= charged;
+        targets.forEach((id) => {
+          farm.land[id].level = targetLevel;
+          landPatch[id] = { level: targetLevel };
+        });
+        farm.stats.upgraded = Math.max(0, (farm.stats.upgraded || 0) + targets.length);
+        marketChangedIds = targets;
+      } else if (kind === "machinery") {
+        const item = settings.assets.machineryItems.find((candidate) => candidate.id === String(body.itemId || ""));
+        if (!item) {
+          sendJson(res, 400, { error: "Техніку не знайдено." });
+          return;
+        }
+        const ownedCount = Object.keys(farm.land || {}).length;
+        if (ownedCount < Math.max(1, item.minCells || 1)) {
+          sendJson(res, 400, { error: `Для цієї техніки потрібно щонайменше ${Math.max(1, item.minCells || 1)} ділянок.` });
+          return;
+        }
+        const active = activeMachineryMap(farm.inventory, farm.currentDay || 1);
+        if ((active[item.id] || 0) >= 1) {
+          sendJson(res, 400, { error: "Можна мати лише 1 активну одиницю техніки цього типу." });
+          return;
+        }
+        charged = Math.max(0, Number(item.cost) || 0);
+        if (farm.coins < charged) {
+          sendJson(res, 400, { error: `Для покупки потрібно ${charged} мон.` });
+          return;
+        }
+        farm.coins -= charged;
+        const duration = Math.max(1, Number(item.durationDays) || 80);
+        const extension = machineryServiceExtensionForFarm(farm, settings);
+        farm.inventory = farm.inventory || { machinery: {}, elevators: {}, machineryBatches: [] };
+        farm.inventory.machineryBatches = (Array.isArray(farm.inventory.machineryBatches) ? farm.inventory.machineryBatches : [])
+          .filter((batch) => (batch.expiresDay || 0) >= (farm.currentDay || 1));
+        farm.inventory.machineryBatches.push({
+          id: item.id,
+          qty: 1,
+          purchasedDay: farm.currentDay || 1,
+          expiresDay: (farm.currentDay || 1) + duration + extension
+        });
+        farm.inventory.machinery = activeMachineryMap(farm.inventory, farm.currentDay || 1);
+        farm.stats.machinery = Math.max(0, (farm.stats.machinery || 0) + 1);
+      } else if (kind === "building") {
+        const item = settings.assets.elevatorItems.find((candidate) => candidate.id === String(body.itemId || ""));
+        if (!item) {
+          sendJson(res, 400, { error: "Побудову не знайдено." });
+          return;
+        }
+        const required = Math.max(1, Number(item.minCells) || settings.upgrades.elevatorMinSelectedCells || 3);
+        const cellIds = [...new Set((Array.isArray(body.cellIds) ? body.cellIds : []).filter((id) => isPlayableLandId(id)))];
+        if (cellIds.length !== required) {
+          sendJson(res, 400, { error: `Для цієї побудови потрібно рівно ${required} ділянок.` });
+          return;
+        }
+        const valid = cellIds.every((id) => farm.land?.[id] && !farm.land[id].building && !farm.land[id].buildingId);
+        if (!valid) {
+          sendJson(res, 400, { error: "Усі вибрані ділянки мають належати вам і бути без побудов." });
+          return;
+        }
+        const ownedCount = Object.keys(farm.land || {}).length;
+        const maxAllowed = Math.max(1, Math.floor(ownedCount * Math.min(100, Math.max(1, Number(item.maxOwnerLandPercent) || 25)) / 100));
+        const existingCells = Object.values(farm.land || {}).filter((cell) => (cell.building || cell.buildingId) === item.id).length;
+        if (existingCells + required > maxAllowed) {
+          sendJson(res, 400, { error: `Ліміт цієї побудови: максимум ${maxAllowed} ділянок.` });
+          return;
+        }
+        charged = Math.max(0, Number(item.cost) || 0);
+        if (farm.coins < charged) {
+          sendJson(res, 400, { error: `Для побудови потрібно ${charged} мон.` });
+          return;
+        }
+        farm.coins -= charged;
+        const groupId = `b-${crypto.randomUUID()}`;
+        cellIds.forEach((id) => {
+          farm.land[id].building = item.id;
+          farm.land[id].buildingId = item.id;
+          farm.land[id].buildingGroupId = groupId;
+          farm.land[id].buildingBuiltAt = now;
+          farm.land[id].buildingLevel = 1;
+          landPatch[id] = {
+            building: item.id, buildingId: item.id, buildingGroupId: groupId,
+            buildingBuiltAt: now, buildingLevel: 1
+          };
+        });
+        farm.stats.buildings = Object.values(farm.land || {}).filter((cell) => cell.building || cell.buildingId).length;
+      } else if (kind === "demolish") {
+        const requested = new Set((Array.isArray(body.cellIds) ? body.cellIds : []).filter((id) => isPlayableLandId(id)));
+        const targets = new Set();
+        requested.forEach((id) => {
+          const cell = farm.land?.[id];
+          if (!cell || (!cell.building && !cell.buildingId)) return;
+          if (cell.buildingGroupId) {
+            Object.entries(farm.land || {}).forEach(([candidateId, candidate]) => {
+              if (candidate.buildingGroupId === cell.buildingGroupId) targets.add(candidateId);
+            });
+          } else {
+            targets.add(id);
+          }
+        });
+        if (!targets.size) {
+          sendJson(res, 400, { error: "На вибраних ділянках немає побудови." });
+          return;
+        }
+        targets.forEach((id) => {
+          farm.land[id].building = null;
+          farm.land[id].buildingId = null;
+          farm.land[id].buildingGroupId = null;
+          farm.land[id].buildingBuiltAt = null;
+          farm.land[id].buildingLevel = 0;
+          landPatch[id] = {
+            building: null, buildingId: null, buildingGroupId: null,
+            buildingBuiltAt: null, buildingLevel: 0
+          };
+        });
+        farm.stats.buildings = Object.values(farm.land || {}).filter((cell) => cell.building || cell.buildingId).length;
+      } else {
+        sendJson(res, 400, { error: "Невідомий тип покупки." });
+        return;
+      }
+
+      user.farm = sanitizeFarmState(farm);
+      user.updatedAt = now;
+      writeUsers(users);
+      if (marketChangedIds.length) {
+        const market = readMarket();
+        marketChangedIds.forEach((id) => {
+          if (market.land[id]?.ownerId === session.userId) market.land[id].level = user.farm.land[id]?.level || 1;
+        });
+        writeMarket(market, { upsertIds: marketChangedIds });
+      }
+      sendJson(res, 200, {
+        ok: true,
+        kind,
+        charged,
+        coins: user.farm.coins,
+        currentDay: user.farm.currentDay,
+        inventory: user.farm.inventory,
+        stats: user.farm.stats,
+        landPatch
+      });
+      return;
+    }
+
+    if (req.method === "POST" && req.url === "/api/collect-income") {
+      const session = getSession(req);
+      if (!session || session.isGuest) {
+        sendJson(res, 401, { error: "Спочатку увійдіть у гру." });
+        return;
+      }
+
+      const users = readUsers();
+      const user = users.find((item) => item.id === session.userId);
+      if (!user) {
+        sendJson(res, 404, { error: "Гравця не знайдено." });
+        return;
+      }
+
+      const settings = readSettings();
+      const farm = sanitizeFarmState(user.farm);
+      if (!Object.keys(farm.land || {}).length) {
+        sendJson(res, 400, { error: "Спочатку купіть землю, щоб отримувати пасивний дохід." });
+        return;
+      }
+
+      const nowMs = Date.now();
+      const settlement = settleDailyIncomeForFarm(farm, settings, nowMs);
+      user.farm = farm;
+      user.updatedAt = new Date(nowMs).toISOString();
+      if (settlement.changed) writeUsers(users);
+
+      sendJson(res, 200, {
+        ok: true,
+        income: settlement.income,
+        days: settlement.days,
+        cycles: settlement.days,
+        coins: farm.coins,
+        currentDay: farm.currentDay,
+        lastIncomeAt: farm.lastIncomeAt,
+        nextInMs: settlement.nextInMs,
+        dailyIncome: farmDailyIncomeServer(farm, settings),
+        stats: farm.stats
       });
       return;
     }
@@ -3286,7 +3730,10 @@ async function handleApi(req, res) {
       }
       const farm = user.farm && typeof user.farm === "object" ? user.farm : defaultFarmState();
       const patch = sanitizeFarmMetaPatch(body.farm || body, farm);
-      user.farm = { ...farm, ...patch };
+      // Coins, timer and inventory are server-authoritative. Compact saves are only for
+      // non-economic UI/history metadata.
+      const { coins, currentDay, inventory, lastIncomeAt, stats, ...safePatch } = patch;
+      user.farm = { ...farm, ...safePatch };
       user.updatedAt = new Date().toISOString();
       // Persistence is deferred until after the compact response is written. This keeps the
       // income button and logout responsive even when the user owns tens of thousands of cells.
@@ -3322,13 +3769,31 @@ async function handleApi(req, res) {
         return;
       }
 
-      user.farm = farm;
+      let authoritativeFarm = sanitizeFarmState(user.farm);
+      if (marketSnapshot.resetAt && authoritativeFarm.lastAdminResetAt !== marketSnapshot.resetAt) {
+        authoritativeFarm = { ...authoritativeFarm, land: {}, lastAdminResetAt: marketSnapshot.resetAt };
+      }
+      const safeLand = Object.fromEntries(Object.entries(authoritativeFarm.land || {}).map(([id, cell]) => [id, {
+        ...cell,
+        nickname: typeof farm.land?.[id]?.nickname === "string" ? farm.land[id].nickname.slice(0, 36) : cell.nickname
+      }]));
+      farm = {
+        ...farm,
+        coins: authoritativeFarm.coins,
+        currentDay: authoritativeFarm.currentDay,
+        inventory: authoritativeFarm.inventory,
+        stats: authoritativeFarm.stats,
+        lastIncomeAt: authoritativeFarm.lastIncomeAt,
+        lastAdminResetAt: authoritativeFarm.lastAdminResetAt,
+        land: safeLand
+      };
+      user.farm = sanitizeFarmState(farm);
       user.updatedAt = new Date().toISOString();
       writeUsers(users);
       const mapVersionBeforeSave = marketVersion;
-      mergeFarmIntoMarket(farm, user.id, userCompanyName(user, farm));
+      mergeFarmIntoMarket(user.farm, user.id, userCompanyName(user, user.farm));
       if (marketVersion === mapVersionBeforeSave) touchMapPresentationVersion();
-      sendJson(res, 200, { ok: true, coins: farm.coins, currentDay: farm.currentDay });
+      sendJson(res, 200, { ok: true, coins: user.farm.coins, currentDay: user.farm.currentDay });
       return;
     }
 
@@ -3344,6 +3809,12 @@ async function startServer() {
   await initStorage();
   applyRuntimeMapSettings(readSettings());
   ensureAdminUser();
+
+  // Income is automatic: every completed 24-hour period is credited by the server.
+  // The UI button only forces a sync and can be removed later without changing balance.
+  settleAllDailyIncome();
+  const dailyIncomeTimer = setInterval(() => settleAllDailyIncome(), 60 * 1000);
+  if (typeof dailyIncomeTimer.unref === "function") dailyIncomeTimer.unref();
 
   const server = http.createServer((req, res) => {
     if (req.url.startsWith("/api/")) {

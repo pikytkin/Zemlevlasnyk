@@ -50,7 +50,7 @@
       <section class="game is-hidden" id="gameScreen">
         <header class="topbar">
           <div>
-            <p class="eyebrow">Землевласник · день <span id="dayCount">1</span></p>
+            <p class="eyebrow">Землевласник · цикл <span id="dayCount">1</span></p>
             <h2 id="playerName">Карта володінь</h2>
           </div>
           <div class="top-actions">
@@ -58,7 +58,7 @@
             <button class="secondary-action" id="profileButton" type="button">Профіль</button>
             <button class="secondary-action" id="helpButton" type="button">Довідка</button>
             <button class="secondary-action message-action" id="messagesButton" type="button">Повідомлення <span class="message-badge is-hidden" id="messageBadge">0</span></button>
-            <button class="secondary-action" id="incomeButton" type="button">Отримати дохід</button>
+            <button class="secondary-action" id="incomeButton" type="button">Перевірити нарахування</button>
             <button class="secondary-action logout-action" id="logoutButton" type="button">Вихід</button>
           </div>
         </header>
@@ -70,15 +70,6 @@
               <p class="eyebrow">Обрана ділянка</p>
               <h3 id="cellTitle">Оберіть ділянку</h3>
               <dl class="cell-details" id="cellDetails"></dl>
-            </section>
-            <section>
-              <p class="eyebrow">Господарство</p>
-              <div class="metric-list">
-                <div><span>Земля</span><strong id="ownedMetric">0</strong></div>
-                <div><span>Найбільше господарство</span><strong id="largestClusterMetric">0</strong></div>
-                <div><span>Дохід за день</span><strong id="incomeMetric">0 мон.</strong></div>
-                <div><span>Активи</span><strong id="assetMetric">0</strong></div>
-              </div>
             </section>
           </aside>
 
