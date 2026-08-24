@@ -173,6 +173,21 @@ function bindEvent(element, eventName, handler, options) {
   element.addEventListener(eventName, handler, options);
 }
 
+function activateAdminTabDom(tab) {
+  if (!tab) return;
+  document.querySelectorAll("[data-admin-tab]").forEach((item) => item.classList.toggle("is-active", item.dataset.adminTab === tab));
+  document.querySelectorAll("[data-admin-panel]").forEach((panel) => panel.classList.toggle("is-hidden", panel.dataset.adminPanel !== tab));
+}
+
+document.addEventListener("click", (event) => {
+  const tabButton = event.target.closest("[data-admin-tab]");
+  if (!tabButton) return;
+  event.preventDefault();
+  activateAdminTabDom(tabButton.dataset.adminTab);
+  if (tabButton.dataset.adminTab === "players") loadAdminUsersIfNeeded();
+  if (tabButton.dataset.adminTab === "settings") loadAdminSettingsIfNeeded();
+});
+
 let player = null;
 let state = defaultGameState();
 let selectedCellId = null;
@@ -5205,8 +5220,7 @@ async function showPlayerStats(userId) {
 }
 
 function activateAdminTab(tab) {
-  document.querySelectorAll("[data-admin-tab]").forEach((item) => item.classList.toggle("is-active", item.dataset.adminTab === tab));
-  document.querySelectorAll("[data-admin-panel]").forEach((panel) => panel.classList.toggle("is-hidden", panel.dataset.adminPanel !== tab));
+  activateAdminTabDom(tab);
   if (tab === "players") loadAdminUsersIfNeeded();
   if (tab === "settings") loadAdminSettingsIfNeeded();
 }
@@ -5753,11 +5767,6 @@ bindEvent(messageForm, "submit", sendChatMessage);
 bindEvent(newsList, "click", (event) => {
   const item = event.target.closest("[data-news-cell]");
   if (item?.dataset.newsCell) focusNewsTarget(item.dataset.newsCell);
-});
-document.querySelectorAll("[data-admin-tab]").forEach((button) => {
-  button.addEventListener("click", () => {
-    activateAdminTab(button.dataset.adminTab);
-  });
 });
 bindEvent(profileForm, "submit", saveProfile);
 bindEvent(profileLogo, "change", loadProfileLogo);
