@@ -4,6 +4,8 @@ const http = require("http");
 const path = require("path");
 const polygonClipping = require("polygon-clipping");
 const zlib = require("zlib");
+const GameRules = require("./public/game-rules");
+const Land = require("./lib/land");
 
 function loadEnvFile() {
   const envPath = path.join(__dirname, ".env");
@@ -29,16 +31,19 @@ const PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.HOST || "0.0.0.0";
 const ROOT = __dirname;
 const PUBLIC_DIR = path.join(ROOT, "public");
-const DATA_DIR = path.join(ROOT, "data");
+const DATA_DIR = process.env.AGRO_DATA_DIR ? path.resolve(process.env.AGRO_DATA_DIR) : path.join(ROOT, "data");
 const USERS_FILE = path.join(DATA_DIR, "users.txt");
 const MARKET_FILE = path.join(DATA_DIR, "market.txt");
 const SETTINGS_FILE = path.join(DATA_DIR, "settings.json");
 const NEWS_FILE = path.join(DATA_DIR, "news.txt");
+const SESSIONS_FILE = path.join(DATA_DIR, "sessions.json");
 const SESSION_TTL_MS = 1000 * 60 * 60 * 24;
 const ADMIN_USERNAME = process.env.ADMIN_USERNAME || "Admin";
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "Admin";
 const DATABASE_URL = process.env.DATABASE_URL || "";
 const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || "https://zemlevlasnyk.com";
+const IS_PRODUCTION = process.env.NODE_ENV === "production" || (Boolean(DATABASE_URL) && /^https:\/\//i.test(PUBLIC_BASE_URL));
+const SESSION_COOKIE_SECURE = IS_PRODUCTION || process.env.SESSION_COOKIE_SECURE === "true";
 const BASE_RIVALS = [];
 
 const DEFAULT_SETTINGS = {
@@ -126,6 +131,7 @@ let storage = null;
 let dbPool = null;
 let deferredUsersPersistTimer = null;
 let deferredMarketPersistTimer = null;
+let deferredSessionsPersistTimer = null;
 let marketVersion = 1;
 let leaderboardVersion = 1;
 let leaderboardCache = { version: 0, rows: [] };
@@ -170,6 +176,9 @@ function ensureDataFiles() {
   if (!fs.existsSync(NEWS_FILE)) {
     fs.writeFileSync(NEWS_FILE, "[]", "utf8");
   }
+  if (!fs.existsSync(SESSIONS_FILE)) {
+    fs.writeFileSync(SESSIONS_FILE, "[]", "utf8");
+  }
 }
 
 function readFileStorageSnapshot() {
@@ -202,7 +211,14 @@ function readFileStorageSnapshot() {
     news = [];
   }
 
-  return { users, market, settings, news, messages: [], passwordResets: [] };
+  let savedSessions = [];
+  try {
+    const rows = JSON.parse(fs.readFileSync(SESSIONS_FILE, "utf8") || "[]");
+    savedSessions = Array.isArray(rows) ? rows : [];
+  } catch {
+    savedSessions = [];
+  }
+  return { users, market, settings, news, messages: [], passwordResets: [], sessions: savedSessions };
 }
 
 async function initDatabaseStorage() {
@@ -216,6 +232,46 @@ async function initDatabaseStorage() {
       value jsonb NOT NULL,
       updated_at timestamptz NOT NULL DEFAULT now()
     )
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS game_users (
+      id text PRIMARY KEY,
+      username text NOT NULL,
+      email text,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      updated_at timestamptz NOT NULL DEFAULT now()
+    );
+    CREATE TABLE IF NOT EXISTS game_land (
+      cell_id text PRIMARY KEY,
+      owner_id text NOT NULL,
+      state jsonb NOT NULL DEFAULT '{}'::jsonb,
+      updated_at timestamptz NOT NULL DEFAULT now()
+    );
+    CREATE TABLE IF NOT EXISTS game_transactions (
+      id uuid PRIMARY KEY,
+      user_id text NOT NULL,
+      type text NOT NULL,
+      amount integer NOT NULL,
+      payload jsonb NOT NULL DEFAULT '{}'::jsonb,
+      created_at timestamptz NOT NULL DEFAULT now()
+    );
+    CREATE TABLE IF NOT EXISTS game_assets (
+      id uuid PRIMARY KEY,
+      user_id text NOT NULL,
+      kind text NOT NULL,
+      item_id text NOT NULL,
+      payload jsonb NOT NULL DEFAULT '{}'::jsonb,
+      created_at timestamptz NOT NULL DEFAULT now()
+    );
+    CREATE TABLE IF NOT EXISTS game_sessions (
+      token text PRIMARY KEY,
+      user_id text NOT NULL,
+      is_guest boolean NOT NULL DEFAULT false,
+      last_seen_at bigint NOT NULL,
+      expires_at bigint NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS game_land_owner_idx ON game_land (owner_id);
+    CREATE INDEX IF NOT EXISTS game_sessions_expires_idx ON game_sessions (expires_at);
   `);
 
   const snapshot = readFileStorageSnapshot();
@@ -237,7 +293,8 @@ async function initDatabaseStorage() {
     settings: state.settings && typeof state.settings === "object" ? state.settings : DEFAULT_SETTINGS,
     news: Array.isArray(state.news) ? state.news : [],
     messages: Array.isArray(state.messages) ? state.messages : [],
-    passwordResets: Array.isArray(state.passwordResets) ? state.passwordResets : []
+    passwordResets: Array.isArray(state.passwordResets) ? state.passwordResets : [],
+    sessions: Array.isArray(state.sessions) ? state.sessions : []
   };
 }
 
@@ -307,6 +364,33 @@ function persistMarketPatch(upserts = {}, deleteIds = []) {
 async function initStorage() {
   storage = await initDatabaseStorage();
   if (!storage) storage = readFileStorageSnapshot();
+  const now = Date.now();
+  (Array.isArray(storage.sessions) ? storage.sessions : []).forEach(([token, session]) => {
+    if (!token || !session || session.expiresAt <= now) return;
+    sessions.set(token, session);
+  });
+}
+
+function persistSessions() {
+  if (!storage) return;
+  const now = Date.now();
+  storage.sessions = [...sessions.entries()]
+    .filter(([, session]) => session?.expiresAt > now)
+    .map(([token, session]) => [token, session]);
+  if (dbPool) {
+    persistState("sessions");
+    return;
+  }
+  ensureDataFiles();
+  fs.writeFileSync(SESSIONS_FILE, JSON.stringify(storage.sessions), "utf8");
+}
+
+function scheduleSessionsPersistence(delayMs = 350) {
+  clearTimeout(deferredSessionsPersistTimer);
+  deferredSessionsPersistTimer = setTimeout(() => {
+    deferredSessionsPersistTimer = null;
+    persistSessions();
+  }, Math.max(0, delayMs));
 }
 
 function numberIn(value, fallback, min = 0, max = 1_000_000_000) {
@@ -327,7 +411,7 @@ function safeDecodeURIComponent(value, fallback = "") {
 }
 
 function isPlayableLandId(id) {
-  return /^cell--?\d+--?\d+$/.test(String(id || ""));
+  return Land.isPlayableLandId(id);
 }
 
 function compactMarketEntry(entry = {}) {
@@ -821,6 +905,18 @@ function ensureAdminUser() {
   if (changed) writeUsers(users);
 }
 
+function assertProductionSecurity() {
+  if (!IS_PRODUCTION) return;
+  const insecurePasswords = new Set(["", "admin", "change-this-admin-password", "password", "123456", "12345678"]);
+  const normalizedPassword = String(process.env.ADMIN_PASSWORD || "").trim().toLowerCase();
+  if (!String(process.env.ADMIN_USERNAME || "").trim()) {
+    throw new Error("Production requires ADMIN_USERNAME in environment variables.");
+  }
+  if (normalizedPassword.length < 16 || insecurePasswords.has(normalizedPassword)) {
+    throw new Error("Production requires a strong ADMIN_PASSWORD (at least 16 characters) in environment variables.");
+  }
+}
+
 function readMarket() {
   try {
     const market = storage?.market || { land: {} };
@@ -907,19 +1003,19 @@ function parseCellGridId(id) {
   return { q: match ? Number(match[1]) : 0, r: match ? Number(match[2]) : 0 };
 }
 
+function areCellIdsConnected(cellIds) {
+  return Land.areCellIdsConnected(cellIds);
+}
+
 function hashStringServer(value) {
-  let hash = 0;
-  for (let index = 0; index < value.length; index += 1) hash = ((hash << 5) - hash + value.charCodeAt(index)) | 0;
-  return hash;
+  return GameRules.hashString(value);
 }
 
 function ownershipPriceMultiplier(ownedCount, settings = readSettings()) {
   const rules = Array.isArray(settings.economy?.ownershipPriceMultipliers)
     ? settings.economy.ownershipPriceMultipliers
     : DEFAULT_SETTINGS.economy.ownershipPriceMultipliers;
-  return rules
-    .filter((rule) => Math.max(0, ownedCount || 0) >= (rule.minOwned || 0))
-    .reduce((value, rule) => Math.max(value, Number(rule.multiplier) || 1), 1);
+  return GameRules.ownershipPriceMultiplier(ownedCount, rules);
 }
 
 function authoritativeLandPrice(id, market, settings = readSettings(), buyerOwnedCount = 0) {
@@ -1872,22 +1968,15 @@ function isFirstCellInBuildingGroup(cellId, cell, land) {
 }
 
 function improvementCostForLevel(level, settings = readSettings()) {
-  return settings.upgrades.landLevels
-    .filter((item) => item.level <= Math.max(1, level || 1))
-    .reduce((sum, item) => sum + (item.level > 1 ? item.cost : 0), 0);
+  return GameRules.improvementCostForLevel(level, settings.upgrades.landLevels);
 }
 
 function fertilizerMultiplier(level, settings = readSettings()) {
-  const rule = [...settings.upgrades.landLevels].reverse().find((item) => (level || 1) >= item.level) || settings.upgrades.landLevels[0];
-  return 1 + ((rule?.incomeBonusPercent || 0) / 100);
+  return GameRules.fertilizerMultiplier(level, settings.upgrades.landLevels);
 }
 
 function incomeForLandIdServer(id, settings = readSettings()) {
-  const economy = settings.economy || {};
-  const base = Number.isFinite(economy.baseIncomeMin) ? economy.baseIncomeMin : 180;
-  const spread = Number.isFinite(economy.baseIncomeSpread) ? Math.max(0, Math.floor(economy.baseIncomeSpread)) : 0;
-  const seed = Math.abs(hashStringServer(String(id))) || 1;
-  return Math.round(base + (spread ? seed % spread : 0));
+  return GameRules.incomeForLandId(id, settings.economy || {});
 }
 
 function clusterBonusMapForFarm(farm, settings = readSettings()) {
@@ -2041,7 +2130,7 @@ function leaderboardRows() {
 function isAdmin(session, users = readUsers()) {
   if (!session || session.isGuest) return false;
   const user = users.find((item) => item.id === session.userId);
-  return Boolean(user && (user.isAdmin || user.username.toLowerCase() === "admin"));
+  return Boolean(user?.isAdmin);
 }
 
 function playerSessionPayload(user) {
@@ -2049,7 +2138,7 @@ function playerSessionPayload(user) {
     id: user.id,
     username: user.username,
     isGuest: false,
-    isAdmin: Boolean(user.isAdmin || String(user.username || "").toLowerCase() === "admin")
+    isAdmin: Boolean(user.isAdmin)
   };
 }
 
@@ -2325,7 +2414,19 @@ function createSession(userId, isGuest = false) {
     lastSeenAt: Date.now(),
     expiresAt: Date.now() + SESSION_TTL_MS
   });
+  scheduleSessionsPersistence();
   return token;
+}
+
+function sessionCookie(token, maxAge) {
+  return [
+    `agro_session=${token}`,
+    "HttpOnly",
+    "SameSite=Lax",
+    "Path=/",
+    `Max-Age=${maxAge}`,
+    ...(SESSION_COOKIE_SECURE ? ["Secure"] : [])
+  ].join("; ");
 }
 
 function getSession(req) {
@@ -2337,11 +2438,13 @@ function getSession(req) {
   const session = sessions.get(token);
   if (!session || session.expiresAt < Date.now()) {
     sessions.delete(token);
+    scheduleSessionsPersistence();
     return null;
   }
 
   session.expiresAt = Date.now() + SESSION_TTL_MS;
   session.lastSeenAt = Date.now();
+  scheduleSessionsPersistence();
   return session;
 }
 
@@ -2577,8 +2680,11 @@ async function handleApi(req, res) {
 
     if (req.method === "POST" && req.url === "/api/logout") {
       const token = getSessionToken(req);
-      if (token) sessions.delete(token);
-      sendJson(res, 200, { ok: true }, { "set-cookie": "agro_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0" });
+      if (token) {
+        sessions.delete(token);
+        scheduleSessionsPersistence();
+      }
+      sendJson(res, 200, { ok: true }, { "set-cookie": sessionCookie("", 0) });
       return;
     }
 
@@ -2996,6 +3102,10 @@ async function handleApi(req, res) {
         const valid = cellIds.every((id) => farm.land?.[id] && !farm.land[id].building && !farm.land[id].buildingId);
         if (!valid) {
           sendJson(res, 400, { error: "Усі вибрані ділянки мають належати вам і бути без побудов." });
+          return;
+        }
+        if (!areCellIdsConnected(cellIds)) {
+          sendJson(res, 400, { error: "Ділянки для побудови мають утворювати один суміжний масив." });
           return;
         }
         const ownedCount = Object.keys(farm.land || {}).length;
@@ -3615,7 +3725,7 @@ async function handleApi(req, res) {
       sendJson(res, 201, {
         player: playerSessionPayload(user),
         farm: user.farm
-      }, { "set-cookie": `agro_session=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=86400` });
+      }, { "set-cookie": sessionCookie(token, 86400) });
       return;
     }
 
@@ -3636,7 +3746,7 @@ async function handleApi(req, res) {
       sendJson(res, 200, {
         player: playerSessionPayload(user),
         farm: sanitizeFarmState(user.farm)
-      }, { "set-cookie": `agro_session=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=86400` });
+      }, { "set-cookie": sessionCookie(token, 86400) });
       return;
     }
 
@@ -3805,6 +3915,7 @@ async function handleApi(req, res) {
 }
 
 async function startServer() {
+  assertProductionSecurity();
   ensureDataFiles();
   await initStorage();
   applyRuntimeMapSettings(readSettings());
@@ -3841,7 +3952,16 @@ async function startServer() {
   if (typeof dailyIncomeTimer.unref === "function") dailyIncomeTimer.unref();
 }
 
-startServer().catch((error) => {
-  console.error("Не вдалося запустити сервер:", error);
-  process.exit(1);
-});
+if (require.main === module) {
+  startServer().catch((error) => {
+    console.error("Не вдалося запустити сервер:", error);
+    process.exit(1);
+  });
+}
+
+module.exports = {
+  areCellIdsConnected,
+  sessionCookie,
+  activeMachineryMap,
+  settleDailyIncomeForFarm
+};

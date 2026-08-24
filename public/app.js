@@ -2991,7 +2991,7 @@ function fertilizerLevel(level) {
 }
 
 function fertilizerMultiplier(level) {
-  return 1 + ((fertilizerLevel(level)?.incomeBonusPercent || 0) / 100);
+  return GameRules.fertilizerMultiplier(level, LAND_LEVELS);
 }
 
 function inventoryIncomeMultiplier() {
@@ -3132,13 +3132,11 @@ function inventoryValue() {
 }
 
 function fertilizerCostThroughLevel(level) {
-  return LAND_LEVELS.filter((item) => item.level <= Math.max(1, level || 1)).reduce((sum, item) => sum + (item.level > 1 ? item.cost || 0 : 0), 0);
+  return GameRules.improvementCostForLevel(level, LAND_LEVELS);
 }
 
 function fertilizerUpgradeCost(currentLevel, targetLevel) {
-  return LAND_LEVELS
-    .filter((item) => item.level > Math.max(1, currentLevel || 1) && item.level <= targetLevel)
-    .reduce((sum, item) => sum + (item.cost || 0), 0);
+  return GameRules.fertilizerUpgradeCost(currentLevel, targetLevel, LAND_LEVELS);
 }
 
 function nextUpgradeCost(owned) {
