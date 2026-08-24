@@ -239,7 +239,12 @@
         </div>
       </section>
     </main>
-    <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
-    <script src="/app.js?v=20260824-boot-timeout-income-sweep-fix"></script>
+    <script async src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+    <script>
+      window.addEventListener("error", () => document.body.classList.remove("is-booting"));
+      window.addEventListener("unhandledrejection", () => document.body.classList.remove("is-booting"));
+      window.setTimeout(() => document.body.classList.remove("is-booting"), 12000);
+    </script>
+    <script src="/app.js?v=20260824-nonblocking-maplibre-boot-fix"></script>
   </body>
 </html>

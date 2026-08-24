@@ -686,7 +686,22 @@ async function initMap() {
   if (map) return;
 
   if (!globalThis.maplibregl) {
+    await new Promise((resolve) => {
+      const startedAt = Date.now();
+      const tick = () => {
+        if (globalThis.maplibregl || Date.now() - startedAt > 8000) {
+          resolve();
+          return;
+        }
+        window.setTimeout(tick, 120);
+      };
+      tick();
+    });
+  }
+
+  if (!globalThis.maplibregl) {
     showGameMessage("MapLibre GL JS не завантажився. Перевірте підключення до інтернету.");
+    finishBoot();
     return;
   }
 
@@ -710,7 +725,17 @@ async function initMap() {
   addMapZoomControl();
   addMapQuickActionsControl();
 
-  await new Promise((resolve) => map.once("load", resolve));
+  await new Promise((resolve, reject) => {
+    const timeout = window.setTimeout(() => reject(new Error("Карта завантажується надто довго.")), 10000);
+    map.once("load", () => {
+      window.clearTimeout(timeout);
+      resolve();
+    });
+    map.once("error", (event) => {
+      window.clearTimeout(timeout);
+      reject(event?.error || new Error("Помилка завантаження карти."));
+    });
+  });
   initLandMapLayers();
 
   await Promise.allSettled([loadUkraineBoundary(), loadPlayableGridMask()]);
