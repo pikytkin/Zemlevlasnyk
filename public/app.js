@@ -67,6 +67,9 @@ let LAND_LEVELS = [
   { level: 5, name: "Агрохімія повного циклу", cost: 3600, incomeBonusPercent: 175 }
 ];
 let gameSettings = null;
+let activeAssetKind = "machinery";
+let assetCarouselIndex = 0;
+let assetPhotoIndex = 0;
 let stageRules = [
   { title: "Початок", min: 0, text: "Купуйте перші ділянки та формуйте базу господарства." },
   { title: "Господарство", min: 5, text: "Земля поруч підвищує ціну наступної покупки, а з'єднані ділянки дають бонус до доходу." },
@@ -3527,6 +3530,12 @@ function fertilizerCostForSelectedCells(targetLevel) {
     if (!owned || owned.building || owned.buildingId) return sum;
     return sum + fertilizerUpgradeCost(owned.level || 1, targetLevel);
   }, 0);
+}
+
+function assetItemsForKind(kind) {
+  return kind === "elevators"
+    ? (gameSettings?.assets?.elevatorItems || [])
+    : (gameSettings?.assets?.machineryItems || []);
 }
 
 function openAssetPurchase(kind) {

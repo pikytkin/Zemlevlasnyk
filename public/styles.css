@@ -1166,7 +1166,14 @@ dd {
 body.is-admin-page {
   min-height: 100vh;
   background: var(--bg);
+  overflow-x: hidden;
   overflow-y: auto;
+}
+
+body.is-admin-page #gameScreen {
+  height: auto;
+  min-height: 100vh;
+  overflow: visible;
 }
 
 body.is-admin-page #gameScreen > :not(#adminModal) {
