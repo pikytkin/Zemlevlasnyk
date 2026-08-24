@@ -1163,6 +1163,32 @@ dd {
   line-height: 1;
 }
 
+body.is-admin-page {
+  min-height: 100vh;
+  background: var(--bg);
+}
+
+body.is-admin-page #adminModal {
+  position: static;
+  display: block;
+  min-height: 100vh;
+  padding: 24px;
+  background: transparent;
+}
+
+body.is-admin-page #adminModal .admin-panel {
+  position: relative;
+  width: min(1180px, 100%);
+  max-height: none;
+  margin: 0 auto;
+}
+
+body.is-admin-page #adminModal .modal-close {
+  text-decoration: none;
+  display: grid;
+  place-items: center;
+}
+
 .land-operation-overlay {
   position: fixed;
   inset: 0;

@@ -16,3 +16,4 @@ temp/
 .npm-cache/
 agro_zoom_fix_changed_files/
 .deploy-archive/
+data/sessions.json

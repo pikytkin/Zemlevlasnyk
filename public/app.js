@@ -573,6 +573,8 @@ function startGame(nextPlayer, nextState) {
   refreshMessageSummary();
   if (window.location.pathname === "/admin") {
     if (player?.isAdmin) {
+      document.body.classList.add("is-admin-page");
+      gameScreen.classList.add("is-hidden");
       openAdminPanel();
       if (awaitingInitialOverviewLand) {
         awaitingInitialOverviewLand = false;
@@ -3445,6 +3447,10 @@ function buildOnSelectedCell() {
     return;
   }
   openAssetPurchase("elevators");
+}
+
+function buyMachinery() {
+  openAssetPurchase("machinery");
 }
 
 async function demolishSelectedBuildings(cells = ownedSelectedCells()) {
