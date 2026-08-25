@@ -212,7 +212,7 @@ function readFileStorageSnapshot() {
   } catch {
     savedSessions = [];
   }
-  return { users, market, settings, news, messages: [], passwordResets: [], sessions: savedSessions };
+  return { users, market, settings, news, messages: [], offers: [], passwordResets: [], sessions: savedSessions };
 }
 
 async function initDatabaseStorage() {
@@ -287,6 +287,7 @@ async function initDatabaseStorage() {
     settings: state.settings && typeof state.settings === "object" ? state.settings : DEFAULT_SETTINGS,
     news: Array.isArray(state.news) ? state.news : [],
     messages: Array.isArray(state.messages) ? state.messages : [],
+    offers: Array.isArray(state.offers) ? state.offers : [],
     passwordResets: Array.isArray(state.passwordResets) ? state.passwordResets : [],
     sessions: Array.isArray(state.sessions) ? state.sessions : []
   };
@@ -1914,6 +1915,15 @@ function inventoryIncomeMultiplier(inventory, landCount = 0, settings = readSett
     return sum + coverage * item.incomeBonusPercent;
   }, 0);
   return 1 + machineryBonus / 100;
+}
+
+function readOffers() {
+  return Array.isArray(storage?.offers) ? storage.offers : [];
+}
+
+function writeOffers(offers) {
+  storage.offers = offers.slice(-5000);
+  persistState("offers");
 }
 
 function activeMachineryMap(inventory, currentDay = 1) {
