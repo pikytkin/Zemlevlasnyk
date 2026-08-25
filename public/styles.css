@@ -1771,6 +1771,78 @@ body.is-admin-page #adminModal .modal-close {
   border-radius: 8px;
 }
 
+.dossier-panel {
+  width: min(760px, 94vw);
+}
+
+.dossier-tabs {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.dossier-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.dossier-grid div,
+.journal-entry {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.dossier-grid div {
+  display: grid;
+  gap: 3px;
+  padding: 10px;
+}
+
+.dossier-grid span,
+.journal-entry time,
+.journal-entry div span {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.dossier-section h4,
+.journal-entry h4 {
+  margin: 0;
+}
+
+.dossier-section p,
+.journal-entry p {
+  margin: 6px 0 0;
+  color: var(--muted);
+}
+
+.journal-list {
+  display: grid;
+  gap: 10px;
+}
+
+.journal-entry {
+  display: grid;
+  gap: 7px;
+  padding: 12px;
+}
+
+.journal-entry div {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.journal-negative {
+  color: var(--red);
+}
+
+@media (max-width: 520px) {
+  .dossier-grid { grid-template-columns: 1fr; }
+}
+
 .asset-settings-card .settings-checkbox {
   display: flex;
   align-items: center;

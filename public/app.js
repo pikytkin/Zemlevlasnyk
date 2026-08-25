@@ -74,7 +74,8 @@ let stageRules = [
   { title: "Початок", min: 0, text: "Купуйте перші ділянки та формуйте базу господарства." },
   { title: "Господарство", min: 5, text: "Земля поруч підвищує ціну наступної покупки, а з'єднані ділянки дають бонус до доходу." },
   { title: "Компанія", min: 15, text: "З'єднані ділянки дають відчутний бонус до доходу." },
-    { title: "Агрохолдинг", min: 40, text: "Розвивайте побудови, техніку і рівні землі." },
+  { title: "Агрохолдинг", min: 40, text: "Розвивайте побудови, техніку і рівні землі." },
+  { title: "Корпорація", min: 100, text: "Масштабуйте виробництво та баланс між землею й активами." },
   { title: "Національна корпорація", min: 250, text: "Гравець бореться за лідерство на карті України." }
 ];
 
@@ -112,12 +113,17 @@ const buildingButton = document.querySelector("#buildingButton");
 const machineryButton = document.querySelector("#machineryButton");
 const sellButton = document.querySelector("#sellButton");
 const profileButton = document.querySelector("#profileButton");
+const dossierButton = document.querySelector("#dossierButton");
 const helpButton = document.querySelector("#helpButton");
 const messagesButton = document.querySelector("#messagesButton");
 const messageBadge = document.querySelector("#messageBadge");
 const logoutButton = document.querySelector("#logoutButton");
 const profileModal = document.querySelector("#profileModal");
 const helpModal = document.querySelector("#helpModal");
+const dossierModal = document.querySelector("#dossierModal");
+const dossierTitle = document.querySelector("#dossierTitle");
+const dossierOverview = document.querySelector("#dossierOverview");
+const dossierJournal = document.querySelector("#dossierJournal");
 const adminModal = document.querySelector("#adminModal");
 const profileForm = document.querySelector("#profileForm");
 const profileCompanyName = document.querySelector("#profileCompanyName");
@@ -3066,9 +3072,14 @@ function buildingDailyIncome() {
 }
 
 function buildingCountByItem() {
-  return Object.values(state.land || {}).reduce((map, ownership) => {
+  const counted = new Set();
+  return Object.entries(state.land || {}).reduce((map, [cellId, ownership]) => {
     const id = ownership.building || ownership.buildingId;
-    if (id) map[id] = (map[id] || 0) + 1;
+    const key = ownership.buildingGroupId || `${cellId}:${id}`;
+    if (id && !counted.has(key)) {
+      counted.add(key);
+      map[id] = (map[id] || 0) + 1;
+    }
     return map;
   }, {});
 }
@@ -4453,9 +4464,64 @@ function renderProfileForm() {
     ["Зароблено всього", money(state.stats.earned || 0)],
     ["Куплено ділянок", state.stats.purchased || 0],
     ["Покращень", state.stats.upgraded || 0],
-    ["Побудов", state.stats.buildings || 0],
-    ["Техніки", state.stats.machinery || 0]
+    ["Побудов", buildingObjectCount()],
+    ["Активна техніка", inventoryCount("machinery")]
   ].map(([key, value]) => `<div><span>${key}</span><strong>${value}</strong></div>`).join("");
+}
+
+function buildingObjectCount() {
+  const groups = new Set();
+  Object.entries(state.land || {}).forEach(([id, ownership]) => {
+    const buildingId = ownership?.building || ownership?.buildingId;
+    if (buildingId) groups.add(ownership.buildingGroupId || `${id}:${buildingId}`);
+  });
+  return groups.size;
+}
+
+function formatJournalDate(value) {
+  const date = new Date(value);
+  return Number.isFinite(date.getTime())
+    ? date.toLocaleString("uk-UA", { dateStyle: "short", timeStyle: "short" })
+    : "Невідомий час";
+}
+
+function renderDossier() {
+  if (!dossierOverview || !dossierJournal) return;
+  const ownedCount = Object.keys(state.land || {}).length;
+  const clusters = connectedClusters();
+  const stage = [...stageRules].reverse().find((item) => ownedCount >= item.min) || stageRules[0];
+  const activeMachinery = inventoryCount("machinery");
+  const buildingCount = buildingObjectCount();
+  const taxStart = Number(gameSettings?.economy?.incomeTaxStartLandCount) || 0;
+  const taxRate = ownedCount >= taxStart ? Number(gameSettings?.economy?.incomeTaxPercent) || 0 : 0;
+  dossierTitle.textContent = state.companyName || player?.username || "Господарство";
+  dossierOverview.innerHTML = `
+    <div class="dossier-grid">
+      ${[["Етап розвитку", stage.title], ["Земельний банк", `${ownedCount} ділянок`], ["Найбільший кластер", `${clusters[0]?.length || 0} ділянок`], ["Баланс", money(state.coins)], ["Дохід за цикл", money(totalDailyIncome())], ["Податок", taxRate ? `${taxRate}%` : "не застосовується"], ["Активна техніка", `${activeMachinery} од.`], ["Побудови", `${buildingCount} об.`], ["Добрива", `${Object.values(state.land || {}).filter((item) => (item.level || 1) > 1).length} ділянок`], ["Інвестиції", money(assetsValue())]]
+        .map(([label, value]) => `<div><span>${label}</span><strong>${escapeHtml(String(value))}</strong></div>`).join("")}
+    </div>
+    <section class="dossier-section">
+      <h4>Структура доходу</h4>
+      <p>Дохід землі, добрив, техніки, кластерів, побудов і податку фіксується в журналі після кожного нарахування.</p>
+    </section>`;
+  const entries = Array.isArray(state.ledger) ? state.ledger : [];
+  dossierJournal.innerHTML = entries.length ? `<div class="journal-list">${entries.map((entry) => {
+    const details = entry.details;
+    const amount = Number(entry.amount) || 0;
+    const lines = details ? [
+      ["Базовий дохід земель", details.baseIncome], ["Бонус добрив", details.fertilizerBonus],
+      ["Бонус техніки", details.machineryBonus], ["Бонус господарств", details.clusterBonus],
+      ["Побудови", details.buildingIncome], ["Валовий дохід", details.grossIncome],
+      [`Податок ${details.taxRate || 0}%`, -(Number(details.tax) || 0)], ["Зараховано", amount]
+    ].map(([label, value]) => `<div><span>${label}</span><strong class="${Number(value) < 0 ? "journal-negative" : ""}">${Number(value) < 0 ? "-" : "+"}${money(Math.abs(Number(value) || 0))}</strong></div>`).join("") : "";
+    return `<article class="journal-entry"><time>${formatJournalDate(entry.at)}</time><h4>${escapeHtml(entry.text || "Подія")}</h4>${lines || `<p>${amount ? `${amount > 0 ? "+" : ""}${money(amount)}` : "Без зміни балансу"}</p>`}</article>`;
+  }).join("")}</div>` : "<p class=\"muted-text\">Подій ще немає.</p>";
+}
+
+function activateDossierTab(tab) {
+  document.querySelectorAll("[data-dossier-tab]").forEach((button) => button.classList.toggle("is-active", button.dataset.dossierTab === tab));
+  dossierOverview?.classList.toggle("is-hidden", tab !== "overview");
+  dossierJournal?.classList.toggle("is-hidden", tab !== "journal");
 }
 
 async function showOwnerInfo(ownerId) {
@@ -5828,6 +5894,15 @@ bindEvent(ownerInfo, "click", (event) => {
 bindEvent(profileButton, "click", () => {
   renderProfileForm();
   openModal(profileModal);
+});
+bindEvent(dossierButton, "click", () => {
+  renderDossier();
+  activateDossierTab("overview");
+  openModal(dossierModal);
+});
+bindEvent(dossierModal, "click", (event) => {
+  const tab = event.target.closest("[data-dossier-tab]");
+  if (tab?.dataset.dossierTab) activateDossierTab(tab.dataset.dossierTab);
 });
 bindEvent(helpButton, "click", () => openModal(helpModal));
 bindEvent(messagesButton, "click", openMessagesPanel);

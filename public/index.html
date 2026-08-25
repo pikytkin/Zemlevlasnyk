@@ -56,6 +56,7 @@
           <div class="top-actions">
             <div class="wallet"><span>Баланс</span><strong id="coinCount">500 мон.</strong></div>
             <button class="secondary-action" id="profileButton" type="button">Профіль</button>
+            <button class="secondary-action" id="dossierButton" type="button">Досьє</button>
             <button class="secondary-action" id="helpButton" type="button">Довідка</button>
             <button class="secondary-action message-action" id="messagesButton" type="button">Повідомлення <span class="message-badge is-hidden" id="messageBadge">0</span></button>
             <button class="secondary-action" id="incomeButton" type="button">Перевірити нарахування</button>
@@ -139,6 +140,20 @@
             <p>“Землевласник” — економічна стратегія про землю як актив. Купуйте ділянки, об'єднуйте території, інвестуйте в добрива, техніку та побудови.</p>
             <h3>Ваша земля — ваш актив</h3>
             <p>Кожна ділянка може давати дохід, підвищувати цінність сусідніх земель і ставати частиною більшого господарства.</p>
+          </section>
+        </div>
+
+        <div class="modal is-hidden" id="dossierModal" role="dialog" aria-modal="true" aria-label="Досьє компанії">
+          <section class="modal-panel dossier-panel">
+            <button class="modal-close" type="button" data-close-modal>×</button>
+            <p class="eyebrow">Досьє компанії</p>
+            <h3 id="dossierTitle">Господарство</h3>
+            <div class="dossier-tabs" role="tablist" aria-label="Розділи досьє">
+              <button class="secondary-action is-active" type="button" data-dossier-tab="overview">Огляд</button>
+              <button class="secondary-action" type="button" data-dossier-tab="journal">Журнал</button>
+            </div>
+            <section id="dossierOverview"></section>
+            <section id="dossierJournal" class="is-hidden"></section>
           </section>
         </div>
 
@@ -246,6 +261,6 @@
       window.setTimeout(() => document.body.classList.remove("is-booting"), 12000);
     </script>
     <script src="/game-rules.js?v=20260825-market-tax-capacity"></script>
-    <script src="/app.js?v=20260825-pro-photo-lock"></script>
+    <script src="/app.js?v=20260825-dossier-journal"></script>
   </body>
 </html>

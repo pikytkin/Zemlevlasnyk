@@ -12,41 +12,7 @@
     "detailZoomMin": 10,
     "claimBatchSize": 1000,
     "incomeCycleMinutes": 1440,
-    "offlineIncomeCapHours": 168,
-    "ownershipPriceMultipliers": [
-      {
-        "minOwned": 0,
-        "multiplier": 1.0
-      },
-      {
-        "minOwned": 6,
-        "multiplier": 1.1
-      },
-      {
-        "minOwned": 16,
-        "multiplier": 1.25
-      },
-      {
-        "minOwned": 31,
-        "multiplier": 1.5
-      },
-      {
-        "minOwned": 61,
-        "multiplier": 1.8
-      },
-      {
-        "minOwned": 101,
-        "multiplier": 2.2
-      },
-      {
-        "minOwned": 201,
-        "multiplier": 2.8
-      },
-      {
-        "minOwned": 501,
-        "multiplier": 3.5
-      }
-    ]
+    "offlineIncomeCapHours": 168
   },
   "upgrades": {
     "landMaxLevel": 5,
@@ -222,31 +188,37 @@
     {
       "title": "Початок",
       "min": 0,
+      "landPriceMultiplier": 1,
       "text": "Купуйте перші ділянки та формуйте базу господарства."
     },
     {
       "title": "Господарство",
       "min": 5,
+      "landPriceMultiplier": 1,
       "text": "Земля поруч підвищує ціну наступної покупки, а з'єднані ділянки дають бонус до доходу."
     },
     {
       "title": "Компанія",
       "min": 15,
+      "landPriceMultiplier": 1.1,
       "text": "З'єднані ділянки дають відчутний бонус до доходу."
     },
     {
       "title": "Агрохолдинг",
       "min": 40,
+      "landPriceMultiplier": 1.5,
       "text": "Розвивайте побудови, техніку і рівні землі."
     },
     {
       "title": "Корпорація",
       "min": 100,
+      "landPriceMultiplier": 2.2,
       "text": "Масштабуйте виробництво та баланс між землею й активами."
     },
     {
       "title": "Національна корпорація",
       "min": 250,
+      "landPriceMultiplier": 2.8,
       "text": "Гравець бореться за лідерство на карті України."
     }
   ],

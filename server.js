@@ -430,12 +430,10 @@ function numberArray(value, fallback, maxLength = 12) {
 }
 
 function defaultStagePriceMultiplier(ownedCount) {
-  return GameRules.ownershipPriceMultiplier(ownedCount, [
-    { minOwned: 0, multiplier: 1 }, { minOwned: 6, multiplier: 1.1 },
-    { minOwned: 16, multiplier: 1.25 }, { minOwned: 31, multiplier: 1.5 },
-    { minOwned: 61, multiplier: 1.8 }, { minOwned: 101, multiplier: 2.2 },
-    { minOwned: 201, multiplier: 2.8 }, { minOwned: 501, multiplier: 3.5 }
-  ]);
+  const stage = [...DEFAULT_SETTINGS.stages]
+    .sort((a, b) => b.min - a.min)
+    .find((item) => ownedCount >= item.min);
+  return Number(stage?.landPriceMultiplier) || 1;
 }
 
 function sanitizeSettings(settings) {
@@ -490,12 +488,7 @@ function sanitizeSettings(settings) {
           title: String(item?.title || defaults.stages[index]?.title || "Етап").slice(0, 40),
           min,
           text: String(item?.text || defaults.stages[index]?.text || "").slice(0, 180),
-          landPriceMultiplier: numberIn(
-            Number(item?.landPriceMultiplier),
-            defaultStagePriceMultiplier(min),
-            0.1,
-            100
-          )
+          landPriceMultiplier: numberIn(Number(item?.landPriceMultiplier), defaultStagePriceMultiplier(min), 0.1, 100)
         };
       })
       .sort((a, b) => a.min - b.min),
@@ -746,6 +739,16 @@ function sanitizeFarmState(state) {
       amount: Number.isFinite(item.amount) ? Math.floor(item.amount) : 0,
       balance: Number.isFinite(item.balance) ? Math.floor(item.balance) : null,
       landDelta: Number.isFinite(item.landDelta) ? Math.floor(item.landDelta) : 0,
+      details: item.details && typeof item.details === "object" ? {
+        baseIncome: Math.max(0, Math.floor(Number(item.details.baseIncome) || 0)),
+        fertilizerBonus: Math.max(0, Math.floor(Number(item.details.fertilizerBonus) || 0)),
+        machineryBonus: Math.max(0, Math.floor(Number(item.details.machineryBonus) || 0)),
+        clusterBonus: Math.max(0, Math.floor(Number(item.details.clusterBonus) || 0)),
+        buildingIncome: Math.max(0, Math.floor(Number(item.details.buildingIncome) || 0)),
+        grossIncome: Math.max(0, Math.floor(Number(item.details.grossIncome) || 0)),
+        tax: Math.max(0, Math.floor(Number(item.details.tax) || 0)),
+        taxRate: Math.max(0, Number(item.details.taxRate) || 0)
+      } : null,
       at: typeof item.at === "string" ? item.at : new Date().toISOString()
     })).filter((item) => item.text)
   };
@@ -795,6 +798,16 @@ function sanitizeFarmMetaPatch(meta, fallbackFarm = {}) {
       amount: Number.isFinite(item?.amount) ? Math.floor(item.amount) : 0,
       balance: Number.isFinite(item?.balance) ? Math.floor(item.balance) : null,
       landDelta: Number.isFinite(item?.landDelta) ? Math.floor(item.landDelta) : 0,
+      details: item?.details && typeof item.details === "object" ? {
+        baseIncome: Math.max(0, Math.floor(Number(item.details.baseIncome) || 0)),
+        fertilizerBonus: Math.max(0, Math.floor(Number(item.details.fertilizerBonus) || 0)),
+        machineryBonus: Math.max(0, Math.floor(Number(item.details.machineryBonus) || 0)),
+        clusterBonus: Math.max(0, Math.floor(Number(item.details.clusterBonus) || 0)),
+        buildingIncome: Math.max(0, Math.floor(Number(item.details.buildingIncome) || 0)),
+        grossIncome: Math.max(0, Math.floor(Number(item.details.grossIncome) || 0)),
+        tax: Math.max(0, Math.floor(Number(item.details.tax) || 0)),
+        taxRate: Math.max(0, Number(item.details.taxRate) || 0)
+      } : null,
       at: typeof item?.at === "string" ? item.at : new Date().toISOString()
     })).filter((item) => item.text)
   };
@@ -2021,11 +2034,19 @@ function clusterBonusMapForFarm(farm, settings = readSettings()) {
 }
 
 function farmDailyIncomeServer(farm, settings = readSettings(), clusterMap = null) {
+  return dailyIncomeBreakdownForFarm(farm, settings, clusterMap).netIncome;
+}
+
+function dailyIncomeBreakdownForFarm(farm, settings = readSettings(), clusterMap = null) {
   const bonuses = clusterMap || clusterBonusMapForFarm(farm, settings);
   const landCount = Object.keys(farm.land || {}).length;
   const machineryMultiplier = inventoryIncomeMultiplier(farm.inventory, landCount, settings, farm.currentDay || 1);
   const countedBuildings = new Set();
-  let rawIncome = 0;
+  let baseIncome = 0;
+  let fertilizerBonus = 0;
+  let machineryBonus = 0;
+  let clusterBonus = 0;
+  let buildingIncome = 0;
 
   Object.entries(farm.land || {}).forEach(([id, cell]) => {
     const buildingItem = buildingItemById(cell?.building || cell?.buildingId, settings);
@@ -2033,20 +2054,47 @@ function farmDailyIncomeServer(farm, settings = readSettings(), clusterMap = nul
       const key = cell.buildingGroupId || `${id}:${buildingItem.id}`;
       if (!countedBuildings.has(key)) {
         countedBuildings.add(key);
-        rawIncome += Number(buildingItem.incomePerDay) || 0;
+        buildingIncome += Number(buildingItem.incomePerDay) || 0;
       }
       return;
     }
     const base = incomeForLandIdServer(id, settings);
-    const landMultiplier = fertilizerMultiplier(cell?.level || 1, settings);
+    const fertilizerMultiplierValue = fertilizerMultiplier(cell?.level || 1, settings);
     const clusterMultiplier = 1 + (bonuses.get(id) || 0);
-    rawIncome += base * landMultiplier * machineryMultiplier * clusterMultiplier;
+    const afterFertilizer = base * fertilizerMultiplierValue;
+    const afterMachinery = afterFertilizer * machineryMultiplier;
+    const afterCluster = afterMachinery * clusterMultiplier;
+    baseIncome += base;
+    fertilizerBonus += afterFertilizer - base;
+    machineryBonus += afterMachinery - afterFertilizer;
+    clusterBonus += afterCluster - afterMachinery;
   });
 
   const taxRate = landCount >= Math.max(0, Number(settings.economy?.incomeTaxStartLandCount) || 0)
     ? Math.max(0, Number(settings.economy?.incomeTaxPercent) || 0) / 100
     : 0;
-  return Math.max(0, Math.floor(rawIncome * (1 - taxRate)));
+  const grossIncome = Math.max(0, Math.floor(baseIncome + fertilizerBonus + machineryBonus + clusterBonus + buildingIncome));
+  const tax = Math.max(0, Math.floor(grossIncome * taxRate));
+  return {
+    baseIncome: Math.floor(baseIncome),
+    fertilizerBonus: Math.floor(fertilizerBonus),
+    machineryBonus: Math.floor(machineryBonus),
+    clusterBonus: Math.floor(clusterBonus),
+    buildingIncome: Math.floor(buildingIncome),
+    grossIncome,
+    tax,
+    taxRate,
+    netIncome: Math.max(0, grossIncome - tax)
+  };
+}
+
+function buildingObjectCount(farm) {
+  const counted = new Set();
+  Object.entries(farm.land || {}).forEach(([id, cell]) => {
+    const buildingId = cell?.building || cell?.buildingId;
+    if (buildingId) counted.add(cell.buildingGroupId || `${id}:${buildingId}`);
+  });
+  return counted.size;
 }
 
 function incomeIntervalMs(settings = readSettings()) {
@@ -2076,8 +2124,11 @@ function settleDailyIncomeForFarm(farm, settings = readSettings(), nowMs = Date.
 
   const clusterMap = clusterBonusMapForFarm(farm, settings);
   let income = 0;
+  const entries = [];
   for (let index = 0; index < days; index += 1) {
-    income += farmDailyIncomeServer(farm, settings, clusterMap);
+    const breakdown = dailyIncomeBreakdownForFarm(farm, settings, clusterMap);
+    income += breakdown.netIncome;
+    entries.push(breakdown);
     farm.currentDay = Math.max(1, Number(farm.currentDay) || 1) + 1;
   }
 
@@ -2085,6 +2136,20 @@ function settleDailyIncomeForFarm(farm, settings = readSettings(), nowMs = Date.
   farm.stats = farm.stats || {};
   farm.stats.earned = Math.max(0, Math.floor((farm.stats.earned || 0) + income));
   farm.lastIncomeAt = new Date(elapsedMs > capMs ? nowMs : parsedLast + days * intervalMs).toISOString();
+  const lastEntry = entries[entries.length - 1];
+  if (lastEntry) {
+    const prefix = days > 1 ? `Нараховано за ${days} циклів` : "Добове нарахування";
+    farm.events = [{ text: `${prefix}: +${income} мон.`, at: farm.lastIncomeAt }, ...(farm.events || [])].slice(0, 30);
+    farm.ledger = [{
+      type: "income",
+      text: prefix,
+      amount: income,
+      balance: farm.coins,
+      landDelta: 0,
+      details: lastEntry,
+      at: farm.lastIncomeAt
+    }, ...(farm.ledger || [])].slice(0, 1000);
+  }
 
   return {
     changed: true,
@@ -2179,8 +2244,8 @@ function publicUserRow(user) {
     earned: farm.stats.earned,
     purchased: farm.stats.purchased,
     upgraded: farm.stats.upgraded,
-    buildings: Object.values(farm.land || {}).filter((cell) => cell.building).length,
-    machinery: farm.stats.machinery,
+    buildings: buildingObjectCount(farm),
+    machinery: Object.values(activeMachineryMap(farm.inventory, farm.currentDay || 1)).reduce((sum, quantity) => sum + quantity, 0),
     inventory: { ...farm.inventory, machinery: activeMachinery },
     buildingInventory,
     isAdmin: Boolean(user.isAdmin),
@@ -3157,7 +3222,7 @@ async function handleApi(req, res) {
             buildingBuiltAt: now, buildingLevel: 1
           };
         });
-        farm.stats.buildings = Object.values(farm.land || {}).filter((cell) => cell.building || cell.buildingId).length;
+        farm.stats.buildings = buildingObjectCount(farm);
       } else if (kind === "demolish") {
         const requested = new Set((Array.isArray(body.cellIds) ? body.cellIds : []).filter((id) => isPlayableLandId(id)));
         const targets = new Set();
@@ -3187,7 +3252,7 @@ async function handleApi(req, res) {
             buildingBuiltAt: null, buildingLevel: 0
           };
         });
-        farm.stats.buildings = Object.values(farm.land || {}).filter((cell) => cell.building || cell.buildingId).length;
+        farm.stats.buildings = buildingObjectCount(farm);
       } else {
         sendJson(res, 400, { error: "Невідомий тип покупки." });
         return;
@@ -3660,7 +3725,7 @@ async function handleApi(req, res) {
           elevators: {}
         };
         farm.stats.machinery = Object.values(farm.inventory.machinery).reduce((sum, qty) => sum + qty, 0);
-        farm.stats.buildings = Object.values(farm.land || {}).filter((cell) => cell.building).length;
+        farm.stats.buildings = buildingObjectCount(farm);
       }
       if (body.resetLand) {
         const resetAt = new Date().toISOString();
