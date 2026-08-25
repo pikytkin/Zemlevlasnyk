@@ -571,6 +571,7 @@ function sanitizeLandLevels(items, upgrades = {}, fallback = DEFAULT_SETTINGS.up
     name: String(item?.name || fallback[index]?.name || `Рівень ${index + 1}`).slice(0, 60),
     cost: intIn(item?.cost, fallback[index]?.cost || 0, 0),
     incomeBonusPercent: numberIn(Number(item?.incomeBonusPercent), fallback[index]?.incomeBonusPercent || 0, 0, 1000)
+    ,proOnly: Boolean(item?.proOnly)
   })).sort((a, b) => a.level - b.level);
 }
 
@@ -596,6 +597,7 @@ function sanitizeAssetItems(items, fallback) {
     name: String(item?.name || fallback[index]?.name || `Актив ${index + 1}`).slice(0, 60),
     cost: intIn(item?.cost, fallback[index]?.cost || 0, 0),
     incomeBonusPercent: numberIn(Number(item?.incomeBonusPercent), fallback[index]?.incomeBonusPercent || 0, 0, 1000),
+    proOnly: Boolean(item?.proOnly),
     durationDays: intIn(item?.durationDays, fallback[index]?.durationDays || 80, 1, 1000000),
     incomePerDay: intIn(item?.incomePerDay, fallback[index]?.incomePerDay || 0, 0),
     minCells: intIn(item?.minCells, fallback[index]?.minCells || 1, 1, 1000000),
@@ -2147,7 +2149,8 @@ function playerSessionPayload(user) {
     id: user.id,
     username: user.username,
     isGuest: false,
-    isAdmin: Boolean(user.isAdmin)
+    isAdmin: Boolean(user.isAdmin),
+    isPro: Boolean(user.isPro)
   };
 }
 
@@ -2180,7 +2183,8 @@ function publicUserRow(user) {
     machinery: farm.stats.machinery,
     inventory: { ...farm.inventory, machinery: activeMachinery },
     buildingInventory,
-    isAdmin: Boolean(user.isAdmin)
+    isAdmin: Boolean(user.isAdmin),
+    isPro: Boolean(user.isPro)
   };
 }
 
@@ -2207,7 +2211,8 @@ function adminSummaryUserRow(user) {
     coins: Number(farm.coins) || 0,
     landCount: Object.keys(land).length,
     color: farm.color || "#35c982",
-    isAdmin: Boolean(user.isAdmin)
+    isAdmin: Boolean(user.isAdmin),
+    isPro: Boolean(user.isPro)
   };
 }
 
@@ -2920,7 +2925,7 @@ async function handleApi(req, res) {
         sendJson(res, 404, { error: "Користувача не знайдено." });
         return;
       }
-      const farm = sanitizeFarmState(user.farm);
+      let farm = sanitizeFarmState(user.farm);
       const market = readMarket();
       let sold = 0;
       const soldIds = [];
@@ -3031,6 +3036,10 @@ async function handleApi(req, res) {
           sendJson(res, 400, { error: "Некоректний рівень добрив." });
           return;
         }
+        if (targetRule.proOnly && !user.isPro) {
+          sendJson(res, 403, { error: "Цей рівень добрив доступний лише Pro гравцям." });
+          return;
+        }
         const cellIds = [...new Set((Array.isArray(body.cellIds) ? body.cellIds : []).filter((id) => isPlayableLandId(id)))];
         const targets = cellIds.filter((id) => {
           const cell = farm.land?.[id];
@@ -3061,6 +3070,10 @@ async function handleApi(req, res) {
         const item = settings.assets.machineryItems.find((candidate) => candidate.id === String(body.itemId || ""));
         if (!item) {
           sendJson(res, 400, { error: "Техніку не знайдено." });
+          return;
+        }
+        if (item.proOnly && !user.isPro) {
+          sendJson(res, 403, { error: "Ця техніка доступна лише Pro гравцям." });
           return;
         }
         const ownedCount = Object.keys(farm.land || {}).length;
@@ -3097,6 +3110,10 @@ async function handleApi(req, res) {
         const item = settings.assets.elevatorItems.find((candidate) => candidate.id === String(body.itemId || ""));
         if (!item) {
           sendJson(res, 400, { error: "Побудову не знайдено." });
+          return;
+        }
+        if (item.proOnly && !user.isPro) {
+          sendJson(res, 403, { error: "Ця побудова доступна лише Pro гравцям." });
           return;
         }
         const required = Math.max(1, Number(item.minCells) || settings.upgrades.elevatorMinSelectedCells || 3);
@@ -3625,18 +3642,19 @@ async function handleApi(req, res) {
         return;
       }
 
-      const farm = sanitizeFarmState(user.farm);
+      let farm = sanitizeFarmState(user.farm);
+      if (body.resetAll) farm = defaultFarmState();
       if (typeof body.username === "string") {
         const nextUsername = normalizeUsername(body.username).slice(0, 24);
         const reservedAdmin = user.username === ADMIN_USERNAME;
         const duplicate = users.some((item) => item.id !== user.id && item.username.toLowerCase() === nextUsername.toLowerCase());
         if (!reservedAdmin && nextUsername.length >= 3 && !duplicate) user.username = nextUsername;
       }
-      if (typeof body.companyName === "string") farm.companyName = body.companyName.slice(0, 40);
-      if (Number.isFinite(body.coins)) farm.coins = Math.max(0, Math.floor(body.coins));
-      if (Number.isFinite(body.currentDay)) farm.currentDay = Math.max(1, Math.floor(body.currentDay));
-      if (/^#[0-9a-f]{6}$/i.test(body.color || "")) farm.color = body.color;
-      if (body.inventory && typeof body.inventory === "object") {
+      if (!body.resetAll && typeof body.companyName === "string") farm.companyName = body.companyName.slice(0, 40);
+      if (!body.resetAll && Number.isFinite(body.coins)) farm.coins = Math.max(0, Math.floor(body.coins));
+      if (!body.resetAll && Number.isFinite(body.currentDay)) farm.currentDay = Math.max(1, Math.floor(body.currentDay));
+      if (!body.resetAll && /^#[0-9a-f]{6}$/i.test(body.color || "")) farm.color = body.color;
+      if (!body.resetAll && body.inventory && typeof body.inventory === "object") {
         farm.inventory = {
           machinery: sanitizeInventoryMap(body.inventory.machinery),
           elevators: {}
@@ -3664,6 +3682,7 @@ async function handleApi(req, res) {
       }
       user.farm = farm;
       user.isAdmin = user.username === ADMIN_USERNAME || Boolean(body.isAdmin);
+      user.isPro = Boolean(body.isPro);
       user.updatedAt = new Date().toISOString();
       writeUsers(users);
       const market = readMarket();

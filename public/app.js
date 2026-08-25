@@ -3504,7 +3504,7 @@ function openFertilizerPurchase() {
     return;
   }
   const minCurrentLevel = Math.min(...cells.map((cell) => state.land[cell.id].level || 1));
-  const levels = LAND_LEVELS.filter((item) => item.level > minCurrentLevel);
+  const levels = LAND_LEVELS.filter((item) => item.level > minCurrentLevel && (!item.proOnly || player?.isPro));
   if (!levels.length) {
     showGameMessage("Для вибраних ділянок уже доступний максимальний рівень добрив.");
     return;
@@ -3541,9 +3541,10 @@ function fertilizerCostForSelectedCells(targetLevel) {
 }
 
 function assetItemsForKind(kind) {
-  return kind === "elevators"
+  const items = kind === "elevators"
     ? (gameSettings?.assets?.elevatorItems || [])
     : (gameSettings?.assets?.machineryItems || []);
+  return items.filter((item) => !item.proOnly || player?.isPro);
 }
 
 function openAssetPurchase(kind) {
@@ -4376,7 +4377,7 @@ function renderMap() {
 
 function renderPlayerHeader() {
   const name = state.companyName || player?.username || "Гравець";
-  playerName.innerHTML = `${state.logo ? `<img class="company-logo" src="${state.logo}" alt="">` : ""}<span>${escapeHtml(name)}</span>`;
+  playerName.innerHTML = `${state.logo ? `<img class="company-logo" src="${state.logo}" alt="">` : ""}<span>${escapeHtml(name)}</span>${player?.isPro ? '<span title="Pro гравець" aria-label="Pro гравець">👑</span>' : ""}`;
 }
 
 function openModal(modal) {
@@ -4816,6 +4817,7 @@ function renderLandLevelEditor(items) {
             <label>Назва <input data-field="name" value="${escapeHtml(item.name || "")}"></label>
             <label>Вартість <input data-field="cost" type="number" min="0" value="${item.cost || 0}"></label>
             <label>Вплив на дохід, % <input data-field="incomeBonusPercent" type="number" min="0" step="0.01" value="${item.incomeBonusPercent || 0}"></label>
+            <label class="settings-checkbox"><input data-field="proOnly" type="checkbox" ${item.proOnly ? "checked" : ""}><span>Доступно Pro користувачам</span></label>
             <button class="danger-action" type="button" data-remove-item>Видалити</button>
           </div>
         `).join("")}
@@ -4872,6 +4874,7 @@ function renderAssetEditor(key, title, items, tip) {
             <label>Картинка <input type="file" accept="image/png,image/jpeg,image/webp,image/svg+xml" data-icon-upload></label>
             <label>Назва <input data-field="name" value="${escapeHtml(item.name || "")}"></label>
             <label>Вартість <input data-field="cost" type="number" min="0" value="${item.cost || 0}"></label>
+            <label class="settings-checkbox"><input data-field="proOnly" type="checkbox" ${item.proOnly ? "checked" : ""}><span>Доступно Pro користувачам</span></label>
             ${isBuilding
               ? `
                 <label>Дохід за добу <input data-field="incomePerDay" type="number" min="0" value="${item.incomePerDay || 0}"></label>
@@ -4995,6 +4998,7 @@ function settingsFromForm(form) {
     name: item.name || "Добрива",
     cost: Number(item.cost) || 0,
     incomeBonusPercent: Number(item.incomeBonusPercent) || 0
+    ,proOnly: Boolean(item.proOnly)
   })).sort((a, b) => a.level - b.level);
   next.upgrades.landMaxLevel = Math.max(...next.upgrades.landLevels.map((item) => item.level), 1);
   next.assets.machineryItems = collectSettingsCards("machineryItems").map(normalizeAssetCard);
@@ -5047,6 +5051,7 @@ function normalizeAssetCard(item) {
     serviceLifeExtensionDays: Math.max(0, Math.floor(Number(item.serviceLifeExtensionDays) || 0)),
     maxActiveUnits: Math.max(1, Math.floor(Number(item.maxActiveUnits) || 1)),
     landCapacity: Math.max(1, Math.floor(Number(item.landCapacity) || 25)),
+    proOnly: Boolean(item.proOnly),
     photos: parsePhotosValue(item.photos).slice(0, 8)
   };
 }
@@ -5114,16 +5119,16 @@ function renderAdminUsers(users) {
   if (adminUsers) adminUsers.dataset.loaded = "1";
   adminUsers.innerHTML = users.map((user) => `
     <form class="admin-user" data-user-id="${user.id}">
-      <div class="admin-user-title">
-        <strong>${escapeHtml(user.username)}</strong>
-        <span>${user.landCount || 0} зем. · ${money(user.coins || 0)}</span>
-      </div>
+      <details>
+      <summary class="admin-user-title"><strong>${escapeHtml(user.username)}${user.isPro ? " 👑" : ""}</strong><span>${user.landCount || 0} зем. · ${money(user.coins || 0)}</span></summary>
+      <div class="admin-user-body">
       <label>Логін <input name="username" value="${escapeHtml(user.username || "")}" ${user.username === "Admin" ? "readonly" : ""}></label>
       <label>Компанія <input name="companyName" value="${escapeHtml(user.companyName || "")}"></label>
       <label>Гроші <input name="coins" type="number" min="0" value="${user.coins || 0}"></label>
       <label>День <input name="currentDay" type="number" min="1" value="${user.currentDay || 1}"></label>
       <label>Колір <input name="color" type="color" value="${user.color || "#35c982"}"></label>
       <label class="inline-check"><input name="isAdmin" type="checkbox" ${user.isAdmin ? "checked" : ""}> Адмін</label>
+      <label class="inline-check"><input name="isPro" type="checkbox" ${user.isPro ? "checked" : ""}> Pro гравець</label>
       <div class="admin-user-stats">
         <span>Інвестиції: ${money(user.score || 0)}</span>
         <span>Дохід: ${money(user.income || 0)} / добу</span>
@@ -5141,9 +5146,10 @@ function renderAdminUsers(users) {
       <div class="admin-user-actions">
         <button class="secondary-action" type="submit">Зберегти</button>
         <button class="secondary-action" type="button" data-player-stats="${user.id}">Статистика гравця</button>
-        <button class="danger-action" type="submit" name="resetLand" value="1">Обнулити землю</button>
+        <button class="danger-action" type="submit" name="resetAll" value="1">Обнулити всі дані</button>
         ${user.username === "Admin" ? "" : `<button class="danger-action" type="button" data-delete-user="${user.id}">Видалити</button>`}
       </div>
+      </details>
     </form>
   `).join("");
 }
@@ -5313,25 +5319,28 @@ async function saveAdminUser(event) {
   body.coins = Number(body.coins);
   body.currentDay = Number(body.currentDay);
   body.isAdmin = form.elements.isAdmin.checked;
+  body.isPro = form.elements.isPro.checked;
   body.resetLand = event.submitter?.name === "resetLand";
+  body.resetAll = event.submitter?.name === "resetAll";
   body.inventory = { machinery: {}, elevators: {} };
   new FormData(form).forEach((value, key) => {
     const parts = key.split(".");
     if (parts[0] !== "inventory" || !parts[1] || !parts[2]) return;
     body.inventory[parts[1]][parts.slice(2).join(".")] = Math.max(0, Math.floor(Number(value) || 0));
   });
-  if (body.resetLand && !confirm("Обнулити землі цього учасника?")) return;
+  if (body.resetAll && !confirm("Обнулити всі дані цього учасника до стану нового гравця?")) return;
   const restoreButton = setSavingButton(event.submitter, true);
   try {
     const payload = await requestJson("/api/admin/user", { method: "POST", body: JSON.stringify(body) });
     renderAdminSummary(payload.summary || {}, payload.users || []);
     renderAdminUsers(payload.users || []);
     if (body.id === player?.id) {
+      player.isPro = body.isPro;
       state = normalizeState(payload.farm || state);
       landMembershipRevision += 1;
       farmDerivedStatsCache = null;
     }
-    if (body.resetLand) await refreshGlobalMarket();
+    if (body.resetLand || body.resetAll) await refreshGlobalMarket();
     scheduleGridUpdate();
     refreshLeaderboard();
     showGameMessage("Учасника оновлено.");
