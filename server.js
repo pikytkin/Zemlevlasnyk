@@ -93,7 +93,7 @@ const DEFAULT_SETTINGS = {
   },
   assets: {
     machineryItems: [
-      { id: "tractor-basic", icon: "🚜", name: "Трактор базовий", cost: 3600, incomeBonusPercent: 8, durationDays: 80, minCells: 10, maxActiveUnits: 1, landCapacity: 25, photos: [] }
+      { id: "tractor-basic", icon: "🚜", name: "Трактор базовий", cost: 3600, incomeBonusPercent: 8, durationDays: 80, minCells: 10, landCapacity: 25, photos: [] }
     ],
     elevatorItems: [
       { id: "elevator-basic", icon: "🏗", name: "Елеватор базовий", cost: 9000, incomePerDay: 900, minCells: 3, maxOwnerLandPercent: 20, photos: [] }
@@ -600,7 +600,6 @@ function sanitizeAssetItems(items, fallback) {
     durationDays: intIn(item?.durationDays, fallback[index]?.durationDays || 80, 1, 1000000),
     incomePerDay: intIn(item?.incomePerDay, fallback[index]?.incomePerDay || 0, 0),
     minCells: intIn(item?.minCells, fallback[index]?.minCells || 1, 1, 1000000),
-    maxActiveUnits: intIn(item?.maxActiveUnits, fallback[index]?.maxActiveUnits || 1, 1, 1000000),
     landCapacity: intIn(item?.landCapacity, fallback[index]?.landCapacity || [25, 60, 150, 300][index] || 25, 1, 1000000),
     maxOwnerLandPercent: numberIn(Number(item?.maxOwnerLandPercent), fallback[index]?.maxOwnerLandPercent ?? 25, 1, 100),
     serviceLifeExtensionDays: intIn(item?.serviceLifeExtensionDays, fallback[index]?.serviceLifeExtensionDays || 0, 0, 1000000),
@@ -1910,7 +1909,7 @@ function inventoryIncomeMultiplier(inventory, landCount = 0, settings = readSett
   const machineryMap = activeMachineryMap(inventory, currentDay);
   const managedLand = Math.max(1, Number(landCount) || 0);
   const machineryBonus = settings.assets.machineryItems.reduce((sum, item) => {
-    const units = Math.min(item.maxActiveUnits || 1, (machineryMap || {})[item.id] || 0);
+    const units = (machineryMap || {})[item.id] || 0;
     const coverage = Math.min(1, units * Math.max(1, item.landCapacity || 25) / managedLand);
     return sum + coverage * item.incomeBonusPercent;
   }, 0);
@@ -3149,12 +3148,6 @@ async function handleApi(req, res) {
         const ownedCount = Object.keys(farm.land || {}).length;
         if (ownedCount < Math.max(1, item.minCells || 1)) {
           sendJson(res, 400, { error: `Для цієї техніки потрібно щонайменше ${Math.max(1, item.minCells || 1)} ділянок.` });
-          return;
-        }
-        const active = activeMachineryMap(farm.inventory, farm.currentDay || 1);
-        const maxActiveUnits = Math.max(1, Number(item.maxActiveUnits) || 1);
-        if ((active[item.id] || 0) >= maxActiveUnits) {
-          sendJson(res, 400, { error: `Ліміт цієї техніки: ${maxActiveUnits} активн. од.` });
           return;
         }
         charged = Math.max(0, Number(item.cost) || 0);

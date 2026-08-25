@@ -171,13 +171,12 @@ test("bulk land sale values every parcel from one market snapshot", async () => 
   assert.equal(sale.payload.refund, 200);
 });
 
-test("machinery respects the configurable active-unit limit", async () => {
+test("same machinery can be bought repeatedly to expand its land coverage", async () => {
   await configureLandValueScenario();
   const admin = await request("POST", "/api/login", { username: "Admin", password: "Admin" });
   const current = await request("GET", "/api/settings");
   current.payload.assets.machineryItems[0].cost = 100;
   current.payload.assets.machineryItems[0].minCells = 1;
-  current.payload.assets.machineryItems[0].maxActiveUnits = 2;
   const saved = await request("POST", "/api/admin/settings", { settings: current.payload }, admin.cookie);
   assert.equal(saved.response.status, 200, saved.payload.error);
 
@@ -189,5 +188,7 @@ test("machinery respects the configurable active-unit limit", async () => {
   const third = await request("POST", "/api/purchase-asset", { kind: "machinery", itemId }, cookie);
   assert.equal(first.response.status, 200, first.payload.error);
   assert.equal(second.response.status, 200, second.payload.error);
-  assert.equal(third.response.status, 400);
+  assert.equal(third.response.status, 200, third.payload.error);
+  const currentFarm = await request("GET", "/api/me", undefined, cookie);
+  assert.equal(currentFarm.payload.farm.inventory.machinery[itemId], 3);
 });

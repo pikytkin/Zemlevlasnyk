@@ -512,7 +512,6 @@ function applyGameSettings(settings) {
   gameSettings.assets.machineryItems = (gameSettings.assets.machineryItems || []).map((item) => ({
     ...item,
     durationDays: Number.isFinite(Number(item.durationDays)) ? Math.max(1, Math.floor(Number(item.durationDays))) : 80,
-    maxActiveUnits: Number.isFinite(Number(item.maxActiveUnits)) ? Math.max(1, Math.floor(Number(item.maxActiveUnits))) : 1,
     landCapacity: Number.isFinite(Number(item.landCapacity)) ? Math.max(1, Math.floor(Number(item.landCapacity))) : 25
   }));
   if (state?.inventory) state.inventory = normalizeMachineryInventory(state.inventory, state.currentDay || 1);
@@ -3017,7 +3016,7 @@ function inventoryBonusPercents() {
 
 function assetBonusPercent(settingsKey, inventoryMap, landCount = playerOwnedCellCount()) {
   return (gameSettings?.assets?.[settingsKey] || []).reduce((sum, item) => {
-    const units = Math.min(item.maxActiveUnits || 1, inventoryMap[item.id] || 0);
+    const units = inventoryMap[item.id] || 0;
     const coverage = Math.min(1, units * Math.max(1, item.landCapacity || 25) / Math.max(1, landCount));
     return sum + coverage * (item.incomeBonusPercent || 0);
   }, 0);
@@ -3653,8 +3652,7 @@ function assetCharacteristics(item, kind) {
         ["Бонус", `+${item.incomeBonusPercent || 0}% до доходу землі`],
         ["Потрібно землі", `${Math.max(1, Number(item.minCells) || 1)} ділянок`],
         ["Термін дії", `${item.durationDays || 80} днів`],
-        ["Місткість", `до ${item.landCapacity || 25} земель на одиницю`],
-        ["Ліміт", `${item.maxActiveUnits || 1} активн. од.`]
+        ["Місткість", `до ${item.landCapacity || 25} земель на одиницю`]
       ];
   if (item.proOnly) rows.unshift(["Доступ", "🔒 Pro гравці"]);
   return rows.filter(Boolean).map(([key, value]) => `<div><span>${key}</span><strong>${value}</strong></div>`).join("");
@@ -3772,11 +3770,6 @@ async function buyAsset(event) {
     const requiredLand = Math.max(1, Number(item.minCells) || 1);
     if (playerOwnedCellCount() < requiredLand) {
       showGameMessage(`Для "${item.name}" потрібно мати щонайменше ${requiredLand} земельних ділянок.`);
-      return;
-    }
-    const maxActiveUnits = Math.max(1, Number(item.maxActiveUnits) || 1);
-    if ((activeMachineryMap()?.[item.id] || 0) >= maxActiveUnits) {
-      showGameMessage(`Ліміт техніки "${item.name}": ${maxActiveUnits} активн. од.`);
       return;
     }
   }
@@ -5016,7 +5009,6 @@ function renderAssetEditor(key, title, items, tip) {
               : `
                 <label>Бонус доходу землі, % <input data-field="incomeBonusPercent" type="number" min="0" step="0.01" value="${item.incomeBonusPercent || 0}"></label>
                 <label>Термін дії, днів <input data-field="durationDays" type="number" min="1" value="${item.durationDays || 80}"></label>
-                <label>Ліміт активних одиниць <input data-field="maxActiveUnits" type="number" min="1" value="${item.maxActiveUnits || 1}"></label>
                 <label>Виробнича місткість, земель <input data-field="landCapacity" type="number" min="1" value="${item.landCapacity || 25}"></label>
               `}
             <label class="asset-photos-upload">Фото для перегляду (можна обрати кілька одразу) <input type="file" accept="image/png,image/jpeg,image/webp,image/svg+xml" multiple data-photos-upload></label>
@@ -5180,7 +5172,6 @@ function normalizeAssetCard(item) {
     minCells: Math.max(1, Math.floor(Number(item.minCells) || 1)),
     maxOwnerLandPercent: Math.min(100, Math.max(1, Number(item.maxOwnerLandPercent) || 25)),
     serviceLifeExtensionDays: Math.max(0, Math.floor(Number(item.serviceLifeExtensionDays) || 0)),
-    maxActiveUnits: Math.max(1, Math.floor(Number(item.maxActiveUnits) || 1)),
     landCapacity: Math.max(1, Math.floor(Number(item.landCapacity) || 25)),
     proOnly: Boolean(item.proOnly),
     photos: parsePhotosValue(item.photos).slice(0, 8)
@@ -5512,7 +5503,7 @@ async function saveAdminSettings(event) {
 function defaultSettingsItem(listName) {
   const stamp = Date.now().toString(36);
   const items = {
-    machineryItems: { id: `tractor-${stamp}`, icon: "🚜", name: "Новий трактор", cost: 3600, incomeBonusPercent: 8, durationDays: 80, minCells: 10, maxActiveUnits: 1, landCapacity: 25, photos: [] },
+    machineryItems: { id: `tractor-${stamp}`, icon: "🚜", name: "Новий трактор", cost: 3600, incomeBonusPercent: 8, durationDays: 80, minCells: 10, landCapacity: 25, photos: [] },
     elevatorItems: { id: `elevator-${stamp}`, icon: "🏗", name: "Нова побудова", cost: 9000, incomePerDay: 900, minCells: 3, maxOwnerLandPercent: 20, serviceLifeExtensionDays: 0, photos: [] },
     landLevels: { level: LAND_LEVELS.length + 1, name: "Новий рівень добрив", cost: 100, incomeBonusPercent: 10 },
     clusters: { min: 10, bonusPercent: 5 },
