@@ -37,6 +37,7 @@ const MARKET_FILE = path.join(DATA_DIR, "market.txt");
 const SETTINGS_FILE = path.join(DATA_DIR, "settings.json");
 const NEWS_FILE = path.join(DATA_DIR, "news.txt");
 const SESSIONS_FILE = path.join(DATA_DIR, "sessions.json");
+const OFFERS_FILE = path.join(DATA_DIR, "offers.json");
 const SESSION_TTL_MS = 1000 * 60 * 60 * 24;
 const ADMIN_USERNAME = process.env.ADMIN_USERNAME || "Admin";
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "Admin";
@@ -173,6 +174,9 @@ function ensureDataFiles() {
   if (!fs.existsSync(SESSIONS_FILE)) {
     fs.writeFileSync(SESSIONS_FILE, "[]", "utf8");
   }
+  if (!fs.existsSync(OFFERS_FILE)) {
+    fs.writeFileSync(OFFERS_FILE, "[]", "utf8");
+  }
 }
 
 function readFileStorageSnapshot() {
@@ -185,6 +189,7 @@ function readFileStorageSnapshot() {
   let market = { land: {} };
   let settings = DEFAULT_SETTINGS;
   let news = [];
+  let offers = [];
 
   try {
     market = JSON.parse(fs.readFileSync(MARKET_FILE, "utf8") || "{}");
@@ -212,7 +217,14 @@ function readFileStorageSnapshot() {
   } catch {
     savedSessions = [];
   }
-  return { users, market, settings, news, messages: [], offers: [], passwordResets: [], sessions: savedSessions };
+
+  try {
+    const rows = JSON.parse(fs.readFileSync(OFFERS_FILE, "utf8") || "[]");
+    offers = Array.isArray(rows) ? rows : [];
+  } catch {
+    offers = [];
+  }
+  return { users, market, settings, news, messages: [], offers, passwordResets: [], sessions: savedSessions };
 }
 
 async function initDatabaseStorage() {
@@ -1921,9 +1933,16 @@ function readOffers() {
   return Array.isArray(storage?.offers) ? storage.offers : [];
 }
 
+function persistOffersToFile() {
+  if (!storage) return;
+  ensureDataFiles();
+  fs.writeFileSync(OFFERS_FILE, JSON.stringify(storage.offers || [], null, 2), "utf8");
+}
+
 function writeOffers(offers) {
   storage.offers = offers.slice(-5000);
-  persistState("offers");
+  if (dbPool) persistState("offers");
+  else persistOffersToFile();
 }
 
 const BUYOUT_ACTIVE_STATUSES = new Set(["pending", "countered"]);
