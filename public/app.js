@@ -114,8 +114,8 @@ const machineryButton = document.querySelector("#machineryButton");
 const sellButton = document.querySelector("#sellButton");
 const profileButton = document.querySelector("#profileButton");
 const dossierButton = document.querySelector("#dossierButton");
+const dossierBadge = document.querySelector("#dossierBadge");
 const helpButton = document.querySelector("#helpButton");
-const messagesButton = document.querySelector("#messagesButton");
 const messageBadge = document.querySelector("#messageBadge");
 const logoutButton = document.querySelector("#logoutButton");
 const profileModal = document.querySelector("#profileModal");
@@ -125,6 +125,7 @@ const dossierModal = document.querySelector("#dossierModal");
 const dossierTitle = document.querySelector("#dossierTitle");
 const dossierOverview = document.querySelector("#dossierOverview");
 const dossierOffers = document.querySelector("#dossierOffers");
+const dossierMessages = document.querySelector("#dossierMessages");
 const dossierJournal = document.querySelector("#dossierJournal");
 const buyoutBadge = document.querySelector("#buyoutBadge");
 const adminModal = document.querySelector("#adminModal");
@@ -143,7 +144,7 @@ const adminSettingsForm = document.querySelector("#adminSettingsForm");
 const adminSettingsFields = document.querySelector("#adminSettingsFields");
 const adminPlayerStats = document.querySelector("#adminPlayerStats");
 const adminStats = document.querySelector("#adminStats");
-const messagesModal = document.querySelector("#messagesModal");
+const messagesModal = dossierModal;
 const chatList = document.querySelector("#chatList");
 const chatMessages = document.querySelector("#chatMessages");
 const messageForm = document.querySelector("#messageForm");
@@ -209,8 +210,12 @@ document.addEventListener("click", (event) => {
 let player = null;
 let state = defaultGameState();
 let selectedCellId = null;
-let buyoutOffersCache = { incoming: [], outgoing: [], unread: 0, loaded: false };
+let buyoutOffersCache = { incoming: [], outgoing: [], unread: 0, loaded: false, loading: false, loadedAt: 0, error: "" };
+let buyoutOffersInFlight = null;
 let activeBuyoutTab = "incoming";
+let activeDossierTab = "overview";
+let offerSubmitInProgress = false;
+let buyoutActionInProgress = false;
 let saveTimer = null;
 let saveScope = null;
 let saveInFlight = null;
@@ -604,8 +609,7 @@ function startGame(nextPlayer, nextState) {
   renderPlayerHeader();
   render();
   showGameMessage("Карту володінь завантажено.");
-  refreshMessageSummary();
-  loadBuyoutOffers(true);
+  refreshNotificationSummary();
   loadGameSettings().then(() => initMap().catch((error) => {
     console.error("initMap failed:", error);
     showGameMessage(error?.message || "Не вдалося завантажити карту.");
@@ -845,7 +849,7 @@ function startBackgroundPolling() {
   marketTimer = setInterval(refreshGlobalMarket, 20000);
   leaderboardTimer = setInterval(refreshLeaderboard, 10000);
   newsTimer = setInterval(refreshNews, 20000);
-  messagesTimer = setInterval(refreshMessageSummary, 10000);
+  messagesTimer = setInterval(refreshNotificationSummary, 10000);
   if (!player?.isGuest) incomeTimer = setInterval(() => collectIncome({ silent: true }), 60000);
 }
 
@@ -3312,6 +3316,15 @@ function showLandOperationOverlay(count = 1, operation = "buy") {
   } else if (operation === "machinery") {
     if (title) title.textContent = "Оформлюємо купівлю техніки";
     if (text) text.textContent = "Перевіряємо доступність техніки та вносимо її до господарства.";
+  } else if (operation === "offer-send") {
+    if (title) title.textContent = "Відправляємо пропозицію викупу";
+    if (text) text.textContent = "Перевіряємо ділянки, резервуємо суму та реєструємо запит у досьє обох учасників.";
+  } else if (operation === "offer-deal") {
+    if (title) title.textContent = "Оформлюємо угоду";
+    if (text) text.textContent = "Перевіряємо право власності, переоформлюємо землю та проводимо взаєморозрахунок.";
+  } else if (operation === "offer-update") {
+    if (title) title.textContent = "Оновлюємо пропозицію";
+    if (text) text.textContent = "Зберігаємо рішення сторони та синхронізуємо статус запиту в обох досьє.";
   } else {
     if (title) title.textContent = "Йде реєстрація права власності";
     if (text) text.textContent = "Перевіряємо ділянки, готуємо документи та вносимо запис у земельний реєстр.";
@@ -4222,7 +4235,7 @@ function renderSelectedCell() {
       buy: freeCells.length > 0,
       offer: canOfferBuyout,
       upgrade: summary.canUpgrade,
-      building: summary.buildableCount >= minBuildingCells() || builtCount > 0,
+      building: summary.ownedCount > 0,
       machinery: summary.ownedCount > 0 && playerOwnedCellCount() > 0,
       sell: summary.ownedCount > 0
     });
@@ -4293,7 +4306,7 @@ function renderSelectedCell() {
     contact: owner === "rival" && Boolean(ownerIdForCell(selectedCellId)),
     offer: owner === "rival" && Boolean(ownerIdForCell(selectedCellId)),
     upgrade: Boolean(owned && !owned.building && !owned.buildingId && owned.level < maxLandLevel()),
-    building: Boolean(owned && ((owned.building || owned.buildingId) || buildableSelectedCells().length >= minBuildingCells())),
+    building: Boolean(owned),
     machinery: Boolean(owned),
     sell: Boolean(owned)
   });
@@ -4550,32 +4563,64 @@ function activeOfferStatuses() {
 
 async function loadBuyoutOffers(force = false) {
   if (!player || player.isGuest) return buyoutOffersCache;
-  if (buyoutOffersCache.loaded && !force) return buyoutOffersCache;
-  try {
-    const payload = await requestJson("/api/offers");
-    buyoutOffersCache = {
-      incoming: Array.isArray(payload.incoming) ? payload.incoming : [],
-      outgoing: Array.isArray(payload.outgoing) ? payload.outgoing : [],
-      unread: Math.max(0, Number(payload.unread) || 0),
-      loaded: true,
-      error: ""
-    };
-    renderBuyoutBadge();
-  } catch (error) {
-    buyoutOffersCache = {
-      ...buyoutOffersCache,
-      loaded: false,
-      error: error?.message || "Не вдалося завантажити пропозиції викупу."
-    };
-    renderBuyoutBadge();
-  }
-  return buyoutOffersCache;
+  const freshEnough = buyoutOffersCache.loaded && Date.now() - (buyoutOffersCache.loadedAt || 0) < 10000;
+  if (!force && freshEnough) return buyoutOffersCache;
+  if (buyoutOffersInFlight) return buyoutOffersInFlight;
+
+  buyoutOffersCache.loading = true;
+  if (activeDossierTab === "offers" && !dossierModal?.classList.contains("is-hidden")) renderBuyoutOffers();
+  buyoutOffersInFlight = (async () => {
+    try {
+      const payload = await requestJson("/api/offers");
+      buyoutOffersCache = {
+        incoming: Array.isArray(payload.incoming) ? payload.incoming : [],
+        outgoing: Array.isArray(payload.outgoing) ? payload.outgoing : [],
+        unread: Math.max(0, Number(payload.unread) || 0),
+        loaded: true,
+        loading: false,
+        loadedAt: Date.now(),
+        error: ""
+      };
+    } catch (error) {
+      buyoutOffersCache = {
+        ...buyoutOffersCache,
+        loading: false,
+        error: error?.message || "Не вдалося завантажити пропозиції викупу."
+      };
+    } finally {
+      buyoutOffersInFlight = null;
+      renderBuyoutBadge();
+    }
+    return buyoutOffersCache;
+  })();
+  return buyoutOffersInFlight;
+}
+
+function renderDossierBadge() {
+  if (!dossierBadge) return;
+  const total = Math.max(0, Number(unreadMessages) || 0) + Math.max(0, Number(buyoutOffersCache.unread) || 0);
+  dossierBadge.textContent = total > 99 ? "99+" : String(total);
+  dossierBadge.classList.toggle("is-hidden", total <= 0);
 }
 
 function renderBuyoutBadge() {
-  if (!buyoutBadge) return;
-  buyoutBadge.textContent = buyoutOffersCache.unread || 0;
-  buyoutBadge.classList.toggle("is-hidden", !buyoutOffersCache.unread);
+  if (buyoutBadge) {
+    const unread = Math.max(0, Number(buyoutOffersCache.unread) || 0);
+    buyoutBadge.textContent = unread > 99 ? "99+" : String(unread);
+    buyoutBadge.classList.toggle("is-hidden", unread <= 0);
+  }
+  renderDossierBadge();
+}
+
+async function markBuyoutOffersRead() {
+  if (!player || player.isGuest || buyoutOffersCache.unread <= 0) return;
+  try {
+    await requestJson("/api/offers/read", { method: "POST", body: "{}" });
+    buyoutOffersCache.unread = 0;
+    renderBuyoutBadge();
+  } catch {
+    // Badge stays visible so the user can retry on the next refresh.
+  }
 }
 
 function buyoutOfferActions(offer, direction) {
@@ -4639,20 +4684,24 @@ function renderBuyoutOffers() {
       <button class="secondary-action ${activeBuyoutTab === "outgoing" ? "is-active" : ""}" type="button" data-buyout-tab="outgoing">Вихідні (${buyoutOffersCache.outgoing.length})</button>
     </div>
     <div class="buyout-list">
-      ${buyoutOffersCache.error
-        ? `<p class="muted-text">${escapeHtml(buyoutOffersCache.error)}</p>`
-        : rows.length
-          ? rows.map((offer) => renderBuyoutOfferCard(offer, activeBuyoutTab)).join("")
-          : `<p class="muted-text">${activeBuyoutTab === "incoming" ? "Вхідних пропозицій поки немає." : "Вихідних пропозицій поки немає."}</p>`}
+      ${!buyoutOffersCache.loaded && !rows.length
+        ? `<div class="dossier-loading"><span class="mini-spinner" aria-hidden="true"></span><strong>Завантажуємо запити...</strong><small>Досьє вже відкрите; дані з сервера з'являться тут автоматично.</small></div>`
+        : buyoutOffersCache.error && !rows.length
+          ? `<p class="muted-text">${escapeHtml(buyoutOffersCache.error)}</p>`
+          : rows.length
+            ? `${buyoutOffersCache.loading ? `<div class="dossier-refreshing"><span class="mini-spinner" aria-hidden="true"></span>Оновлюємо...</div>` : ""}${rows.map((offer) => renderBuyoutOfferCard(offer, activeBuyoutTab)).join("")}`
+            : `<p class="muted-text">${activeBuyoutTab === "incoming" ? "Вхідних пропозицій поки немає." : "Вихідних пропозицій поки немає."}</p>`}
     </div>`;
 }
 
-async function refreshBuyoutOffers() {
-  await loadBuyoutOffers(true);
+async function refreshBuyoutOffers(force = true) {
+  renderBuyoutOffers();
+  await loadBuyoutOffers(force);
   renderBuyoutOffers();
 }
 
 async function runBuyoutOfferAction(offerId, action) {
+  if (buyoutActionInProgress) return;
   const offer = [...buyoutOffersCache.incoming, ...buyoutOffersCache.outgoing].find((item) => item.id === offerId);
   if (!offer) return;
   let body = {};
@@ -4675,6 +4724,8 @@ async function runBuyoutOfferAction(offerId, action) {
   }
   if (action === "reject" && !confirm("Відхилити цю пропозицію?")) return;
   if (action === "cancel" && !confirm("Скасувати вихідну пропозицію?")) return;
+  buyoutActionInProgress = true;
+  showLandOperationOverlay(Math.max(1, offer.landCount || 1), action === "accept" ? "offer-deal" : "offer-update");
   try {
     const payload = await requestJson(`/api/offers/${encodeURIComponent(offerId)}/${action}`, {
       method: "POST",
@@ -4692,6 +4743,9 @@ async function runBuyoutOfferAction(offerId, action) {
   } catch (error) {
     showGameMessage(error.message);
     await refreshBuyoutOffers();
+  } finally {
+    buyoutActionInProgress = false;
+    hideLandOperationOverlay();
   }
 }
 
@@ -4760,12 +4814,21 @@ function renderDossier() {
 }
 
 function activateDossierTab(tab) {
-  document.querySelectorAll("[data-dossier-tab]").forEach((button) => button.classList.toggle("is-active", button.dataset.dossierTab === tab));
-  dossierOverview?.classList.toggle("is-hidden", tab !== "overview");
-  dossierOffers?.classList.toggle("is-hidden", tab !== "offers");
-  dossierJournal?.classList.toggle("is-hidden", tab !== "journal");
-  if (tab === "offers") {
-    loadBuyoutOffers(true).then(renderBuyoutOffers);
+  activeDossierTab = tab || "overview";
+  document.querySelectorAll("[data-dossier-tab]").forEach((button) => button.classList.toggle("is-active", button.dataset.dossierTab === activeDossierTab));
+  dossierOverview?.classList.toggle("is-hidden", activeDossierTab !== "overview");
+  dossierOffers?.classList.toggle("is-hidden", activeDossierTab !== "offers");
+  dossierMessages?.classList.toggle("is-hidden", activeDossierTab !== "messages");
+  dossierJournal?.classList.toggle("is-hidden", activeDossierTab !== "journal");
+
+  if (activeDossierTab === "offers") {
+    renderBuyoutOffers();
+    refreshBuyoutOffers(!buyoutOffersCache.loaded || Date.now() - (buyoutOffersCache.loadedAt || 0) > 10000)
+      .then(() => markBuyoutOffersRead());
+  } else if (activeDossierTab === "messages") {
+    openMessagesPanel();
+  } else {
+    stopActiveChatPolling();
   }
 }
 
@@ -4858,6 +4921,19 @@ function leaderboardRankForPlayer(id) {
   return index >= 0 ? index + 1 : null;
 }
 
+async function refreshNotificationSummary() {
+  if (!player || player.isGuest) return;
+  try {
+    const payload = await requestJson("/api/notifications/summary");
+    unreadMessages = Math.max(0, Number(payload.messagesUnread) || 0);
+    buyoutOffersCache.unread = Math.max(0, Number(payload.offersUnread) || 0);
+    renderMessageBadge();
+    renderBuyoutBadge();
+  } catch {
+    // Keep the last known counts instead of briefly flashing zero on network errors.
+  }
+}
+
 async function refreshMessageSummary() {
   if (!player || player.isGuest) return;
   try {
@@ -4865,7 +4941,7 @@ async function refreshMessageSummary() {
     unreadMessages = Number(payload.unread) || 0;
     chats = Array.isArray(payload.chats) ? payload.chats : [];
     renderMessageBadge();
-    if (!messagesModal?.classList.contains("is-hidden")) renderChatList();
+    if (!dossierModal?.classList.contains("is-hidden") && activeDossierTab === "messages") renderChatList();
   } catch {
     unreadMessages = 0;
     renderMessageBadge();
@@ -4873,13 +4949,16 @@ async function refreshMessageSummary() {
 }
 
 function renderMessageBadge() {
-  if (!messageBadge) return;
-  messageBadge.textContent = unreadMessages > 99 ? "99+" : String(unreadMessages);
-  messageBadge.classList.toggle("is-hidden", unreadMessages <= 0);
+  if (messageBadge) {
+    messageBadge.textContent = unreadMessages > 99 ? "99+" : String(unreadMessages);
+    messageBadge.classList.toggle("is-hidden", unreadMessages <= 0);
+  }
+  renderDossierBadge();
 }
 
 async function openMessagesPanel() {
-  openModal(messagesModal);
+  openModal(dossierModal);
+  if (activeDossierTab !== "messages") activateDossierTab("messages");
   if (chatList) chatList.innerHTML = "<p>Завантажуємо чати...</p>";
   if (chatMessages) chatMessages.innerHTML = "<p class=\"muted-text\">Оберіть чат або напишіть власнику ділянки.</p>";
   await refreshMessageSummary();
@@ -4905,7 +4984,8 @@ async function openChat(userId) {
   activeChatUserId = userId;
   activeChatSignature = "";
   closeModal(ownerModal);
-  openModal(messagesModal);
+  openModal(dossierModal);
+  if (activeDossierTab !== "messages") activateDossierTab("messages");
   renderChatList();
   await loadChatMessages(userId, { force: true, scroll: "bottom" });
   await refreshMessageSummary();
@@ -4954,7 +5034,7 @@ async function loadChatMessages(userId = activeChatUserId, options = {}) {
 function startActiveChatPolling() {
   clearInterval(activeChatTimer);
   activeChatTimer = setInterval(async () => {
-    if (!player || !activeChatUserId || messagesModal?.classList.contains("is-hidden")) return;
+    if (!player || !activeChatUserId || dossierModal?.classList.contains("is-hidden") || activeDossierTab !== "messages") return;
     await loadChatMessages(activeChatUserId, { silent: true });
     await refreshMessageSummary();
   }, 2500);
@@ -6169,9 +6249,14 @@ bindEvent(offerAmount, "input", () => {
 });
 bindEvent(offerForm, "submit", async (event) => {
   event.preventDefault();
+  if (offerSubmitInProgress) return;
   const cellIds = JSON.parse(offerModal?.dataset.cellIds || "[]");
   const amount = Math.floor(Number(offerAmount?.value) || 0);
   if (!cellIds.length || amount < 1 || !confirm(`Ви пропонуєте ${money(amount)} за ${cellIds.length} земель.`)) return;
+  offerSubmitInProgress = true;
+  const submitButton = event.submitter || offerForm?.querySelector('button[type="submit"]');
+  if (submitButton) submitButton.disabled = true;
+  showLandOperationOverlay(cellIds.length, "offer-send");
   try {
     const payload = await requestJson("/api/offers", { method: "POST", body: JSON.stringify({ cellIds, amount }) });
     state.coins = payload.coins;
@@ -6180,12 +6265,19 @@ bindEvent(offerForm, "submit", async (event) => {
     closeModal(offerModal);
     render();
     showGameMessage("Пропозицію відправлено. Сума зарезервована.");
-  } catch (error) { showGameMessage(error.message); }
+  } catch (error) {
+    showGameMessage(error.message);
+  } finally {
+    offerSubmitInProgress = false;
+    if (submitButton) submitButton.disabled = false;
+    hideLandOperationOverlay();
+  }
 });
 bindEvent(dossierButton, "click", () => {
   renderDossier();
-  activateDossierTab("overview");
   openModal(dossierModal);
+  activateDossierTab("overview");
+  refreshNotificationSummary();
 });
 bindEvent(dossierModal, "click", (event) => {
   const tab = event.target.closest("[data-dossier-tab]");
@@ -6206,7 +6298,6 @@ bindEvent(helpButton, "click", () => {
   renderHelp();
   openModal(helpModal);
 });
-bindEvent(messagesButton, "click", openMessagesPanel);
 bindEvent(logoutButton, "click", logoutPlayer);
 bindEvent(chatList, "click", (event) => {
   const item = event.target.closest("[data-chat-user]");
@@ -6303,7 +6394,7 @@ document.addEventListener("click", (event) => {
 document.addEventListener("visibilitychange", () => {
   startBackgroundPolling();
   if (!document.hidden && player && window.location.pathname !== "/admin") {
-    Promise.allSettled([refreshGlobalMarket(), refreshLeaderboard(), refreshNews(), refreshMessageSummary(), loadBuyoutOffers(true)]);
+    Promise.allSettled([refreshGlobalMarket(), refreshLeaderboard(), refreshNews(), refreshNotificationSummary()]);
   }
 });
 

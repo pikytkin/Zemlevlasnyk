@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Землевласник</title>
     <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css">
-    <link rel="stylesheet" href="/styles.css?v=20260825-dossier-coverage">
+    <link rel="stylesheet" href="/styles.css?v=20260825-dossier-notifications-v3">
   </head>
   <body class="is-booting">
     <main class="app-shell">
@@ -56,9 +56,8 @@
           <div class="top-actions">
             <div class="wallet"><span>Баланс</span><strong id="coinCount">500 мон.</strong></div>
             <button class="secondary-action" id="profileButton" type="button">Профіль</button>
-            <button class="secondary-action" id="dossierButton" type="button">Досьє</button>
+            <button class="secondary-action notification-action" id="dossierButton" type="button">Досьє <span class="message-badge is-hidden" id="dossierBadge">0</span></button>
             <button class="secondary-action" id="helpButton" type="button">Довідка</button>
-            <button class="secondary-action message-action" id="messagesButton" type="button">Повідомлення <span class="message-badge is-hidden" id="messageBadge">0</span></button>
             <button class="secondary-action logout-action" id="logoutButton" type="button">Вихід</button>
           </div>
         </header>
@@ -159,11 +158,24 @@
             <h3 id="dossierTitle">Господарство</h3>
             <div class="dossier-tabs" role="tablist" aria-label="Розділи досьє">
               <button class="secondary-action is-active" type="button" data-dossier-tab="overview">Огляд</button>
-              <button class="secondary-action" type="button" data-dossier-tab="offers">Запити на викуп <span class="message-badge is-hidden" id="buyoutBadge">0</span></button>
+              <button class="secondary-action notification-action" type="button" data-dossier-tab="offers">Запити на викуп <span class="message-badge is-hidden" id="buyoutBadge">0</span></button>
+              <button class="secondary-action notification-action" type="button" data-dossier-tab="messages">Повідомлення <span class="message-badge is-hidden" id="messageBadge">0</span></button>
               <button class="secondary-action" type="button" data-dossier-tab="journal">Журнал</button>
             </div>
             <section id="dossierOverview"></section>
             <section id="dossierOffers" class="is-hidden"></section>
+            <section id="dossierMessages" class="is-hidden">
+              <div class="messages-layout dossier-messages-layout">
+                <div class="chat-list" id="chatList"></div>
+                <div class="chat-thread">
+                  <div class="chatMessages" id="chatMessages"></div>
+                  <form id="messageForm" class="message-form">
+                    <input id="messageText" name="text" maxlength="1000" placeholder="Напишіть повідомлення..." autocomplete="off">
+                    <button class="primary-action" type="submit">Надіслати</button>
+                  </form>
+                </div>
+              </div>
+            </section>
             <section id="dossierJournal" class="is-hidden"></section>
           </section>
         </div>
@@ -203,24 +215,6 @@
               <div class="admin-users" id="adminUsers"></div>
               <div class="admin-player-stats" id="adminPlayerStats"></div>
             </section>
-          </section>
-        </div>
-
-        <div class="modal is-hidden" id="messagesModal" role="dialog" aria-modal="true" aria-label="Повідомлення">
-          <section class="modal-panel messages-panel">
-            <button class="modal-close" type="button" data-close-modal>×</button>
-            <p class="eyebrow">Повідомлення</p>
-            <h3>Чати з учасниками</h3>
-            <div class="messages-layout">
-              <div class="chat-list" id="chatList"></div>
-              <div class="chat-thread">
-                <div class="chatMessages" id="chatMessages"></div>
-                <form id="messageForm" class="message-form">
-                  <input id="messageText" name="text" maxlength="1000" placeholder="Напишіть повідомлення..." autocomplete="off">
-                  <button class="primary-action" type="submit">Надіслати</button>
-                </form>
-              </div>
-            </div>
           </section>
         </div>
 
@@ -272,6 +266,6 @@
       window.setTimeout(() => document.body.classList.remove("is-booting"), 12000);
     </script>
     <script src="/game-rules.js?v=20260825-market-tax-capacity"></script>
-    <script src="/app.js?v=20260825-buyout-offers-dossier-v2"></script>
+    <script src="/app.js?v=20260825-dossier-notifications-v3"></script>
   </body>
 </html>

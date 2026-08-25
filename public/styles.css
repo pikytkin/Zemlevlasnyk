@@ -1773,13 +1773,27 @@ body.is-admin-page #adminModal .modal-close {
 }
 
 .dossier-panel {
-  width: min(760px, 94vw);
+  width: min(900px, 96vw);
+  overflow-x: hidden;
+}
+
+.dossier-panel > section,
+.buyout-list,
+.buyout-card,
+.buyout-card-grid,
+.dossier-messages-layout {
+  min-width: 0;
 }
 
 .dossier-tabs {
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
+  padding-top: 4px;
+}
+
+.dossier-tabs > button {
+  min-width: 0;
 }
 
 .compact-tabs {
@@ -1923,8 +1937,15 @@ body.is-admin-page #adminModal .modal-close {
 .buyout-card > div:first-child {
   display: flex;
   justify-content: space-between;
-  gap: 12px;
+  gap: 8px 12px;
   align-items: baseline;
+  flex-wrap: wrap;
+}
+
+.buyout-card strong,
+.buyout-card span,
+.buyout-card small {
+  overflow-wrap: anywhere;
 }
 
 .buyout-card span,
@@ -1941,6 +1962,7 @@ body.is-admin-page #adminModal .modal-close {
 .buyout-card-grid div {
   display: grid;
   gap: 3px;
+  min-width: 0;
   padding: 8px;
   border: 1px solid var(--line);
   border-radius: 6px;
@@ -1950,6 +1972,12 @@ body.is-admin-page #adminModal .modal-close {
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+.offer-actions button {
+  flex: 1 1 180px;
+  min-width: 0;
+  white-space: normal;
 }
 
 .offer-history {
@@ -1996,24 +2024,79 @@ body.is-admin-page #adminModal .modal-close {
 .admin-user summary { cursor: pointer; }
 .admin-user-body { display: grid; grid-template-columns: minmax(150px, 1.1fr) repeat(5, minmax(90px, 1fr)) minmax(130px, 0.8fr); gap: 10px; padding-top: 12px; }
 
-.message-action {
+.notification-action {
   position: relative;
+  overflow: visible;
 }
 
 .message-badge {
   position: absolute;
-  right: -6px;
-  top: -7px;
+  right: -7px;
+  top: -9px;
+  z-index: 3;
   min-width: 20px;
   height: 20px;
   display: grid;
   place-items: center;
   padding: 0 5px;
+  border: 2px solid #0d1b16;
   border-radius: 999px;
   background: var(--red);
   color: #fff;
   font-size: 0.7rem;
   font-weight: var(--weight-ui);
+  line-height: 1;
+  box-sizing: border-box;
+  pointer-events: none;
+}
+
+.top-actions .message-badge {
+  border-color: var(--bg);
+}
+
+.dossier-loading {
+  display: grid;
+  justify-items: center;
+  gap: 8px;
+  min-height: 180px;
+  padding: 28px 18px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.025);
+  color: var(--muted);
+  text-align: center;
+}
+
+.dossier-loading strong {
+  color: var(--text);
+}
+
+.dossier-loading small {
+  max-width: 520px;
+  line-height: 1.45;
+}
+
+.dossier-refreshing {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.mini-spinner {
+  width: 22px;
+  height: 22px;
+  flex: 0 0 auto;
+  border: 3px solid rgba(255, 255, 255, 0.12);
+  border-top-color: var(--accent);
+  border-right-color: var(--amber);
+  border-radius: 50%;
+  animation: land-operation-spin 0.9s linear infinite;
+}
+
+.dossier-messages-layout {
+  min-height: min(520px, 62vh);
 }
 
 .messages-panel {
@@ -2399,6 +2482,15 @@ input:focus-visible {
   .messages-layout {
     grid-template-columns: 1fr;
     min-height: 0;
+  }
+
+  .dossier-panel {
+    width: 96vw;
+    padding: 18px 14px;
+  }
+
+  .dossier-tabs .secondary-action {
+    flex: 1 1 150px;
   }
 
   .chat-list {

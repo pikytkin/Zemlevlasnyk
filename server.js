@@ -1982,6 +1982,30 @@ async function writeOffersAsync(offers) {
 }
 
 const BUYOUT_ACTIVE_STATUSES = new Set(["pending", "countered"]);
+const pendingBuyoutOfferKeys = new Set();
+
+function buyoutOfferKey(buyerId, sellerId, cellIds = []) {
+  return `${buyerId}|${sellerId}|${[...cellIds].sort().join(",")}`;
+}
+
+function isBuyoutOfferUnreadFor(offer, userId) {
+  if (offer.sellerId === userId) {
+    if (offer.sellerReadAt === null) return true;
+    return offer.sellerReadAt === undefined && BUYOUT_ACTIVE_STATUSES.has(offer.status);
+  }
+  if (offer.buyerId === userId) {
+    if (offer.buyerReadAt === null) return true;
+    return offer.buyerReadAt === undefined && offer.status === "countered";
+  }
+  return false;
+}
+
+function markBuyoutOfferReadFor(offer, userId, now = new Date().toISOString()) {
+  if (!isBuyoutOfferUnreadFor(offer, userId)) return false;
+  if (offer.sellerId === userId) offer.sellerReadAt = now;
+  if (offer.buyerId === userId) offer.buyerReadAt = now;
+  return true;
+}
 
 function buyoutFeePercent(settings = readSettings()) {
   return Math.max(0, Math.min(100, Number(settings.economy?.buyoutFeePercent) || 0));
@@ -2055,6 +2079,8 @@ function invalidateOtherBuyoutOffers(offers, users, changedIds, completedOfferId
     offer.status = "invalid";
     offer.invalidReason = "Власник землі змінився";
     offer.updatedAt = now;
+    offer.buyerReadAt = null;
+    offer.sellerReadAt = null;
     offer.history = [...(offer.history || []), { at: now, text: "Пропозиція стала недійсною: власник землі змінився." }].slice(-30);
     touched = true;
   });
@@ -2908,6 +2934,19 @@ async function handleApi(req, res) {
       return;
     }
 
+    if (req.method === "GET" && req.url === "/api/notifications/summary") {
+      const session = getSession(req);
+      if (!session || session.isGuest) {
+        sendJson(res, 401, { error: "Спочатку увійдіть у гру." });
+        return;
+      }
+      const messagesUnread = readMessages().filter((message) => message.toId === session.userId && !message.readAt).length;
+      const offers = await readOffersFresh();
+      const offersUnread = offers.filter((offer) => isBuyoutOfferUnreadFor(offer, session.userId)).length;
+      sendJson(res, 200, { messagesUnread, offersUnread, unread: messagesUnread + offersUnread });
+      return;
+    }
+
     if (req.method === "GET" && req.url === "/api/messages/summary") {
       const session = getSession(req);
       if (!session || session.isGuest) {
@@ -3041,22 +3080,42 @@ async function handleApi(req, res) {
         sendJson(res, 400, { error: "Побудову можна викупити лише разом з усіма її ділянками." });
         return;
       }
-      const buyerFarm = sanitizeFarmState(buyer.farm);
-      if (buyerFarm.coins < amount) {
-        sendJson(res, 400, { error: "Недостатньо доступних монет для резервування." });
+      const offerKey = buyoutOfferKey(buyer.id, seller.id, cellIds);
+      if (pendingBuyoutOfferKeys.has(offerKey)) {
+        sendJson(res, 409, { error: "Така пропозиція вже відправляється. Дочекайтеся завершення." });
         return;
       }
-      buyerFarm.coins -= amount;
-      const now = new Date().toISOString();
-      const offer = { id: crypto.randomUUID(), buyerId: buyer.id, sellerId: seller.id, cellIds, amount, status: "pending", createdAt: now, updatedAt: now };
-      buyerFarm.events = [{ text: `Запропоновано викуп ${cellIds.length} земель: ${amount} мон. зарезервовано.`, at: now }, ...(buyerFarm.events || [])].slice(0, 30);
-      buyerFarm.ledger = [{ type: "offer", text: `Резерв пропозиції викупу (${cellIds.length} земель)`, amount: -amount, balance: buyerFarm.coins, landDelta: 0, at: now }, ...(buyerFarm.ledger || [])].slice(0, 1000);
-      buyer.farm = sanitizeFarmState(buyerFarm);
-      buyer.updatedAt = now;
-      writeUsers(users);
-      await writeOffersAsync([...(await readOffersFresh()), offer]);
-      sendJson(res, 201, { ok: true, offer, coins: buyer.farm.coins, reserved: amount, available: buyer.farm.coins });
-      return;
+      pendingBuyoutOfferKeys.add(offerKey);
+      try {
+        const offers = await readOffersFresh();
+        const duplicate = offers.find((item) => BUYOUT_ACTIVE_STATUSES.has(item.status)
+          && buyoutOfferKey(item.buyerId, item.sellerId, item.cellIds || []) === offerKey);
+        if (duplicate) {
+          sendJson(res, 409, { error: "Активна пропозиція на ці ділянки вже існує.", offer: publicBuyoutOffer(duplicate, users, market) });
+          return;
+        }
+        const buyerFarm = sanitizeFarmState(buyer.farm);
+        if (buyerFarm.coins < amount) {
+          sendJson(res, 400, { error: "Недостатньо доступних монет для резервування." });
+          return;
+        }
+        buyerFarm.coins -= amount;
+        const now = new Date().toISOString();
+        const offer = {
+          id: crypto.randomUUID(), buyerId: buyer.id, sellerId: seller.id, cellIds, amount, status: "pending",
+          createdAt: now, updatedAt: now, buyerReadAt: now, sellerReadAt: null
+        };
+        buyerFarm.events = [{ text: `Запропоновано викуп ${cellIds.length} земель: ${amount} мон. зарезервовано.`, at: now }, ...(buyerFarm.events || [])].slice(0, 30);
+        buyerFarm.ledger = [{ type: "offer", text: `Резерв пропозиції викупу (${cellIds.length} земель)`, amount: -amount, balance: buyerFarm.coins, landDelta: 0, at: now }, ...(buyerFarm.ledger || [])].slice(0, 1000);
+        buyer.farm = sanitizeFarmState(buyerFarm);
+        buyer.updatedAt = now;
+        writeUsers(users);
+        await writeOffersAsync([...offers, offer]);
+        sendJson(res, 201, { ok: true, offer, coins: buyer.farm.coins, reserved: amount, available: buyer.farm.coins });
+        return;
+      } finally {
+        pendingBuyoutOfferKeys.delete(offerKey);
+      }
     }
 
     if (req.method === "GET" && req.url === "/api/offers") {
@@ -3077,9 +3136,25 @@ async function handleApi(req, res) {
         .filter((offer) => offer.buyerId === session.userId)
         .map((offer) => publicBuyoutOffer(offer, users, market, settings))
         .sort((a, b) => new Date(b.updatedAt || b.createdAt) - new Date(a.updatedAt || a.createdAt));
-      const unread = incoming.filter((offer) => BUYOUT_ACTIVE_STATUSES.has(offer.status) && !offer.sellerReadAt).length
-        + outgoing.filter((offer) => offer.status === "countered" && !offer.buyerReadAt).length;
+      const unread = rows.filter((offer) => isBuyoutOfferUnreadFor(offer, session.userId)).length;
       sendJson(res, 200, { incoming, outgoing, unread });
+      return;
+    }
+
+    if (req.method === "POST" && req.url === "/api/offers/read") {
+      const session = getSession(req);
+      if (!session || session.isGuest) {
+        sendJson(res, 401, { error: "Спочатку увійдіть у гру." });
+        return;
+      }
+      const offers = await readOffersFresh();
+      const now = new Date().toISOString();
+      let changed = false;
+      offers.forEach((offer) => {
+        changed = markBuyoutOfferReadFor(offer, session.userId, now) || changed;
+      });
+      if (changed) await writeOffersAsync(offers);
+      sendJson(res, 200, { ok: true, unread: 0 });
       return;
     }
 
@@ -3123,6 +3198,8 @@ async function handleApi(req, res) {
         offer.status = "invalid";
         offer.invalidReason = "Власник землі змінився";
         offer.updatedAt = now;
+        offer.buyerReadAt = null;
+        offer.sellerReadAt = null;
         offer.history = [...(offer.history || []), { at: now, text: "Пропозиція стала недійсною: власник землі змінився." }].slice(-30);
         writeUsers(users);
         await writeOffersAsync(offers);
@@ -3138,6 +3215,8 @@ async function handleApi(req, res) {
         releaseOfferReserve(users, offer, now, "Резерв пропозиції викупу повернено після скасування.");
         offer.status = "cancelled";
         offer.updatedAt = now;
+        offer.buyerReadAt = now;
+        offer.sellerReadAt = null;
         offer.history = [...(offer.history || []), { at: now, text: "Покупець скасував пропозицію." }].slice(-30);
         writeUsers(users);
         await writeOffersAsync(offers);
@@ -3153,6 +3232,13 @@ async function handleApi(req, res) {
         releaseOfferReserve(users, offer, now, "Резерв пропозиції викупу повернено після відхилення.");
         offer.status = "rejected";
         offer.updatedAt = now;
+        if (session.userId === offer.sellerId) {
+          offer.sellerReadAt = now;
+          offer.buyerReadAt = null;
+        } else {
+          offer.buyerReadAt = now;
+          offer.sellerReadAt = null;
+        }
         offer.history = [...(offer.history || []), { at: now, text: session.userId === offer.sellerId ? "Власник відхилив пропозицію." : "Покупець відхилив зустрічну ціну." }].slice(-30);
         writeUsers(users);
         await writeOffersAsync(offers);
@@ -3171,6 +3257,7 @@ async function handleApi(req, res) {
           offer.status = "countered";
           offer.counterAmount = amount;
           offer.updatedAt = now;
+          offer.sellerReadAt = now;
           offer.buyerReadAt = null;
           offer.history = [...(offer.history || []), { at: now, text: `Власник запропонував ${amount} мон.` }].slice(-30);
         } else if (session.userId === offer.buyerId) {
@@ -3186,6 +3273,7 @@ async function handleApi(req, res) {
           offer.amount = amount;
           offer.counterAmount = null;
           offer.updatedAt = now;
+          offer.buyerReadAt = now;
           offer.sellerReadAt = null;
           offer.history = [...(offer.history || []), { at: now, text: `Покупець запропонував ${amount} мон.` }].slice(-30);
         }
@@ -3243,6 +3331,13 @@ async function handleApi(req, res) {
         offer.fee = fee;
         offer.updatedAt = now;
         offer.completedAt = now;
+        if (session.userId === offer.sellerId) {
+          offer.sellerReadAt = now;
+          offer.buyerReadAt = null;
+        } else {
+          offer.buyerReadAt = now;
+          offer.sellerReadAt = null;
+        }
         offer.history = [...(offer.history || []), { at: now, text: `Угоду завершено за ${finalAmount} мон.` }].slice(-30);
         invalidateOtherBuyoutOffers(offers, users, offer.cellIds || [], offer.id, now);
         writeUsers(users);

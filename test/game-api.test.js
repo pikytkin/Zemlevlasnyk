@@ -214,3 +214,44 @@ test("a buyout offer is visible to both buyer and seller immediately after creat
   assert.equal(buyerOffers.payload.outgoing.some((offer) => offer.id === created.payload.offer.id), true);
   assert.equal(sellerOffers.payload.incoming.some((offer) => offer.id === created.payload.offer.id), true);
 });
+
+test("buyout notifications cover status changes and duplicate active offers are blocked", async () => {
+  const seller = await register("offer-notify-seller");
+  const buyer = await register("offer-notify-buyer");
+  const cellId = "cell-679-52";
+
+  const claimed = await request("POST", "/api/claim", { cells: [{ id: cellId, region: "Тест" }] }, seller);
+  assert.equal(claimed.response.status, 200, claimed.payload.error);
+
+  const created = await request("POST", "/api/offers", { cellIds: [cellId], amount: 1000 }, buyer);
+  assert.equal(created.response.status, 201, created.payload.error);
+  const offerId = created.payload.offer.id;
+
+  const sellerNotice = await request("GET", "/api/notifications/summary", undefined, seller);
+  assert.equal(sellerNotice.response.status, 200, sellerNotice.payload.error);
+  assert.equal(sellerNotice.payload.offersUnread, 1);
+
+  const marked = await request("POST", "/api/offers/read", {}, seller);
+  assert.equal(marked.response.status, 200, marked.payload.error);
+  const sellerNoticeAfterRead = await request("GET", "/api/notifications/summary", undefined, seller);
+  assert.equal(sellerNoticeAfterRead.payload.offersUnread, 0);
+
+  const buyerBeforeDuplicate = await request("GET", "/api/me", undefined, buyer);
+  const duplicate = await request("POST", "/api/offers", { cellIds: [cellId], amount: 1000 }, buyer);
+  assert.equal(duplicate.response.status, 409);
+  const buyerAfterDuplicate = await request("GET", "/api/me", undefined, buyer);
+  assert.equal(buyerAfterDuplicate.payload.farm.coins, buyerBeforeDuplicate.payload.farm.coins);
+  const buyerOffers = await request("GET", "/api/offers", undefined, buyer);
+  assert.equal(buyerOffers.payload.outgoing.filter((offer) => offer.id === offerId).length, 1);
+
+  const countered = await request("POST", `/api/offers/${offerId}/counter`, { amount: 1200 }, seller);
+  assert.equal(countered.response.status, 200, countered.payload.error);
+  const buyerNotice = await request("GET", "/api/notifications/summary", undefined, buyer);
+  assert.equal(buyerNotice.payload.offersUnread, 1);
+
+  await request("POST", "/api/offers/read", {}, buyer);
+  const accepted = await request("POST", `/api/offers/${offerId}/accept`, {}, buyer);
+  assert.equal(accepted.response.status, 200, accepted.payload.error);
+  const sellerCompletedNotice = await request("GET", "/api/notifications/summary", undefined, seller);
+  assert.equal(sellerCompletedNotice.payload.offersUnread, 1);
+});
