@@ -146,6 +146,7 @@ const assetModalTitle = document.querySelector("#assetModalTitle");
 const assetOptions = document.querySelector("#assetOptions");
 const assetQuantity = document.querySelector("#assetQuantity");
 const assetTotal = document.querySelector("#assetTotal");
+const assetSubmitButton = assetForm?.querySelector('button[type="submit"]');
 const imagePreviewModal = document.querySelector("#imagePreviewModal");
 const imagePreviewTarget = document.querySelector("#imagePreviewTarget");
 const imagePreviewPrev = document.querySelector("#imagePreviewPrev");
@@ -3504,7 +3505,7 @@ function openFertilizerPurchase() {
     return;
   }
   const minCurrentLevel = Math.min(...cells.map((cell) => state.land[cell.id].level || 1));
-  const levels = LAND_LEVELS.filter((item) => item.level > minCurrentLevel && (!item.proOnly || player?.isPro));
+  const levels = LAND_LEVELS.filter((item) => item.level > minCurrentLevel);
   if (!levels.length) {
     showGameMessage("Для вибраних ділянок уже доступний максимальний рівень добрив.");
     return;
@@ -3544,7 +3545,7 @@ function assetItemsForKind(kind) {
   const items = kind === "elevators"
     ? (gameSettings?.assets?.elevatorItems || [])
     : (gameSettings?.assets?.machineryItems || []);
-  return items.filter((item) => !item.proOnly || player?.isPro);
+  return items;
 }
 
 function openAssetPurchase(kind) {
@@ -3582,6 +3583,11 @@ function updateAssetTotal() {
         <strong>${ownedSelectedCells().length} ділянок · ${money(total)} · +${item.incomeBonusPercent}% до доходу землі</strong>
       </div>
     `;
+    const locked = Boolean(item.proOnly && !player?.isPro);
+    if (assetSubmitButton) {
+      assetSubmitButton.disabled = locked;
+      assetSubmitButton.textContent = locked ? "Доступно для Pro гравців" : "Купити";
+    }
     return;
   }
   const item = selectedAssetItem();
@@ -3615,6 +3621,11 @@ function updateAssetTotal() {
       </div>
     `
     : "";
+  const locked = Boolean(item?.proOnly && !player?.isPro);
+  if (assetSubmitButton) {
+    assetSubmitButton.disabled = locked;
+    assetSubmitButton.textContent = locked ? "Доступно для Pro гравців" : "Купити";
+  }
 }
 
 function assetCharacteristics(item, kind) {
@@ -3632,6 +3643,7 @@ function assetCharacteristics(item, kind) {
         ["Місткість", `до ${item.landCapacity || 25} земель на одиницю`],
         ["Ліміт", `${item.maxActiveUnits || 1} активн. од.`]
       ];
+  if (item.proOnly) rows.unshift(["Доступ", "🔒 Pro гравці"]);
   return rows.filter(Boolean).map(([key, value]) => `<div><span>${key}</span><strong>${value}</strong></div>`).join("");
 }
 
@@ -3719,6 +3731,10 @@ async function buyAsset(event) {
   }
   const item = selectedAssetItem();
   if (!item) return;
+  if (item.proOnly && !player?.isPro) {
+    showGameMessage("Цей актив доступний лише Pro гравцям.");
+    return;
+  }
   const buildableCells = activeAssetKind === "elevators" ? buildableSelectedCells() : [];
   const requiredBuildingCells = activeAssetKind === "elevators" ? minCellsForBuilding(item) : 0;
   const quantity = activeAssetKind === "elevators" ? requiredBuildingCells : 1;
@@ -3797,6 +3813,10 @@ async function buyAsset(event) {
 
 async function buyFertilizerLevel() {
   const item = selectedFertilizerLevel();
+  if (item.proOnly && !player?.isPro) {
+    showGameMessage("Цей рівень добрив доступний лише Pro гравцям.");
+    return;
+  }
   const cells = ownedSelectedCells().filter((cell) => {
     const owned = state.land[cell.id];
     return owned && !owned.building && !owned.buildingId && (owned.level || 1) < item.level;

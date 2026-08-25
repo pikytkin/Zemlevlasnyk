@@ -1754,6 +1754,19 @@ body.is-admin-page #adminModal .modal-close {
   border-radius: 8px;
 }
 
+.asset-settings-card .settings-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 52px;
+}
+
+.asset-settings-card .settings-checkbox input {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+}
+
 .admin-user > details { grid-column: 1 / -1; }
 .admin-user summary { cursor: pointer; }
 .admin-user-body { display: grid; grid-template-columns: minmax(150px, 1.1fr) repeat(5, minmax(90px, 1fr)) minmax(130px, 0.8fr); gap: 10px; padding-top: 12px; }
