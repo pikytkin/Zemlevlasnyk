@@ -89,7 +89,6 @@ const resetForm = document.querySelector("#resetForm");
 const forgotPasswordLink = document.querySelector("#forgotPasswordLink");
 const playerName = document.querySelector("#playerName");
 const coinCount = document.querySelector("#coinCount");
-const incomeButton = document.querySelector("#incomeButton");
 const dayCount = document.querySelector("#dayCount");
 const mapBoard = document.querySelector("#mapBoard");
 const zoomBadge = document.querySelector("#zoomBadge");
@@ -737,6 +736,10 @@ async function initMap() {
   });
   installMapLibreAdapter(map);
   map.scrollZoom.disable();
+  map.dragRotate.disable();
+  map.touchPitch?.disable?.();
+  map.touchZoomRotate?.enable?.();
+  map.touchZoomRotate?.disableRotation?.();
   map.addControl(new maplibregl.AttributionControl({ customAttribution: "© OpenStreetMap contributors" }), "bottom-right");
   globalThis.agroMap = map;
   document.agroMap = map;
@@ -4116,6 +4119,11 @@ function selectedBuildingInfo() {
   return { item, count: ids.length };
 }
 
+function setActionVisibility({ buy = false, contact = false, upgrade = false, building = false, machinery = false, sell = false } = {}) {
+  [[buyButton, buy], [contactOwnerButton, contact], [upgradeButton, upgrade], [buildingButton, building], [machineryButton, machinery], [sellButton, sell]]
+    .forEach(([button, visible]) => button?.classList.toggle("is-hidden", !visible));
+}
+
 function renderSelectedCell() {
   if (!selectedCellId) {
     hideSelectionPopup();
@@ -4134,6 +4142,7 @@ function renderSelectedCell() {
     buildingButton.disabled = true;
     machineryButton.disabled = true;
     sellButton.disabled = true;
+    setActionVisibility();
     return;
   }
 
@@ -4155,6 +4164,7 @@ function renderSelectedCell() {
     buildingButton.disabled = !(cellOwner === "player");
     machineryButton.disabled = !(cellOwner === "player" || cellOwner === "rival" || cellOwner === "free");
     sellButton.disabled = !(cellOwner === "player");
+    setActionVisibility();
     showSelectionPopup("Наблизьте карту, щоб працювати з окремими ділянками.");
     if (cellInfoOpen) cellInfoPanel?.classList.remove("is-hidden");
     return;
@@ -4195,6 +4205,13 @@ function renderSelectedCell() {
     buildingButton.disabled = !(summary.buildableCount >= minBuildingCells() || builtCount);
     machineryButton.disabled = playerOwnedCellCount() < 1;
     sellButton.disabled = !summary.ownedCount;
+    setActionVisibility({
+      buy: freeCells.length > 0,
+      upgrade: summary.canUpgrade,
+      building: summary.buildableCount >= minBuildingCells() || builtCount > 0,
+      machinery: summary.ownedCount > 0 && playerOwnedCellCount() > 0,
+      sell: summary.ownedCount > 0
+    });
     showSelectionPopup(selectedBuilding
       ? selectedBuilding.item.name
       : `Виділено ${cells.length} ділянок · ваші ${ownedCellsList.length} · вільні ${freeCells.length}`);
@@ -4257,6 +4274,14 @@ function renderSelectedCell() {
   buildingButton.disabled = !owned || (!(owned.building || owned.buildingId) && buildableSelectedCells().length < minBuildingCells());
   machineryButton.disabled = !owned;
   sellButton.disabled = !owned;
+  setActionVisibility({
+    buy: owner === "free",
+    contact: owner === "rival" && Boolean(ownerIdForCell(selectedCellId)),
+    upgrade: Boolean(owned && !owned.building && !owned.buildingId && owned.level < maxLandLevel()),
+    building: Boolean(owned && ((owned.building || owned.buildingId) || buildableSelectedCells().length >= minBuildingCells())),
+    machinery: Boolean(owned),
+    sell: Boolean(owned)
+  });
   showSelectionPopup(`${cell.code} · ${owner === "free" ? "вільна" : owner === "player" ? "ваша" : "інший гравець"}`);
   if (cellInfoOpen) cellInfoPanel?.classList.remove("is-hidden");
 }
@@ -4523,8 +4548,8 @@ function renderDossier() {
       ["Базовий дохід земель", details.baseIncome], ["Бонус добрив", details.fertilizerBonus],
       ["Бонус техніки", details.machineryBonus], ["Бонус господарств", details.clusterBonus],
       ["Побудови", details.buildingIncome], ["Валовий дохід", details.grossIncome],
-      [`Податок ${details.taxRate || 0}%`, -(Number(details.tax) || 0)], ["Зараховано", amount]
-    ].map(([label, value]) => `<div><span>${label}</span><strong class="${Number(value) < 0 ? "journal-negative" : ""}">${Number(value) < 0 ? "-" : "+"}${money(Math.abs(Number(value) || 0))}</strong></div>`).join("") : "";
+      [`Податок ${details.taxRate || 0}%`, Number(details.tax) || 0, true], ["Зараховано", amount]
+    ].map(([label, value, isExpense]) => `<div><span>${label}</span><strong class="${isExpense ? "journal-negative" : ""}">${isExpense ? "-" : "+"}${money(Math.abs(Number(value) || 0))}</strong></div>`).join("") : "";
     return `<article class="journal-entry"><time>${formatJournalDate(entry.at)}</time><h4>${escapeHtml(entry.text || "Подія")}</h4>${lines || `<p>${amount ? `${amount > 0 ? "+" : ""}${money(amount)}` : "Без зміни балансу"}</p>`}</article>`;
   }).join("")}</div>` : "<p class=\"muted-text\">Подій ще немає.</p>";
 }
@@ -5903,7 +5928,6 @@ bindEvent(upgradeButton, "click", upgradeSelectedCell);
 bindEvent(buildingButton, "click", buildOnSelectedCell);
 bindEvent(machineryButton, "click", buyMachinery);
 bindEvent(sellButton, "click", sellSelectedLand);
-bindEvent(incomeButton, "click", () => collectIncome());
 bindEvent(closeSelectionPopup, "click", () => {
   selectionPopupDismissed = true;
   setClusterSelectionMode(false);

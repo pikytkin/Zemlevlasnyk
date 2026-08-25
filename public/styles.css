@@ -838,6 +838,7 @@ dd {
 
 .maplibregl-canvas {
   outline: none;
+  touch-action: none;
 }
 
 .maplibregl-control-container {
