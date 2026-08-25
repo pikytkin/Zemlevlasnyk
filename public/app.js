@@ -4561,6 +4561,41 @@ function activeOfferStatuses() {
   return new Set(["pending", "countered"]);
 }
 
+function isActiveBuyoutOffer(offer) {
+  return activeOfferStatuses().has(offer?.status);
+}
+
+function buyoutArchiveOffers() {
+  return [
+    ...((buyoutOffersCache.incoming || []).map((offer) => ({ ...offer, archiveRole: "incoming" }))),
+    ...((buyoutOffersCache.outgoing || []).map((offer) => ({ ...offer, archiveRole: "outgoing" })))
+  ]
+    .filter((offer) => !isActiveBuyoutOffer(offer))
+    .sort((a, b) => new Date(b.updatedAt || b.createdAt) - new Date(a.updatedAt || a.createdAt));
+}
+
+function buyoutRowsForTab(tab = activeBuyoutTab) {
+  if (tab === "archive") return buyoutArchiveOffers();
+  return (buyoutOffersCache[tab] || []).filter(isActiveBuyoutOffer);
+}
+
+function buyoutStatusTone(status) {
+  return {
+    pending: "info",
+    countered: "warning",
+    completed: "success",
+    rejected: "danger",
+    cancelled: "muted",
+    invalid: "warning",
+    expired: "muted"
+  }[status] || "muted";
+}
+
+function buyoutEmptyText(tab = activeBuyoutTab) {
+  if (tab === "archive") return "Архів запитів поки порожній.";
+  return tab === "incoming" ? "Активних вхідних пропозицій поки немає." : "Активних вихідних пропозицій поки немає.";
+}
+
 async function loadBuyoutOffers(force = false) {
   if (!player || player.isGuest) return buyoutOffersCache;
   const freshEnough = buyoutOffersCache.loaded && Date.now() - (buyoutOffersCache.loadedAt || 0) < 10000;
@@ -4625,7 +4660,9 @@ async function markBuyoutOffersRead() {
 
 function buyoutOfferActions(offer, direction) {
   const active = activeOfferStatuses().has(offer.status);
-  if (!active) return "";
+  if (!active) return direction === "archive"
+    ? `<div class="offer-actions"><button class="secondary-action" type="button" data-offer-view="${escapeHtml(offer.id)}">Переглянути на карті</button></div>`
+    : "";
   const buttons = [];
   if (direction === "incoming" && offer.status === "pending") {
     buttons.push(`<button class="primary-action" type="button" data-offer-action="accept" data-offer-id="${escapeHtml(offer.id)}">Погодитися</button>`);
@@ -4649,25 +4686,29 @@ function renderBuyoutOfferCard(offer, direction) {
   const amount = offer.status === "countered" && offer.counterAmount ? offer.counterAmount : offer.amount;
   const feePercent = Number(offer.feePercent) || 0;
   const fee = Math.floor((Number(amount) || 0) * feePercent / 100);
+  const role = direction === "archive" ? offer.archiveRole : direction;
+  const counterparty = role === "incoming" ? offer.buyerName : offer.sellerName;
+  const roleLabel = role === "incoming" ? "Вхідний" : "Вихідний";
+  const statusTone = buyoutStatusTone(offer.status);
   const history = Array.isArray(offer.history) && offer.history.length
     ? `<div class="offer-history">${offer.history.slice(-4).map((item) => `<small>${formatJournalDate(item.at)} · ${escapeHtml(item.text || "")}</small>`).join("")}</div>`
     : "";
   return `
     <article class="buyout-card" data-offer-card="${escapeHtml(offer.id)}">
       <div>
-        <span>${formatJournalDate(offer.createdAt)}</span>
-        <strong>${direction === "incoming" ? escapeHtml(offer.buyerName) : escapeHtml(offer.sellerName)}</strong>
+        <span>${direction === "archive" ? `${roleLabel} · ` : ""}${formatJournalDate(offer.createdAt)}</span>
+        <strong>${escapeHtml(counterparty || "Гравець")}</strong>
       </div>
       <div class="buyout-card-grid">
         <div><span>Земель</span><strong>${offer.landCount || 0}</strong></div>
         <div><span>Сума</span><strong>${money(amount || 0)}</strong></div>
         <div><span>За ділянку</span><strong>${money(offer.pricePerCell || 0)}</strong></div>
-        <div><span>Статус</span><strong>${escapeHtml(offer.statusLabel)}</strong></div>
+        <div><span>Статус</span><strong class="buyout-status-pill buyout-status-${statusTone}">${escapeHtml(offer.statusLabel)}</strong></div>
         <div><span>Оцінка системи</span><strong>${money(offer.systemValue || 0)}</strong></div>
         <div><span>Дохід</span><strong>${money(offer.income || 0)} / добу</strong></div>
       </div>
       ${offer.status === "countered" ? `<p class="muted-text">Власник пропонує: <strong>${money(offer.counterAmount || 0)}</strong></p>` : ""}
-      ${direction === "incoming" && feePercent ? `<p class="muted-text">Комісія: ${money(fee)} · ви отримаєте ${money(Math.max(0, (Number(amount) || 0) - fee))}</p>` : ""}
+      ${role === "incoming" && feePercent ? `<p class="muted-text">Комісія: ${money(fee)} · ви отримаєте ${money(Math.max(0, (Number(amount) || 0) - fee))}</p>` : ""}
       ${offer.invalidReason ? `<p class="muted-text">${escapeHtml(offer.invalidReason)}</p>` : ""}
       <small class="muted-text">Оновлено: ${formatJournalDate(offer.updatedAt || offer.createdAt)}</small>
       ${history}
@@ -4677,11 +4718,15 @@ function renderBuyoutOfferCard(offer, direction) {
 
 function renderBuyoutOffers() {
   if (!dossierOffers) return;
-  const rows = buyoutOffersCache[activeBuyoutTab] || [];
+  const rows = buyoutRowsForTab();
+  const incomingCount = buyoutRowsForTab("incoming").length;
+  const outgoingCount = buyoutRowsForTab("outgoing").length;
+  const archiveCount = buyoutRowsForTab("archive").length;
   dossierOffers.innerHTML = `
     <div class="dossier-tabs compact-tabs" role="tablist" aria-label="Запити на викуп">
-      <button class="secondary-action ${activeBuyoutTab === "incoming" ? "is-active" : ""}" type="button" data-buyout-tab="incoming">Вхідні (${buyoutOffersCache.incoming.length})</button>
-      <button class="secondary-action ${activeBuyoutTab === "outgoing" ? "is-active" : ""}" type="button" data-buyout-tab="outgoing">Вихідні (${buyoutOffersCache.outgoing.length})</button>
+      <button class="secondary-action ${activeBuyoutTab === "incoming" ? "is-active" : ""}" type="button" data-buyout-tab="incoming">Вхідні (${incomingCount})</button>
+      <button class="secondary-action ${activeBuyoutTab === "outgoing" ? "is-active" : ""}" type="button" data-buyout-tab="outgoing">Вихідні (${outgoingCount})</button>
+      <button class="secondary-action ${activeBuyoutTab === "archive" ? "is-active" : ""}" type="button" data-buyout-tab="archive">Архів (${archiveCount})</button>
     </div>
     <div class="buyout-list">
       ${!buyoutOffersCache.loaded && !rows.length
@@ -4690,7 +4735,7 @@ function renderBuyoutOffers() {
           ? `<p class="muted-text">${escapeHtml(buyoutOffersCache.error)}</p>`
           : rows.length
             ? `${buyoutOffersCache.loading ? `<div class="dossier-refreshing"><span class="mini-spinner" aria-hidden="true"></span>Оновлюємо...</div>` : ""}${rows.map((offer) => renderBuyoutOfferCard(offer, activeBuyoutTab)).join("")}`
-            : `<p class="muted-text">${activeBuyoutTab === "incoming" ? "Вхідних пропозицій поки немає." : "Вихідних пропозицій поки немає."}</p>`}
+            : `<p class="muted-text">${buyoutEmptyText()}</p>`}
     </div>`;
 }
 

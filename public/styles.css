@@ -1968,6 +1968,41 @@ body.is-admin-page #adminModal .modal-close {
   border-radius: 6px;
 }
 
+.buyout-status-pill {
+  width: fit-content;
+  max-width: 100%;
+  padding: 4px 8px;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  line-height: 1.2;
+}
+
+.buyout-status-success {
+  color: #55d98a;
+  background: rgba(85, 217, 138, 0.12);
+}
+
+.buyout-status-danger {
+  color: #ff7373;
+  background: rgba(255, 115, 115, 0.12);
+}
+
+.buyout-status-warning {
+  color: #ffbc58;
+  background: rgba(255, 188, 88, 0.13);
+}
+
+.buyout-status-info {
+  color: #7db7ff;
+  background: rgba(125, 183, 255, 0.12);
+}
+
+.buyout-status-muted {
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.06);
+}
+
 .offer-actions {
   display: flex;
   gap: 8px;
