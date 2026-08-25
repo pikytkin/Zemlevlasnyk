@@ -4844,6 +4844,12 @@ function renderDossier() {
         ${incomeRows.map(([title, description, amount, isExpense]) => `<div><span>${escapeHtml(title)}</span><small>${escapeHtml(description)}</small><strong class="${isExpense ? "journal-negative" : ""}">${amount == null ? "Буде показано після нарахування" : `${isExpense ? "-" : "+"}${money(amount)}`}</strong></div>`).join("")}
       </div>
     </section>`;
+  if (activeDossierTab === "journal") renderDossierJournal();
+  else dossierJournal.innerHTML = "<p class=\"muted-text\">Журнал буде завантажено після відкриття вкладки.</p>";
+}
+
+function renderDossierJournal() {
+  if (!dossierJournal) return;
   const entries = Array.isArray(state.ledger) ? state.ledger : [];
   dossierJournal.innerHTML = entries.length ? `<div class="journal-list">${entries.map((entry) => {
     const details = entry.details;
@@ -4872,6 +4878,9 @@ function activateDossierTab(tab) {
       .then(() => markBuyoutOffersRead());
   } else if (activeDossierTab === "messages") {
     openMessagesPanel();
+  } else if (activeDossierTab === "journal") {
+    renderDossierJournal();
+    stopActiveChatPolling();
   } else {
     stopActiveChatPolling();
   }

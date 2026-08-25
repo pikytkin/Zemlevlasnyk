@@ -1,0 +1,215 @@
+diff --git a/public/app.js b/public/app.js
+index 07a04a7..6717c25 100644
+--- a/public/app.js
++++ b/public/app.js
+@@ -4844,6 +4844,12 @@ function renderDossier() {
+         ${incomeRows.map(([title, description, amount, isExpense]) => `<div><span>${escapeHtml(title)}</span><small>${escapeHtml(description)}</small><strong class="${isExpense ? "journal-negative" : ""}">${amount == null ? "Буде показано після нарахування" : `${isExpense ? "-" : "+"}${money(amount)}`}</strong></div>`).join("")}
+       </div>
+     </section>`;
++  if (activeDossierTab === "journal") renderDossierJournal();
++  else dossierJournal.innerHTML = "<p class=\"muted-text\">Журнал буде завантажено після відкриття вкладки.</p>";
++}
++
++function renderDossierJournal() {
++  if (!dossierJournal) return;
+   const entries = Array.isArray(state.ledger) ? state.ledger : [];
+   dossierJournal.innerHTML = entries.length ? `<div class="journal-list">${entries.map((entry) => {
+     const details = entry.details;
+@@ -4872,6 +4878,9 @@ function activateDossierTab(tab) {
+       .then(() => markBuyoutOffersRead());
+   } else if (activeDossierTab === "messages") {
+     openMessagesPanel();
++  } else if (activeDossierTab === "journal") {
++    renderDossierJournal();
++    stopActiveChatPolling();
+   } else {
+     stopActiveChatPolling();
+   }
+diff --git a/server.js b/server.js
+index 2b48151..63ea7d9 100644
+--- a/server.js
++++ b/server.js
+@@ -2,7 +2,6 @@
+ const fs = require("fs");
+ const http = require("http");
+ const path = require("path");
+-const polygonClipping = require("polygon-clipping");
+ const zlib = require("zlib");
+ const GameRules = require("./public/game-rules");
+ const Land = require("./lib/land");
+@@ -1476,27 +1475,6 @@ function mapCellsInViewport(bounds, zoom = 13, limit = MAX_VIEWPORT_MARKET_CELLS
+   return payload;
+ }
+ 
+-function unionPolygonsBatched(polygons, batchSize = 256) {
+-  let queue = Array.isArray(polygons) ? polygons.filter(Boolean) : [];
+-  if (!queue.length) return [];
+-  while (queue.length > 1) {
+-    const next = [];
+-    for (let index = 0; index < queue.length; index += batchSize) {
+-      const batch = queue.slice(index, index + batchSize);
+-      if (batch.length === 1) next.push(batch[0]);
+-      else next.push(polygonClipping.union(...batch));
+-    }
+-    queue = next;
+-  }
+-  const result = queue[0];
+-  // A single untouched input is a Polygon; polygon-clipping union normally returns MultiPolygon.
+-  if (!Array.isArray(result)) return [];
+-  if (result.length && Array.isArray(result[0]) && Array.isArray(result[0][0]) && typeof result[0][0][0] === "number") {
+-    return [result];
+-  }
+-  return result;
+-}
+-
+ function mapOverviewTerritories(bounds, zoom, playerId = "") {
+   const cacheKey = `${marketVersion}|${zoom}|${playerId}|${bounds.west.toFixed(3)}|${bounds.south.toFixed(3)}|${bounds.east.toFixed(3)}|${bounds.north.toFixed(3)}`;
+   const cached = mapOverviewCache.get(cacheKey);
+@@ -1563,18 +1541,18 @@ function mapOverviewTerritories(bounds, zoom, playerId = "") {
+     };
+   };
+ 
+-  const buildGroupBounds = (group, span) => {
+-    const minQ = Math.max(0, Math.min(group.minQ, group.maxQ));
+-    const maxQ = Math.max(group.minQ, group.maxQ);
+-    const minR = Math.max(0, Math.min(group.minR, group.maxR));
+-    const maxR = Math.max(group.minR, group.maxR);
+-    // polygon-clipping expects GeoJSON axis order [lng, lat].
+-    const latLng = rectBoundaryLatLngRangeServer(minQ, maxQ, minR, maxR);
+-    const ring = latLng.map(([lat, lng]) => [lng, lat]);
+-    if (ring.length && (ring[0][0] !== ring[ring.length - 1][0] || ring[0][1] !== ring[ring.length - 1][1])) {
+-      ring.push([...ring[0]]);
+-    }
+-    return ring;
++  const buildComponentBoundary = (component) => {
++    let minQ = Infinity;
++    let maxQ = -Infinity;
++    let minR = Infinity;
++    let maxR = -Infinity;
++    component.forEach((group) => {
++      minQ = Math.min(minQ, group.minQ);
++      maxQ = Math.max(maxQ, group.maxQ);
++      minR = Math.min(minR, group.minR);
++      maxR = Math.max(maxR, group.maxR);
++    });
++    return rectBoundaryLatLngRangeServer(minQ, maxQ, minR, maxR);
+   };
+ 
+   const componentizeGroups = (groupMap) => {
+@@ -1638,38 +1616,30 @@ function mapOverviewTerritories(bounds, zoom, playerId = "") {
+       if (!component) continue;
+       hasRemainingComponents = true;
+       row.nextIndex += 1;
+-      const polygons = component.map((group) => [buildGroupBounds(group, overviewSpan)]);
+-      const union = unionPolygonsBatched(polygons);
+-      if (!Array.isArray(union) || !union.length) continue;
+       const componentCellCount = component.reduce((sum, group) => sum + (group.cellCount || 0), 0);
+-      union.forEach((polygon, polygonIndex) => {
+-        if (territories.length >= maxTerritories) {
+-          overviewTruncated = true;
+-          return;
+-        }
+-        if (!Array.isArray(polygon) || !polygon.length) return;
+-        const outerRing = polygon[0];
+-        const boundary = outerRing.map(([lng, lat]) => [lat, lng]);
+-        if (boundary.length < 4) return;
+-        const center = polygonToCenter(boundary);
+-        const box = territoryBounds(boundary);
+-        const intersectsViewport = box.east >= bounds.west
+-          && box.west <= bounds.east
+-          && box.north >= bounds.south
+-          && box.south <= bounds.north;
+-        if (!intersectsViewport) return;
+-        territories.push({
+-          ownerId: row.owner.ownerId,
+-          ownerKind: row.owner.ownerKind,
+-          chunkId: `z${level}:${row.owner.ownerId}:${componentIndex}:${polygonIndex}`,
+-          polygon: boundary,
+-          bbox: box,
+-          cellCount: componentCellCount,
+-          occupied: componentCellCount / Math.max(1, row.owner.cellCount),
+-          color: row.owner.color,
+-          lat: center.lat,
+-          lng: center.lng
+-        });
++      const boundary = buildComponentBoundary(component);
++      const center = polygonToCenter(boundary);
++      const box = territoryBounds(boundary);
++      const intersectsViewport = box.east >= bounds.west
++        && box.west <= bounds.east
++        && box.north >= bounds.south
++        && box.south <= bounds.north;
++      if (!intersectsViewport) continue;
++      if (territories.length >= maxTerritories) {
++        overviewTruncated = true;
++        break;
++      }
++      territories.push({
++        ownerId: row.owner.ownerId,
++        ownerKind: row.owner.ownerKind,
++        chunkId: `z${level}:${row.owner.ownerId}:${componentIndex}`,
++        polygon: boundary,
++        bbox: box,
++        cellCount: componentCellCount,
++        occupied: componentCellCount / Math.max(1, row.owner.cellCount),
++        color: row.owner.color,
++        lat: center.lat,
++        lng: center.lng
+       });
+     }
+   }
+@@ -2044,16 +2014,24 @@ function releaseOfferReserve(users, offer, now = new Date().toISOString(), reaso
+ function publicBuyoutOffer(offer, users, market, settings = readSettings()) {
+   const buyer = users.find((user) => user.id === offer.buyerId);
+   const seller = users.find((user) => user.id === offer.sellerId);
+-  const sellerFarm = sanitizeFarmState(seller?.farm);
+-  const cells = (offer.cellIds || []).map((id) => sellerFarm.land?.[id]).filter(Boolean);
+   const currentAmount = offer.status === "countered" && offer.counterAmount ? Number(offer.counterAmount) : Number(offer.amount);
+-  const systemValue = (offer.cellIds || []).reduce((sum, id) => sum + authoritativeLandPrice(id, market, settings), 0);
+-  const income = (offer.cellIds || []).reduce((sum, id) => {
+-    const cell = sellerFarm.land?.[id];
+-    return sum + (cell ? incomeForLandIdServer(id, settings) * fertilizerMultiplier(cell.level || 1, settings) : incomeForLandIdServer(id, settings));
+-  }, 0);
+-  const buildings = cells.filter((cell) => cell.building || cell.buildingId).length;
+-  const fertilized = cells.filter((cell) => (cell.level || 1) > 1).length;
++  const summary = offer.summary && typeof offer.summary === "object" ? offer.summary : null;
++  const needsFreshSummary = !summary && BUYOUT_ACTIVE_STATUSES.has(offer.status);
++  let systemValue = Math.max(0, Math.floor(Number(summary?.systemValue) || 0));
++  let income = Math.max(0, Math.floor(Number(summary?.income) || 0));
++  let fertilized = Math.max(0, Math.floor(Number(summary?.fertilized) || 0));
++  let buildings = Math.max(0, Math.floor(Number(summary?.buildings) || 0));
++  if (needsFreshSummary) {
++    const sellerFarm = sanitizeFarmState(seller?.farm);
++    const cells = (offer.cellIds || []).map((id) => sellerFarm.land?.[id]).filter(Boolean);
++    systemValue = (offer.cellIds || []).reduce((sum, id) => sum + authoritativeLandPrice(id, market, settings), 0);
++    income = (offer.cellIds || []).reduce((sum, id) => {
++      const cell = sellerFarm.land?.[id];
++      return sum + (cell ? incomeForLandIdServer(id, settings) * fertilizerMultiplier(cell.level || 1, settings) : incomeForLandIdServer(id, settings));
++    }, 0);
++    buildings = cells.filter((cell) => cell.building || cell.buildingId).length;
++    fertilized = cells.filter((cell) => (cell.level || 1) > 1).length;
++  }
+   return {
+     ...offer,
+     statusLabel: buyoutStatusLabel(offer.status),
+@@ -3101,9 +3079,19 @@ async function handleApi(req, res) {
+         }
+         buyerFarm.coins -= amount;
+         const now = new Date().toISOString();
++        const offerCells = cellIds.map((id) => sellerFarm.land?.[id]).filter(Boolean);
++        const offerSummary = {
++          systemValue: cellIds.reduce((sum, id) => sum + authoritativeLandPrice(id, market, readSettings()), 0),
++          income: Math.floor(cellIds.reduce((sum, id) => {
++            const cell = sellerFarm.land?.[id];
++            return sum + (cell ? incomeForLandIdServer(id) * fertilizerMultiplier(cell.level || 1) : incomeForLandIdServer(id));
++          }, 0)),
++          fertilized: offerCells.filter((cell) => (cell.level || 1) > 1).length,
++          buildings: offerCells.filter((cell) => cell.building || cell.buildingId).length
++        };
+         const offer = {
+           id: crypto.randomUUID(), buyerId: buyer.id, sellerId: seller.id, cellIds, amount, status: "pending",
+-          createdAt: now, updatedAt: now, buyerReadAt: now, sellerReadAt: null
++          createdAt: now, updatedAt: now, buyerReadAt: now, sellerReadAt: null, summary: offerSummary
+         };
+         buyerFarm.events = [{ text: `Запропоновано викуп ${cellIds.length} земель: ${amount} мон. зарезервовано.`, at: now }, ...(buyerFarm.events || [])].slice(0, 30);
+         buyerFarm.ledger = [{ type: "offer", text: `Резерв пропозиції викупу (${cellIds.length} земель)`, amount: -amount, balance: buyerFarm.coins, landDelta: 0, at: now }, ...(buyerFarm.ledger || [])].slice(0, 1000);
