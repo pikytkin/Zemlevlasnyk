@@ -4557,11 +4557,17 @@ async function loadBuyoutOffers(force = false) {
       incoming: Array.isArray(payload.incoming) ? payload.incoming : [],
       outgoing: Array.isArray(payload.outgoing) ? payload.outgoing : [],
       unread: Math.max(0, Number(payload.unread) || 0),
-      loaded: true
+      loaded: true,
+      error: ""
     };
     renderBuyoutBadge();
   } catch (error) {
-    if (dossierOffers) dossierOffers.innerHTML = `<p class="muted-text">${escapeHtml(error.message)}</p>`;
+    buyoutOffersCache = {
+      ...buyoutOffersCache,
+      loaded: false,
+      error: error?.message || "Не вдалося завантажити пропозиції викупу."
+    };
+    renderBuyoutBadge();
   }
   return buyoutOffersCache;
 }
@@ -4633,7 +4639,11 @@ function renderBuyoutOffers() {
       <button class="secondary-action ${activeBuyoutTab === "outgoing" ? "is-active" : ""}" type="button" data-buyout-tab="outgoing">Вихідні (${buyoutOffersCache.outgoing.length})</button>
     </div>
     <div class="buyout-list">
-      ${rows.length ? rows.map((offer) => renderBuyoutOfferCard(offer, activeBuyoutTab)).join("") : `<p class="muted-text">${activeBuyoutTab === "incoming" ? "Вхідних пропозицій поки немає." : "Вихідних пропозицій поки немає."}</p>`}
+      ${buyoutOffersCache.error
+        ? `<p class="muted-text">${escapeHtml(buyoutOffersCache.error)}</p>`
+        : rows.length
+          ? rows.map((offer) => renderBuyoutOfferCard(offer, activeBuyoutTab)).join("")
+          : `<p class="muted-text">${activeBuyoutTab === "incoming" ? "Вхідних пропозицій поки немає." : "Вихідних пропозицій поки немає."}</p>`}
     </div>`;
 }
 
@@ -6166,7 +6176,7 @@ bindEvent(offerForm, "submit", async (event) => {
     const payload = await requestJson("/api/offers", { method: "POST", body: JSON.stringify({ cellIds, amount }) });
     state.coins = payload.coins;
     buyoutOffersCache.loaded = false;
-    renderBuyoutBadge();
+    await refreshBuyoutOffers();
     closeModal(offerModal);
     render();
     showGameMessage("Пропозицію відправлено. Сума зарезервована.");

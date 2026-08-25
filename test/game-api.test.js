@@ -192,3 +192,25 @@ test("same machinery can be bought repeatedly to expand its land coverage", asyn
   const currentFarm = await request("GET", "/api/me", undefined, cookie);
   assert.equal(currentFarm.payload.farm.inventory.machinery[itemId], 3);
 });
+
+
+test("a buyout offer is visible to both buyer and seller immediately after creation", async () => {
+  const seller = await register("offer-visible-seller");
+  const buyer = await register("offer-visible-buyer");
+  const cellId = "cell-678-52";
+
+  const claimed = await request("POST", "/api/claim", { cells: [{ id: cellId, region: "Тест" }] }, seller);
+  assert.equal(claimed.response.status, 200, claimed.payload.error);
+  assert.deepEqual(claimed.payload.claimed, [cellId]);
+
+  const created = await request("POST", "/api/offers", { cellIds: [cellId], amount: 1000 }, buyer);
+  assert.equal(created.response.status, 201, created.payload.error);
+  assert.ok(created.payload.offer?.id);
+
+  const buyerOffers = await request("GET", "/api/offers", undefined, buyer);
+  const sellerOffers = await request("GET", "/api/offers", undefined, seller);
+  assert.equal(buyerOffers.response.status, 200, buyerOffers.payload.error);
+  assert.equal(sellerOffers.response.status, 200, sellerOffers.payload.error);
+  assert.equal(buyerOffers.payload.outgoing.some((offer) => offer.id === created.payload.offer.id), true);
+  assert.equal(sellerOffers.payload.incoming.some((offer) => offer.id === created.payload.offer.id), true);
+});
