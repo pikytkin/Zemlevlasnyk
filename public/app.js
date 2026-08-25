@@ -4014,8 +4014,9 @@ function changedSelectionIds(previousSelection, nextSelection) {
 }
 
 function showSelectionPopup(text) {
-  void text;
-  hideSelectionPopup();
+  if (!selectionPopup || !selectionSummary || selectionPopupDismissed) return;
+  selectionSummary.textContent = text;
+  selectionPopup.classList.remove("is-hidden");
 }
 
 function hideSelectionPopup() {
@@ -4229,7 +4230,7 @@ function renderSelectedCell() {
   buildingButton.disabled = !owned || (!(owned.building || owned.buildingId) && buildableSelectedCells().length < minBuildingCells());
   machineryButton.disabled = !owned;
   sellButton.disabled = !owned;
-  showSelectionPopup(`${cellTitle.textContent} · ${owner === "free" ? "вільна" : owner === "player" ? "ваша" : "інший гравець"}`);
+  showSelectionPopup(`${cell.code} · ${owner === "free" ? "вільна" : owner === "player" ? "ваша" : "інший гравець"}`);
   if (cellInfoOpen) cellInfoPanel?.classList.remove("is-hidden");
 }
 
