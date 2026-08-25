@@ -317,6 +317,27 @@ function persistState(key) {
   });
 }
 
+async function readStateValue(key, fallback) {
+  if (!dbPool) return fallback;
+  try {
+    const rows = await dbPool.query("SELECT value FROM app_state WHERE key = $1", [key]);
+    return rows.rows[0]?.value ?? fallback;
+  } catch (error) {
+    console.error(`Failed to read ${key}:`, error.message);
+    return fallback;
+  }
+}
+
+async function persistStateAsync(key) {
+  if (!dbPool || !storage) return;
+  await dbPool.query(
+    `INSERT INTO app_state (key, value, updated_at)
+     VALUES ($1, $2::jsonb, now())
+     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
+    [key, JSON.stringify(storage[key])]
+  );
+}
+
 function persistUsersToFile() {
   if (!storage) return;
   ensureDataFiles();
@@ -1933,6 +1954,14 @@ function readOffers() {
   return Array.isArray(storage?.offers) ? storage.offers : [];
 }
 
+async function readOffersFresh() {
+  if (!storage) storage = readFileStorageSnapshot();
+  if (!dbPool) return readOffers();
+  const rows = await readStateValue("offers", storage.offers || []);
+  storage.offers = Array.isArray(rows) ? rows : [];
+  return storage.offers;
+}
+
 function persistOffersToFile() {
   if (!storage) return;
   ensureDataFiles();
@@ -1942,6 +1971,13 @@ function persistOffersToFile() {
 function writeOffers(offers) {
   storage.offers = offers.slice(-5000);
   if (dbPool) persistState("offers");
+  else persistOffersToFile();
+}
+
+async function writeOffersAsync(offers) {
+  if (!storage) storage = readFileStorageSnapshot();
+  storage.offers = offers.slice(-5000);
+  if (dbPool) await persistStateAsync("offers");
   else persistOffersToFile();
 }
 
@@ -3018,7 +3054,7 @@ async function handleApi(req, res) {
       buyer.farm = sanitizeFarmState(buyerFarm);
       buyer.updatedAt = now;
       writeUsers(users);
-      writeOffers([...readOffers(), offer]);
+      await writeOffersAsync([...(await readOffersFresh()), offer]);
       sendJson(res, 201, { ok: true, offer, coins: buyer.farm.coins, reserved: amount, available: buyer.farm.coins });
       return;
     }
@@ -3032,7 +3068,7 @@ async function handleApi(req, res) {
       const users = readUsers();
       const market = readMarket();
       const settings = readSettings();
-      const rows = readOffers().filter((offer) => offer.buyerId === session.userId || offer.sellerId === session.userId);
+      const rows = (await readOffersFresh()).filter((offer) => offer.buyerId === session.userId || offer.sellerId === session.userId);
       const incoming = rows
         .filter((offer) => offer.sellerId === session.userId)
         .map((offer) => publicBuyoutOffer(offer, users, market, settings))
@@ -3057,7 +3093,7 @@ async function handleApi(req, res) {
       const offerId = parts[2];
       const action = parts[3];
       const body = await readBody(req);
-      const offers = readOffers();
+      const offers = await readOffersFresh();
       const offer = offers.find((item) => item.id === offerId);
       const users = readUsers();
       const actor = users.find((user) => user.id === session.userId);
@@ -3073,7 +3109,7 @@ async function handleApi(req, res) {
         offer.status = "invalid";
         offer.invalidReason = "Гравця не знайдено";
         offer.updatedAt = now;
-        writeOffers(offers);
+        await writeOffersAsync(offers);
         sendJson(res, 409, { error: "Один з учасників угоди більше недоступний." });
         return;
       }
@@ -3089,7 +3125,7 @@ async function handleApi(req, res) {
         offer.updatedAt = now;
         offer.history = [...(offer.history || []), { at: now, text: "Пропозиція стала недійсною: власник землі змінився." }].slice(-30);
         writeUsers(users);
-        writeOffers(offers);
+        await writeOffersAsync(offers);
         sendJson(res, 409, { error: "Земля вже змінила власника." });
         return;
       }
@@ -3104,7 +3140,7 @@ async function handleApi(req, res) {
         offer.updatedAt = now;
         offer.history = [...(offer.history || []), { at: now, text: "Покупець скасував пропозицію." }].slice(-30);
         writeUsers(users);
-        writeOffers(offers);
+        await writeOffersAsync(offers);
         sendJson(res, 200, { ok: true, farm: sanitizeFarmState(actor.farm), offer: publicBuyoutOffer(offer, users, market) });
         return;
       }
@@ -3119,7 +3155,7 @@ async function handleApi(req, res) {
         offer.updatedAt = now;
         offer.history = [...(offer.history || []), { at: now, text: session.userId === offer.sellerId ? "Власник відхилив пропозицію." : "Покупець відхилив зустрічну ціну." }].slice(-30);
         writeUsers(users);
-        writeOffers(offers);
+        await writeOffersAsync(offers);
         sendJson(res, 200, { ok: true, farm: sanitizeFarmState(actor.farm), offer: publicBuyoutOffer(offer, users, market) });
         return;
       }
@@ -3154,7 +3190,7 @@ async function handleApi(req, res) {
           offer.history = [...(offer.history || []), { at: now, text: `Покупець запропонував ${amount} мон.` }].slice(-30);
         }
         writeUsers(users);
-        writeOffers(offers);
+        await writeOffersAsync(offers);
         sendJson(res, 200, { ok: true, farm: sanitizeFarmState(actor.farm), offer: publicBuyoutOffer(offer, users, market) });
         return;
       }
@@ -3211,7 +3247,7 @@ async function handleApi(req, res) {
         invalidateOtherBuyoutOffers(offers, users, offer.cellIds || [], offer.id, now);
         writeUsers(users);
         writeMarket(market, { upsertIds: offer.cellIds || [] });
-        writeOffers(offers);
+        await writeOffersAsync(offers);
         appendNewsEvent({
           type: "sale",
           title: "Прямий викуп землі",
@@ -3427,9 +3463,9 @@ async function handleApi(req, res) {
       farm.coins = Math.max(0, Math.floor((farm.coins || 0) + totalRefund));
       user.farm = sanitizeFarmState(farm);
       user.updatedAt = new Date().toISOString();
-      const offers = readOffers();
+      const offers = await readOffersFresh();
       if (invalidateOtherBuyoutOffers(offers, users, soldIds, null, user.updatedAt)) {
-        writeOffers(offers);
+        await writeOffersAsync(offers);
       }
       writeUsers(users);
       writeMarket(market, { deleteIds: soldIds });
