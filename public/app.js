@@ -4494,6 +4494,15 @@ function renderDossier() {
   const activeMachinery = inventoryCount("machinery");
   const buildingCount = buildingObjectCount();
   const taxRate = Number(stage?.incomeTaxPercent) || 0;
+  const latestIncome = (Array.isArray(state.ledger) ? state.ledger : []).find((entry) => entry?.type === "income" && entry?.details)?.details || null;
+  const incomeRows = [
+    ["Базовий дохід земель", "Дохід звичайних ділянок до застосування покращень.", latestIncome?.baseIncome],
+    ["Бонус добрив", "Додатковий дохід від рівнів добрив на конкретних ділянках.", latestIncome?.fertilizerBonus],
+    ["Бонус техніки", "Ефект активної техніки в межах її виробничої місткості.", latestIncome?.machineryBonus],
+    ["Бонус господарств", "Приріст доходу від компактних суміжних земельних масивів.", latestIncome?.clusterBonus],
+    ["Побудови", "Окремий дохід об'єктів; земля під ними не дає звичайного доходу.", latestIncome?.buildingIncome],
+    ["Податок", "Віднімається з валового доходу за ставкою поточного етапу розвитку.", latestIncome?.tax, true]
+  ];
   dossierTitle.textContent = state.companyName || player?.username || "Господарство";
   dossierOverview.innerHTML = `
     <div class="dossier-grid">
@@ -4501,8 +4510,11 @@ function renderDossier() {
         .map(([label, value]) => `<div><span>${label}</span><strong>${escapeHtml(String(value))}</strong></div>`).join("")}
     </div>
     <section class="dossier-section">
-      <h4>Структура доходу</h4>
-      <p>Дохід землі, добрив, техніки, кластерів, побудов і податку фіксується в журналі після кожного нарахування.</p>
+      <h4>Орієнтовна структура щоденних доходів / витрат</h4>
+      <p>Складові показані за останнім завершеним нарахуванням. Поточні значення можуть змінюватися після купівлі, продажу або інвестицій.</p>
+      <div class="income-structure">
+        ${incomeRows.map(([title, description, amount, isExpense]) => `<div><span>${escapeHtml(title)}</span><small>${escapeHtml(description)}</small><strong class="${isExpense ? "journal-negative" : ""}">${amount == null ? "Буде показано після нарахування" : `${isExpense ? "-" : "+"}${money(amount)}`}</strong></div>`).join("")}
+      </div>
     </section>`;
   const entries = Array.isArray(state.ledger) ? state.ledger : [];
   dossierJournal.innerHTML = entries.length ? `<div class="journal-list">${entries.map((entry) => {

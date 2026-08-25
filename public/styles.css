@@ -1854,6 +1854,39 @@ body.is-admin-page #adminModal .modal-close {
   color: var(--muted);
 }
 
+.dossier-section {
+  display: grid;
+  gap: 9px;
+  margin-top: 10px;
+}
+
+.income-structure {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.income-structure > div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.income-structure span,
+.income-structure strong {
+  color: var(--text);
+}
+
+.income-structure small {
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.35;
+}
+
 .journal-list {
   display: grid;
   gap: 10px;
@@ -1876,7 +1909,8 @@ body.is-admin-page #adminModal .modal-close {
 }
 
 @media (max-width: 520px) {
-  .dossier-grid { grid-template-columns: 1fr; }
+  .dossier-grid,
+  .income-structure { grid-template-columns: 1fr; }
 }
 
 .asset-settings-card .settings-checkbox {
