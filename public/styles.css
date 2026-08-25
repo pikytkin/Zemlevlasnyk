@@ -1781,6 +1781,42 @@ body.is-admin-page #adminModal .modal-close {
   flex-wrap: wrap;
 }
 
+.help-panel {
+  width: min(760px, 94vw);
+}
+
+.help-section {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.help-section + .help-section {
+  margin-top: 8px;
+}
+
+.help-section summary {
+  padding: 12px 38px 12px 12px;
+  cursor: pointer;
+  color: var(--text);
+  font-weight: var(--weight-ui);
+}
+
+.help-section > div {
+  padding: 0 12px 12px;
+  color: var(--muted);
+  line-height: 1.55;
+}
+
+.help-section ul {
+  margin: 8px 0;
+  padding-left: 20px;
+}
+
+.help-section b {
+  color: var(--text);
+}
+
 .dossier-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

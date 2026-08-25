@@ -189,36 +189,42 @@
       "title": "Початок",
       "min": 0,
       "landPriceMultiplier": 1,
+      "incomeTaxPercent": 0,
       "text": "Купуйте перші ділянки та формуйте базу господарства."
     },
     {
       "title": "Господарство",
       "min": 5,
       "landPriceMultiplier": 1,
+      "incomeTaxPercent": 0,
       "text": "Земля поруч підвищує ціну наступної покупки, а з'єднані ділянки дають бонус до доходу."
     },
     {
       "title": "Компанія",
       "min": 15,
       "landPriceMultiplier": 1.1,
+      "incomeTaxPercent": 0,
       "text": "З'єднані ділянки дають відчутний бонус до доходу."
     },
     {
       "title": "Агрохолдинг",
       "min": 40,
       "landPriceMultiplier": 1.5,
+      "incomeTaxPercent": 0,
       "text": "Розвивайте побудови, техніку і рівні землі."
     },
     {
       "title": "Корпорація",
       "min": 100,
       "landPriceMultiplier": 2.2,
+      "incomeTaxPercent": 0,
       "text": "Масштабуйте виробництво та баланс між землею й активами."
     },
     {
       "title": "Національна корпорація",
       "min": 250,
       "landPriceMultiplier": 2.8,
+      "incomeTaxPercent": 0,
       "text": "Гравець бореться за лідерство на карті України."
     }
   ],

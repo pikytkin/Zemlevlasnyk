@@ -120,6 +120,7 @@ const messageBadge = document.querySelector("#messageBadge");
 const logoutButton = document.querySelector("#logoutButton");
 const profileModal = document.querySelector("#profileModal");
 const helpModal = document.querySelector("#helpModal");
+const helpSections = document.querySelector("#helpSections");
 const dossierModal = document.querySelector("#dossierModal");
 const dossierTitle = document.querySelector("#dossierTitle");
 const dossierOverview = document.querySelector("#dossierOverview");
@@ -4492,8 +4493,7 @@ function renderDossier() {
   const stage = [...stageRules].reverse().find((item) => ownedCount >= item.min) || stageRules[0];
   const activeMachinery = inventoryCount("machinery");
   const buildingCount = buildingObjectCount();
-  const taxStart = Number(gameSettings?.economy?.incomeTaxStartLandCount) || 0;
-  const taxRate = ownedCount >= taxStart ? Number(gameSettings?.economy?.incomeTaxPercent) || 0 : 0;
+  const taxRate = Number(stage?.incomeTaxPercent) || 0;
   dossierTitle.textContent = state.companyName || player?.username || "Господарство";
   dossierOverview.innerHTML = `
     <div class="dossier-grid">
@@ -4522,6 +4522,34 @@ function activateDossierTab(tab) {
   document.querySelectorAll("[data-dossier-tab]").forEach((button) => button.classList.toggle("is-active", button.dataset.dossierTab === tab));
   dossierOverview?.classList.toggle("is-hidden", tab !== "overview");
   dossierJournal?.classList.toggle("is-hidden", tab !== "journal");
+}
+
+function renderHelp() {
+  if (!helpSections) return;
+  const economy = gameSettings?.economy || {};
+  const stages = [...(gameSettings?.stages || stageRules)].sort((a, b) => a.min - b.min);
+  const clusters = [...(gameSettings?.clusters || [])].sort((a, b) => a.min - b.min);
+  const levels = [...(gameSettings?.upgrades?.landLevels || LAND_LEVELS)].sort((a, b) => a.level - b.level);
+  const machinery = gameSettings?.assets?.machineryItems || [];
+  const buildings = gameSettings?.assets?.elevatorItems || [];
+  const taxRows = stages.filter((item) => Number(item.incomeTaxPercent) > 0)
+    .map((item) => `<li>«${escapeHtml(item.title)}» від ${item.min} земель: ${item.incomeTaxPercent}%.</li>`).join("");
+  const sections = [
+    ["Мета гри", "Ваше завдання — розвивати власну аграрну компанію: купувати землю, формувати компактні господарства, підвищувати дохід, інвестувати в добрива, техніку та побудови."],
+    ["Земля", `Земля — головний актив. Базова вартість зараз <b>${money(economy.baseLandPriceMin)}</b>, а базовий дохід — <b>${money(economy.baseIncomeMin)} / цикл</b>. Кожна зайнята земля в радіусі ${economy.nearbyPriceRadius || 1} піднімає ціну на ${economy.nearbyPriceGrowthPercent || 0}%. Пакетна купівля не збільшує ціну ділянок всередині самого пакета.`],
+    ["Продаж землі", `Продаж враховує актуальну ринкову вартість, вкладення у добрива й побудови. Виплата становить <b>${economy.sellRefundPercent || 0}%</b> від розрахованої вартості.`],
+    ["Господарства", clusters.length ? `Суміжні землі утворюють господарство. Бонуси: <ul>${clusters.map((item) => `<li>від ${item.min} земель: +${item.bonusPercent}%;</li>`).join("")}</ul>` : "Суміжні землі одного гравця утворюють господарство та можуть давати бонус до доходу."],
+    ["Рівні розвитку компанії", `<ul>${stages.map((item, index) => `<li><b>${escapeHtml(item.title)}</b> — від ${item.min} земель; ціна нової землі ×${Number(item.landPriceMultiplier || 1).toLocaleString("uk-UA")} ${Number(item.incomeTaxPercent) ? `; податок ${item.incomeTaxPercent}%` : ""}.</li>`).join("")}</ul>`],
+    ["Щоденний дохід", `Дохід нараховується раз на ${economy.incomeCycleMinutes || 1440} хв. і продовжує накопичуватися офлайн до ${economy.offlineIncomeCapHours || 0} годин. На нього впливають добрива, техніка, розмір господарства, побудови та податок.`],
+    ["Добрива", `<ul>${levels.map((item) => `<li><b>${escapeHtml(item.name || `Рівень ${item.level}`)}</b>: +${item.incomeBonusPercent || 0}% доходу, вартість ${money(item.cost)}.</li>`).join("")}</ul>Покращення залишається на ділянці постійно.`],
+    ["Техніка", machinery.length ? `<ul>${machinery.map((item) => `<li><b>${escapeHtml(item.name)}</b>: ${money(item.cost)}, +${item.incomeBonusPercent || 0}%, до ${item.landCapacity || 0} земель, строк ${item.durationDays || 0} днів.</li>`).join("")}</ul>` : "Техніка підвищує дохід земель на обмежений строк і має власну виробничу місткість."],
+    ["Побудови", buildings.length ? `<ul>${buildings.map((item) => `<li><b>${escapeHtml(item.name)}</b>: займає ${item.minCells || 1} ділянок, приносить ${money(item.incomePerDay || 0)} / цикл.</li>`).join("")}</ul>Земля під побудовою не приносить звичайного земельного доходу.` : "Побудови займають кілька власних ділянок і мають власний дохід."],
+    ["Податки", taxRows ? `<p>Податок віднімається від валового доходу відповідно до поточного етапу.</p><ul>${taxRows}</ul>` : "Для жодного етапу податок зараз не встановлено."],
+    ["Досьє компанії", "У «Досьє» відображаються землі, господарства, баланс, дохід, активна техніка, побудови, добрива, активи, поточний етап і податок."],
+    ["Журнал", "У журналі зберігаються фінансові операції та деталізація добових і офлайн-нарахувань: базовий дохід, бонуси, податок і чиста сума."],
+    ["Основна стратегія", "Купуйте землю, об'єднуйте її у господарства, збільшуйте дохід, інвестуйте в розвиток і розширюйте компанію. Великий компактний масив ефективніший, але наступні покупки можуть бути дорожчими."]
+  ];
+  helpSections.innerHTML = sections.map(([title, content], index) => `<details class="help-section" ${index === 0 ? "open" : ""}><summary>${title}</summary><div>${content}</div></details>`).join("");
 }
 
 async function showOwnerInfo(ownerId) {
@@ -4799,8 +4827,6 @@ function renderAdminSettings(settings) {
     ["nearbyPriceGrowthPercent", "% зростання ціни поруч", economy.nearbyPriceGrowthPercent, "economy", "number"],
     ["nearbyPriceRadius", "Радіус впливу ціни", economy.nearbyPriceRadius, "economy", "number"],
     ["sellRefundPercent", "% виплати від актуальної ринкової вартості при продажі", economy.sellRefundPercent, "economy", "number"],
-    ["incomeTaxStartLandCount", "Податок від кількості земель", economy.incomeTaxStartLandCount, "economy", "number"],
-    ["incomeTaxPercent", "Податок з добового доходу, %", economy.incomeTaxPercent, "economy", "number"],
     ["incomeCycleMinutes", "Інтервал нарахування доходу, хв", economy.incomeCycleMinutes, "economy", "number"],
     ["offlineIncomeCapHours", "Ліміт офлайн-доходу, год", economy.offlineIncomeCapHours, "economy", "number"],
     ["maxVisibleCells", "Глобальний ліміт комірок на екрані", economy.maxVisibleCells, "economy", "number"],
@@ -5021,6 +5047,7 @@ function renderStageEditor(items) {
               <label>Назва <input data-field="title" value="${escapeHtml(item.title || "")}"></label>
               <label>Мін. землі <input data-field="min" type="number" min="0" value="${item.min || 0}"></label>
               <label>Коефіцієнт ціни землі <input data-field="landPriceMultiplier" type="number" min="0.1" step="0.01" value="${item.landPriceMultiplier || 1}"></label>
+              <label>Податок з доходу, % <input data-field="incomeTaxPercent" type="number" min="0" max="100" step="0.01" value="${item.incomeTaxPercent || 0}"></label>
               <label class="wide-field">Опис <input data-field="text" value="${escapeHtml(item.text || "")}"></label>
               <button class="danger-action" type="button" data-remove-item>Видалити</button>
             </div>
@@ -5041,8 +5068,6 @@ function settingTips() {
     "economy.nearbyPriceGrowthPercent": "На скільки % кожна зайнята сусідня ділянка піднімає ціну. Щоб ціна завжди дорівнювала базовій, поставте 0.",
     "economy.nearbyPriceRadius": "Скільки кілець сусідніх ділянок враховувати для ціни. Приклад: 2.",
     "economy.sellRefundPercent": "Яку частину актуальної ринкової вартості землі з урахуванням зайнятих сусідів отримує гравець при продажі.",
-    "economy.incomeTaxStartLandCount": "Від якої кількості земель починає діяти податок. 0 вимикає податок, якщо ставка також 0.",
-    "economy.incomeTaxPercent": "Частка добового доходу, яка списується як податок після досягнення порогу земель.",
     "economy.incomeCycleMinutes": "Інтервал автоматичного нарахування доходу в хвилинах. Для одного нарахування на добу використовуйте 1440.",
     "economy.offlineIncomeCapHours": "Максимальний реальний час офлайн-накопичення доходу. Рекомендовано 168 годин (7 діб).",
     "economy.detailZoomMin": "Застарілий параметр сумісності. Тепер режим кожного масштабу задається у блоці «Масштаби карти».",
@@ -5098,6 +5123,7 @@ function settingsFromForm(form) {
     title: item.title || "Етап",
     min: Number(item.min) || 0,
     landPriceMultiplier: Math.max(0.1, Number(item.landPriceMultiplier) || 1),
+    incomeTaxPercent: Math.max(0, Math.min(100, Number(item.incomeTaxPercent) || 0)),
     text: item.text || ""
   }));
   next.rivals = [];
@@ -5472,7 +5498,7 @@ function defaultSettingsItem(listName) {
     elevatorItems: { id: `elevator-${stamp}`, icon: "🏗", name: "Нова побудова", cost: 9000, incomePerDay: 900, minCells: 3, maxOwnerLandPercent: 20, serviceLifeExtensionDays: 0, photos: [] },
     landLevels: { level: LAND_LEVELS.length + 1, name: "Новий рівень добрив", cost: 100, incomeBonusPercent: 10 },
     clusters: { min: 10, bonusPercent: 5 },
-    stages: { title: "Новий етап", min: 0, landPriceMultiplier: 1, text: "Опис етапу" },
+    stages: { title: "Новий етап", min: 0, landPriceMultiplier: 1, incomeTaxPercent: 0, text: "Опис етапу" },
   };
   return items[listName] || {};
 }
@@ -5904,7 +5930,10 @@ bindEvent(dossierModal, "click", (event) => {
   const tab = event.target.closest("[data-dossier-tab]");
   if (tab?.dataset.dossierTab) activateDossierTab(tab.dataset.dossierTab);
 });
-bindEvent(helpButton, "click", () => openModal(helpModal));
+bindEvent(helpButton, "click", () => {
+  renderHelp();
+  openModal(helpModal);
+});
 bindEvent(messagesButton, "click", openMessagesPanel);
 bindEvent(logoutButton, "click", logoutPlayer);
 bindEvent(chatList, "click", (event) => {

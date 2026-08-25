@@ -108,12 +108,12 @@ const DEFAULT_SETTINGS = {
     { min: 500, bonusPercent: 28 }
   ],
   stages: [
-    { title: "Початок", min: 0, text: "Купуйте перші ділянки та формуйте базу господарства.", landPriceMultiplier: 1 },
-    { title: "Господарство", min: 5, text: "Земля поруч підвищує ціну наступної покупки, а з'єднані ділянки дають бонус до доходу.", landPriceMultiplier: 1 },
-    { title: "Компанія", min: 15, text: "З'єднані ділянки дають відчутний бонус до доходу.", landPriceMultiplier: 1.1 },
-    { title: "Агрохолдинг", min: 40, text: "Розвивайте побудови, техніку і рівні землі.", landPriceMultiplier: 1.5 },
-    { title: "Корпорація", min: 100, text: "Масштабуйте виробництво та баланс між землею й активами.", landPriceMultiplier: 2.2 },
-    { title: "Національна корпорація", min: 250, text: "Гравець бореться за лідерство на карті України.", landPriceMultiplier: 2.8 }
+    { title: "Початок", min: 0, text: "Купуйте перші ділянки та формуйте базу господарства.", landPriceMultiplier: 1, incomeTaxPercent: 0 },
+    { title: "Господарство", min: 5, text: "Земля поруч підвищує ціну наступної покупки, а з'єднані ділянки дають бонус до доходу.", landPriceMultiplier: 1, incomeTaxPercent: 0 },
+    { title: "Компанія", min: 15, text: "З'єднані ділянки дають відчутний бонус до доходу.", landPriceMultiplier: 1.1, incomeTaxPercent: 0 },
+    { title: "Агрохолдинг", min: 40, text: "Розвивайте побудови, техніку і рівні землі.", landPriceMultiplier: 1.5, incomeTaxPercent: 0 },
+    { title: "Корпорація", min: 100, text: "Масштабуйте виробництво та баланс між землею й активами.", landPriceMultiplier: 2.2, incomeTaxPercent: 0 },
+    { title: "Національна корпорація", min: 250, text: "Гравець бореться за лідерство на карті України.", landPriceMultiplier: 2.8, incomeTaxPercent: 0 }
   ],
   rivals: BASE_RIVALS
 };
@@ -488,7 +488,13 @@ function sanitizeSettings(settings) {
           title: String(item?.title || defaults.stages[index]?.title || "Етап").slice(0, 40),
           min,
           text: String(item?.text || defaults.stages[index]?.text || "").slice(0, 180),
-          landPriceMultiplier: numberIn(Number(item?.landPriceMultiplier), defaultStagePriceMultiplier(min), 0.1, 100)
+          landPriceMultiplier: numberIn(Number(item?.landPriceMultiplier), defaultStagePriceMultiplier(min), 0.1, 100),
+          incomeTaxPercent: numberIn(
+            Number(item?.incomeTaxPercent),
+            min >= (Number(economy.incomeTaxStartLandCount) || Infinity) ? Number(economy.incomeTaxPercent) || 0 : 0,
+            0,
+            100
+          )
         };
       })
       .sort((a, b) => a.min - b.min),
@@ -2070,9 +2076,8 @@ function dailyIncomeBreakdownForFarm(farm, settings = readSettings(), clusterMap
     clusterBonus += afterCluster - afterMachinery;
   });
 
-  const taxRate = landCount >= Math.max(0, Number(settings.economy?.incomeTaxStartLandCount) || 0)
-    ? Math.max(0, Number(settings.economy?.incomeTaxPercent) || 0) / 100
-    : 0;
+  const currentStage = [...(settings.stages || [])].reverse().find((stage) => landCount >= (stage.min || 0));
+  const taxRate = Math.max(0, Number(currentStage?.incomeTaxPercent) || 0) / 100;
   const grossIncome = Math.max(0, Math.floor(baseIncome + fertilizerBonus + machineryBonus + clusterBonus + buildingIncome));
   const tax = Math.max(0, Math.floor(grossIncome * taxRate));
   return {
