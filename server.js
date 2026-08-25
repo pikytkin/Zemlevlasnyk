@@ -58,18 +58,10 @@ const DEFAULT_SETTINGS = {
     nearbyPriceGrowthPercent: 6,
     nearbyPriceRadius: 2,
     sellRefundPercent: 50,
+    incomeTaxStartLandCount: 0,
+    incomeTaxPercent: 0,
     incomeCycleMinutes: 1440,
     offlineIncomeCapHours: 168,
-    ownershipPriceMultipliers: [
-      { minOwned: 0, multiplier: 1 },
-      { minOwned: 6, multiplier: 1.1 },
-      { minOwned: 16, multiplier: 1.25 },
-      { minOwned: 31, multiplier: 1.5 },
-      { minOwned: 61, multiplier: 1.8 },
-      { minOwned: 101, multiplier: 2.2 },
-      { minOwned: 201, multiplier: 2.8 },
-      { minOwned: 501, multiplier: 3.5 }
-    ],
     maxVisibleCells: 46000,
     detailZoomMin: 10,
     claimBatchSize: 1000,
@@ -101,7 +93,7 @@ const DEFAULT_SETTINGS = {
   },
   assets: {
     machineryItems: [
-      { id: "tractor-basic", icon: "🚜", name: "Трактор базовий", cost: 3600, incomeBonusPercent: 8, durationDays: 80, minCells: 10, photos: [] }
+      { id: "tractor-basic", icon: "🚜", name: "Трактор базовий", cost: 3600, incomeBonusPercent: 8, durationDays: 80, minCells: 10, maxActiveUnits: 1, landCapacity: 25, photos: [] }
     ],
     elevatorItems: [
       { id: "elevator-basic", icon: "🏗", name: "Елеватор базовий", cost: 9000, incomePerDay: 900, minCells: 3, maxOwnerLandPercent: 20, photos: [] }
@@ -437,15 +429,13 @@ function numberArray(value, fallback, maxLength = 12) {
   return source.slice(0, maxLength).map((item, index) => numberIn(Number(item), Number.isFinite(fallback[index]) ? fallback[index] : 0, 0, 100_000_000));
 }
 
-function sanitizeOwnershipPriceMultipliers(items, fallback = DEFAULT_SETTINGS.economy.ownershipPriceMultipliers) {
-  const source = Array.isArray(items) && items.length ? items : fallback;
-  return source
-    .slice(0, 16)
-    .map((item, index) => ({
-      minOwned: intIn(item?.minOwned, fallback[index]?.minOwned || 0, 0, 1000000),
-      multiplier: numberIn(Number(item?.multiplier), fallback[index]?.multiplier || 1, 0.1, 100)
-    }))
-    .sort((a, b) => a.minOwned - b.minOwned);
+function defaultStagePriceMultiplier(ownedCount) {
+  return GameRules.ownershipPriceMultiplier(ownedCount, [
+    { minOwned: 0, multiplier: 1 }, { minOwned: 6, multiplier: 1.1 },
+    { minOwned: 16, multiplier: 1.25 }, { minOwned: 31, multiplier: 1.5 },
+    { minOwned: 61, multiplier: 1.8 }, { minOwned: 101, multiplier: 2.2 },
+    { minOwned: 201, multiplier: 2.8 }, { minOwned: 501, multiplier: 3.5 }
+  ]);
 }
 
 function sanitizeSettings(settings) {
@@ -466,9 +456,10 @@ function sanitizeSettings(settings) {
       nearbyPriceGrowthPercent: numberIn(Number(economy.nearbyPriceGrowthPercent), defaults.economy.nearbyPriceGrowthPercent, -95, 1000),
       nearbyPriceRadius: intIn(economy.nearbyPriceRadius, defaults.economy.nearbyPriceRadius, 1, 5),
       sellRefundPercent: numberIn(Number(economy.sellRefundPercent), defaults.economy.sellRefundPercent, 0, 100),
+      incomeTaxStartLandCount: intIn(economy.incomeTaxStartLandCount, defaults.economy.incomeTaxStartLandCount, 0, 1000000),
+      incomeTaxPercent: numberIn(Number(economy.incomeTaxPercent), defaults.economy.incomeTaxPercent, 0, 100),
       incomeCycleMinutes: intIn(economy.incomeCycleMinutes, defaults.economy.incomeCycleMinutes, 5, 1440),
       offlineIncomeCapHours: intIn(economy.offlineIncomeCapHours, defaults.economy.offlineIncomeCapHours, 1, 168),
-      ownershipPriceMultipliers: sanitizeOwnershipPriceMultipliers(economy.ownershipPriceMultipliers, defaults.economy.ownershipPriceMultipliers),
       maxVisibleCells: intIn(economy.maxVisibleCells, defaults.economy.maxVisibleCells, 1000, 500000),
       detailZoomMin: intIn(economy.detailZoomMin, defaults.economy.detailZoomMin, 10, 12),
       claimBatchSize: intIn(economy.claimBatchSize, defaults.economy.claimBatchSize, 1, 3000),
@@ -481,7 +472,7 @@ function sanitizeSettings(settings) {
       elevatorMinSelectedCells: intIn(upgrades.elevatorMinSelectedCells, defaults.upgrades.elevatorMinSelectedCells, 1, 50)
     },
     assets: {
-      machineryItems: sanitizeAssetItems(assets.machineryItems, defaults.assets.machineryItems),
+      machineryItems: sanitizeAssetItems(assets.machineryItems, defaults.assets.machineryItems).map(({ maxOwnerLandPercent, serviceLifeExtensionDays, ...item }) => item),
       elevatorItems: sanitizeAssetItems(assets.elevatorItems, defaults.assets.elevatorItems)
     },
     clusters: (Array.isArray(source.clusters) ? source.clusters : defaults.clusters)
@@ -501,7 +492,7 @@ function sanitizeSettings(settings) {
           text: String(item?.text || defaults.stages[index]?.text || "").slice(0, 180),
           landPriceMultiplier: numberIn(
             Number(item?.landPriceMultiplier),
-            GameRules.ownershipPriceMultiplier(min, sanitizeOwnershipPriceMultipliers(economy.ownershipPriceMultipliers, defaults.economy.ownershipPriceMultipliers)),
+            defaultStagePriceMultiplier(min),
             0.1,
             100
           )
@@ -609,6 +600,7 @@ function sanitizeAssetItems(items, fallback) {
     incomePerDay: intIn(item?.incomePerDay, fallback[index]?.incomePerDay || 0, 0),
     minCells: intIn(item?.minCells, fallback[index]?.minCells || 1, 1, 1000000),
     maxActiveUnits: intIn(item?.maxActiveUnits, fallback[index]?.maxActiveUnits || 1, 1, 1000000),
+    landCapacity: intIn(item?.landCapacity, fallback[index]?.landCapacity || [25, 60, 150, 300][index] || 25, 1, 1000000),
     maxOwnerLandPercent: numberIn(Number(item?.maxOwnerLandPercent), fallback[index]?.maxOwnerLandPercent ?? 25, 1, 100),
     serviceLifeExtensionDays: intIn(item?.serviceLifeExtensionDays, fallback[index]?.serviceLifeExtensionDays || 0, 0, 1000000),
     photos: sanitizeAssetPhotos(item?.photos || fallback[index]?.photos || [])
@@ -1788,13 +1780,7 @@ function publicPlayerDetails(user, rank = null) {
     landCount: Object.keys(farm.land || {}).length,
     cash: farm.coins,
     score: farmScoreSanitized(farm, settings),
-    income: Object.values(farm.land || {}).reduce((sum, cell) => {
-      if (cell.building || cell.buildingId) {
-        return isFirstCellInBuildingGroup(cell.id, cell, farm.land) ? sum + buildingDailyIncomeForCell(cell, settings) : sum;
-      }
-      const base = rangedSettingValue(settings.economy.baseIncomeMin, settings.economy.baseIncomeSpread, cell.id, 180);
-      return sum + Math.round(base * fertilizerMultiplier(cell.level || 1, settings) * inventoryIncomeMultiplier(farm.inventory, settings, farm.currentDay));
-    }, 0),
+    income: farmDailyIncomeServer(farm, settings),
     machineryCount: Object.values(machineryMap || {}).reduce((sum, qty) => sum + (Number(qty) || 0), 0),
     buildingCount: Object.values(buildingInventory || {}).reduce((sum, qty) => sum + (Number(qty) || 0), 0),
     machinery: machineryMap,
@@ -1899,9 +1885,14 @@ function inventoryValue(inventory, settings = readSettings(), currentDay = 1) {
   return machinery;
 }
 
-function inventoryIncomeMultiplier(inventory, settings = readSettings(), currentDay = 1) {
+function inventoryIncomeMultiplier(inventory, landCount = 0, settings = readSettings(), currentDay = 1) {
   const machineryMap = activeMachineryMap(inventory, currentDay);
-  const machineryBonus = settings.assets.machineryItems.reduce((sum, item) => sum + Math.min(item.maxActiveUnits || 1, (machineryMap || {})[item.id] || 0) * item.incomeBonusPercent, 0);
+  const managedLand = Math.max(1, Number(landCount) || 0);
+  const machineryBonus = settings.assets.machineryItems.reduce((sum, item) => {
+    const units = Math.min(item.maxActiveUnits || 1, (machineryMap || {})[item.id] || 0);
+    const coverage = Math.min(1, units * Math.max(1, item.landCapacity || 25) / managedLand);
+    return sum + coverage * item.incomeBonusPercent;
+  }, 0);
   return 1 + machineryBonus / 100;
 }
 
@@ -2029,7 +2020,8 @@ function clusterBonusMapForFarm(farm, settings = readSettings()) {
 
 function farmDailyIncomeServer(farm, settings = readSettings(), clusterMap = null) {
   const bonuses = clusterMap || clusterBonusMapForFarm(farm, settings);
-  const machineryMultiplier = inventoryIncomeMultiplier(farm.inventory, settings, farm.currentDay || 1);
+  const landCount = Object.keys(farm.land || {}).length;
+  const machineryMultiplier = inventoryIncomeMultiplier(farm.inventory, landCount, settings, farm.currentDay || 1);
   const countedBuildings = new Set();
   let rawIncome = 0;
 
@@ -2049,7 +2041,10 @@ function farmDailyIncomeServer(farm, settings = readSettings(), clusterMap = nul
     rawIncome += base * landMultiplier * machineryMultiplier * clusterMultiplier;
   });
 
-  return Math.max(0, Math.floor(rawIncome));
+  const taxRate = landCount >= Math.max(0, Number(settings.economy?.incomeTaxStartLandCount) || 0)
+    ? Math.max(0, Number(settings.economy?.incomeTaxPercent) || 0) / 100
+    : 0;
+  return Math.max(0, Math.floor(rawIncome * (1 - taxRate)));
 }
 
 function incomeIntervalMs(settings = readSettings()) {
@@ -2176,15 +2171,7 @@ function publicUserRow(user) {
     currentDay: farm.currentDay,
     landCount,
     color: farm.color,
-    income: Object.values(farm.land || {}).reduce((sum, cell) => {
-      if (cell.building || cell.buildingId) {
-        return isFirstCellInBuildingGroup(cell.id, cell, farm.land)
-          ? sum + buildingDailyIncomeForCell(cell, settings)
-          : sum;
-      }
-      const base = rangedSettingValue(settings.economy.baseIncomeMin, settings.economy.baseIncomeSpread, cell.id, 180);
-      return sum + Math.round(base * fertilizerMultiplier(cell.level || 1, settings) * inventoryIncomeMultiplier(farm.inventory, settings, farm.currentDay));
-    }, 0),
+    income: farmDailyIncomeServer(farm, settings),
     score: farmScoreSanitized(farm, settings),
     earned: farm.stats.earned,
     purchased: farm.stats.purchased,
@@ -2944,6 +2931,7 @@ async function handleApi(req, res) {
       const requestedIdSet = new Set(ids);
       const invalidBuildingGroups = new Set();
       const refundedBuildingGroups = new Set();
+      const marketValueSnapshot = new Map(ids.map((id) => [id, landPriceForMarket(id, market, settings)]));
 
       Object.entries(farm.land || {}).forEach(([id, cell]) => {
         const groupId = cell?.buildingGroupId;
@@ -2970,7 +2958,7 @@ async function handleApi(req, res) {
             ? buildingCostForCell(farmCell, settings)
             : 0;
           if (buildingKey) refundedBuildingGroups.add(buildingKey);
-          const baseValue = landPriceForMarket(id, market, settings)
+          const baseValue = marketValueSnapshot.get(id)
             + improvementCostForLevel(farmCell.level || 1, settings)
             + buildingValue;
           const refundRate = Number.isFinite(settings.economy?.sellRefundPercent) ? settings.economy.sellRefundPercent / 100 : 0.50;

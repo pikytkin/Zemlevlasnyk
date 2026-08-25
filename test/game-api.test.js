@@ -160,6 +160,17 @@ test("land sale uses the current neighbourhood value instead of historical purch
   assert.equal(sale.payload.refund, 100);
 });
 
+test("bulk land sale values every parcel from one market snapshot", async () => {
+  await configureLandValueScenario();
+  const cookie = await register("snapshot-seller");
+  const cells = ["cell-680-54", "cell-681-54"];
+  const bought = await request("POST", "/api/claim", { cells: cells.map((id) => ({ id, region: "Тест" })) }, cookie);
+  assert.equal(bought.payload.claimed.length, 2, bought.payload.error);
+  const sale = await request("POST", "/api/sell", { cells }, cookie);
+  assert.equal(sale.response.status, 200, sale.payload.error);
+  assert.equal(sale.payload.refund, 200);
+});
+
 test("machinery respects the configurable active-unit limit", async () => {
   await configureLandValueScenario();
   const admin = await request("POST", "/api/login", { username: "Admin", password: "Admin" });

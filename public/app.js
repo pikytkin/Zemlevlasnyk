@@ -504,7 +504,8 @@ function applyGameSettings(settings) {
   gameSettings.assets.machineryItems = (gameSettings.assets.machineryItems || []).map((item) => ({
     ...item,
     durationDays: Number.isFinite(Number(item.durationDays)) ? Math.max(1, Math.floor(Number(item.durationDays))) : 80,
-    maxActiveUnits: Number.isFinite(Number(item.maxActiveUnits)) ? Math.max(1, Math.floor(Number(item.maxActiveUnits))) : 1
+    maxActiveUnits: Number.isFinite(Number(item.maxActiveUnits)) ? Math.max(1, Math.floor(Number(item.maxActiveUnits))) : 1,
+    landCapacity: Number.isFinite(Number(item.landCapacity)) ? Math.max(1, Math.floor(Number(item.landCapacity))) : 25
   }));
   if (state?.inventory) state.inventory = normalizeMachineryInventory(state.inventory, state.currentDay || 1);
   cellCache = new Map();
@@ -2409,7 +2410,6 @@ function finishShiftSelection(event) {
   selectedCellIds = nextSelection;
   selectionPopupDismissed = false;
   refreshVisibleCellLayers(changedSelectionIds(previousSelection, selectedCellIds));
-  showGameMessage(`Виділено земельних ділянок: ${selectedCellIds.size}.`);
 }
 
 function selectionCandidateCells() {
@@ -3002,14 +3002,16 @@ function inventoryIncomeMultiplier() {
 
 function inventoryBonusPercents() {
   expireMachinery(false);
-  const machinery = assetBonusPercent("machineryItems", activeMachineryMap());
+  const machinery = assetBonusPercent("machineryItems", activeMachineryMap(), playerOwnedCellCount());
   const buildingsIncome = buildingDailyIncome();
   return { machinery, buildings: 0, buildingsIncome, total: machinery };
 }
 
-function assetBonusPercent(settingsKey, inventoryMap) {
+function assetBonusPercent(settingsKey, inventoryMap, landCount = playerOwnedCellCount()) {
   return (gameSettings?.assets?.[settingsKey] || []).reduce((sum, item) => {
-    return sum + Math.min(item.maxActiveUnits || 1, inventoryMap[item.id] || 0) * (item.incomeBonusPercent || 0);
+    const units = Math.min(item.maxActiveUnits || 1, inventoryMap[item.id] || 0);
+    const coverage = Math.min(1, units * Math.max(1, item.landCapacity || 25) / Math.max(1, landCount));
+    return sum + coverage * (item.incomeBonusPercent || 0);
   }, 0);
 }
 
@@ -3626,7 +3628,8 @@ function assetCharacteristics(item, kind) {
         ["Бонус", `+${item.incomeBonusPercent || 0}% до доходу землі`],
         ["Потрібно землі", `${Math.max(1, Number(item.minCells) || 1)} ділянок`],
         ["Термін дії", `${item.durationDays || 80} днів`],
-        ["Ліміт", "1 активна одиниця цього типу"]
+        ["Місткість", `до ${item.landCapacity || 25} земель на одиницю`],
+        ["Ліміт", `${item.maxActiveUnits || 1} активн. од.`]
       ];
   return rows.filter(Boolean).map(([key, value]) => `<div><span>${key}</span><strong>${value}</strong></div>`).join("");
 }
@@ -3993,9 +3996,6 @@ function selectCell(cellId, event = null) {
 
   refreshVisibleCellLayers(changedSelectionIds(previousSelection, selectedCellIds));
   const cell = getCell(cellId);
-  showGameMessage(selectedCellIds.size > 1
-    ? `Обрано земельних ділянок: ${selectedCellIds.size}.`
-    : `Обрано земельну ділянку ${cell.code} ${cellLocationPhrase(cell)}.`);
 }
 
 function buildingGroupCellIds(cellId) {
@@ -4014,9 +4014,8 @@ function changedSelectionIds(previousSelection, nextSelection) {
 }
 
 function showSelectionPopup(text) {
-  if (!selectionPopup || !selectionSummary || selectionPopupDismissed) return;
-  selectionSummary.textContent = text;
-  selectionPopup.classList.remove("is-hidden");
+  void text;
+  hideSelectionPopup();
 }
 
 function hideSelectionPopup() {
@@ -4710,7 +4709,9 @@ function renderAdminSettings(settings) {
     ["baseIncomeSpread", "Розкид доходу", economy.baseIncomeSpread, "economy", "number"],
     ["nearbyPriceGrowthPercent", "% зростання ціни поруч", economy.nearbyPriceGrowthPercent, "economy", "number"],
     ["nearbyPriceRadius", "Радіус впливу ціни", economy.nearbyPriceRadius, "economy", "number"],
-    ["sellRefundPercent", "% повернення при продажі", economy.sellRefundPercent, "economy", "number"],
+    ["sellRefundPercent", "% виплати від актуальної ринкової вартості при продажі", economy.sellRefundPercent, "economy", "number"],
+    ["incomeTaxStartLandCount", "Податок від кількості земель", economy.incomeTaxStartLandCount, "economy", "number"],
+    ["incomeTaxPercent", "Податок з добового доходу, %", economy.incomeTaxPercent, "economy", "number"],
     ["incomeCycleMinutes", "Інтервал нарахування доходу, хв", economy.incomeCycleMinutes, "economy", "number"],
     ["offlineIncomeCapHours", "Ліміт офлайн-доходу, год", economy.offlineIncomeCapHours, "economy", "number"],
     ["maxVisibleCells", "Глобальний ліміт комірок на екрані", economy.maxVisibleCells, "economy", "number"],
@@ -4881,6 +4882,7 @@ function renderAssetEditor(key, title, items, tip) {
                 <label>Бонус доходу землі, % <input data-field="incomeBonusPercent" type="number" min="0" step="0.01" value="${item.incomeBonusPercent || 0}"></label>
                 <label>Термін дії, днів <input data-field="durationDays" type="number" min="1" value="${item.durationDays || 80}"></label>
                 <label>Ліміт активних одиниць <input data-field="maxActiveUnits" type="number" min="1" value="${item.maxActiveUnits || 1}"></label>
+                <label>Виробнича місткість, земель <input data-field="landCapacity" type="number" min="1" value="${item.landCapacity || 25}"></label>
               `}
             <label class="asset-photos-upload">Фото для перегляду (можна обрати кілька одразу) <input type="file" accept="image/png,image/jpeg,image/webp,image/svg+xml" multiple data-photos-upload></label>
             <input type="hidden" data-field="photos" value="${escapeHtml(JSON.stringify(item.photos || []))}">
@@ -4947,7 +4949,9 @@ function settingTips() {
     "economy.baseIncomeSpread": "Додатковий випадковий розкид доходу. 0 = однаковий базовий дохід; 18 = +0..17 мон. / добу.",
     "economy.nearbyPriceGrowthPercent": "На скільки % кожна зайнята сусідня ділянка піднімає ціну. Щоб ціна завжди дорівнювала базовій, поставте 0.",
     "economy.nearbyPriceRadius": "Скільки кілець сусідніх ділянок враховувати для ціни. Приклад: 2.",
-    "economy.sellRefundPercent": "Скільки % вкладеної вартості повертається при продажі землі.",
+    "economy.sellRefundPercent": "Яку частину актуальної ринкової вартості землі з урахуванням зайнятих сусідів отримує гравець при продажі.",
+    "economy.incomeTaxStartLandCount": "Від якої кількості земель починає діяти податок. 0 вимикає податок, якщо ставка також 0.",
+    "economy.incomeTaxPercent": "Частка добового доходу, яка списується як податок після досягнення порогу земель.",
     "economy.incomeCycleMinutes": "Інтервал автоматичного нарахування доходу в хвилинах. Для одного нарахування на добу використовуйте 1440.",
     "economy.offlineIncomeCapHours": "Максимальний реальний час офлайн-накопичення доходу. Рекомендовано 168 годин (7 діб).",
     "economy.detailZoomMin": "Застарілий параметр сумісності. Тепер режим кожного масштабу задається у блоці «Масштаби карти».",
@@ -5041,6 +5045,7 @@ function normalizeAssetCard(item) {
     maxOwnerLandPercent: Math.min(100, Math.max(1, Number(item.maxOwnerLandPercent) || 25)),
     serviceLifeExtensionDays: Math.max(0, Math.floor(Number(item.serviceLifeExtensionDays) || 0)),
     maxActiveUnits: Math.max(1, Math.floor(Number(item.maxActiveUnits) || 1)),
+    landCapacity: Math.max(1, Math.floor(Number(item.landCapacity) || 25)),
     photos: parsePhotosValue(item.photos).slice(0, 8)
   };
 }
@@ -5366,7 +5371,7 @@ async function saveAdminSettings(event) {
 function defaultSettingsItem(listName) {
   const stamp = Date.now().toString(36);
   const items = {
-    machineryItems: { id: `tractor-${stamp}`, icon: "🚜", name: "Новий трактор", cost: 3600, incomeBonusPercent: 8, durationDays: 80, minCells: 10, maxActiveUnits: 1, photos: [] },
+    machineryItems: { id: `tractor-${stamp}`, icon: "🚜", name: "Новий трактор", cost: 3600, incomeBonusPercent: 8, durationDays: 80, minCells: 10, maxActiveUnits: 1, landCapacity: 25, photos: [] },
     elevatorItems: { id: `elevator-${stamp}`, icon: "🏗", name: "Нова побудова", cost: 9000, incomePerDay: 900, minCells: 3, maxOwnerLandPercent: 20, serviceLifeExtensionDays: 0, photos: [] },
     landLevels: { level: LAND_LEVELS.length + 1, name: "Новий рівень добрив", cost: 100, incomeBonusPercent: 10 },
     clusters: { min: 10, bonusPercent: 5 },
