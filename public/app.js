@@ -4493,6 +4493,10 @@ function renderDossier() {
   const stage = [...stageRules].reverse().find((item) => ownedCount >= item.min) || stageRules[0];
   const activeMachinery = inventoryCount("machinery");
   const buildingCount = buildingObjectCount();
+  const machineryCoverage = Math.min(ownedCount, Object.entries(activeMachineryMap()).reduce((sum, [id, quantity]) => {
+    return sum + Math.max(0, Number(quantity) || 0) * Math.max(1, Number(machineryItemById(id)?.landCapacity) || 25);
+  }, 0));
+  const unfertilizedCount = Object.values(state.land || {}).filter((item) => (item.level || 1) <= 1).length;
   const taxRate = Number(stage?.incomeTaxPercent) || 0;
   const latestIncome = (Array.isArray(state.ledger) ? state.ledger : []).find((entry) => entry?.type === "income" && entry?.details)?.details || null;
   const incomeRows = [
@@ -4508,8 +4512,8 @@ function renderDossier() {
   dossierTitle.textContent = state.companyName || player?.username || "Господарство";
   dossierOverview.innerHTML = `
     <div class="dossier-grid">
-      ${[["Етап розвитку", stage.title], ["Земельний банк", `${ownedCount} ділянок`], ["Найбільший кластер", `${clusters[0]?.length || 0} ділянок`], ["Баланс", money(state.coins)], ["Дохід за цикл", money(totalDailyIncome())], ["Податок", taxRate ? `${taxRate}%` : "не застосовується"], ["Активна техніка", `${activeMachinery} од.`], ["Побудови", `${buildingCount} об.`], ["Добрива", `${Object.values(state.land || {}).filter((item) => (item.level || 1) > 1).length} ділянок`], ["Інвестиції", money(assetsValue())]]
-        .map(([label, value]) => `<div><span>${label}</span><strong>${escapeHtml(String(value))}</strong></div>`).join("")}
+      ${[["Етап розвитку", escapeHtml(stage.title)], ["Земельний банк", `${ownedCount} ділянок`], ["Найбільший кластер", `${clusters[0]?.length || 0} ділянок`], ["Баланс", money(state.coins)], ["Дохід за цикл", money(totalDailyIncome())], ["Податок", taxRate ? `${taxRate}%` : "не застосовується"], ["Активна техніка", `${activeMachinery} од.<br><small>Працюють на ${machineryCoverage} земельних ділянках<br>${Math.max(0, ownedCount - machineryCoverage)} ділянок без техніки</small>`], ["Побудови", `${buildingCount} об.`], ["Добрива", `${Object.values(state.land || {}).filter((item) => (item.level || 1) > 1).length} ділянок<br><small>${unfertilizedCount} ділянок без добрив</small>`], ["Інвестиції", money(assetsValue())]]
+        .map(([label, value]) => `<div><span>${label}</span><strong>${String(value)}</strong></div>`).join("")}
     </div>
     <section class="dossier-section">
       <h4>Орієнтовні щоденні доходи/витрати</h4>

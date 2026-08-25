@@ -1843,6 +1843,15 @@ body.is-admin-page #adminModal .modal-close {
   font-size: 0.78rem;
 }
 
+.dossier-grid strong small {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 0.76rem;
+  font-weight: var(--weight-ui);
+  line-height: 1.35;
+}
+
 .dossier-section h4,
 .journal-entry h4 {
   margin: 0;
