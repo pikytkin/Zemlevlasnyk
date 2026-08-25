@@ -3610,6 +3610,7 @@ function updateAssetTotal() {
           <button class="asset-nav asset-nav-photo" type="button" data-asset-photo-nav="-1" ${photos.length < 2 ? "disabled" : ""}>‹</button>
           <button class="asset-image-frame" type="button" ${photo ? `data-preview-src="${escapeHtml(photo)}" data-preview-gallery="${escapeHtml(JSON.stringify(photos))}" data-preview-index="${currentPhotoIndex}"` : ""}>
             ${photo ? `<img src="${escapeHtml(photo)}" alt="${escapeHtml(item.name)}">` : renderIconPreview(item.icon)}
+            ${item.proOnly && !player?.isPro ? '<span class="pro-asset-lock"><b>🔒</b><small>Доступно для Pro гравців</small></span>' : ""}
           </button>
           <button class="asset-nav asset-nav-photo" type="button" data-asset-photo-nav="1" ${photos.length < 2 ? "disabled" : ""}>›</button>
         </div>

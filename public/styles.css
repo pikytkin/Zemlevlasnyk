@@ -1106,6 +1106,7 @@ dd {
 }
 
 .asset-image-frame {
+  position: relative;
   display: grid;
   place-items: center;
   min-height: 220px;
@@ -1162,6 +1163,22 @@ dd {
   font-size: 1.35rem;
   line-height: 1;
 }
+
+.pro-asset-lock {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  gap: 8px;
+  padding: 18px;
+  background: rgba(5, 16, 12, 0.72);
+  color: var(--text);
+  text-align: center;
+  pointer-events: none;
+}
+
+.pro-asset-lock b { font-size: 2.4rem; line-height: 1; }
+.pro-asset-lock small { font-size: 0.9rem; font-weight: 700; }
 
 body.is-admin-page {
   min-height: 100vh;
