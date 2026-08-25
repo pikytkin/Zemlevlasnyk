@@ -1782,6 +1782,10 @@ body.is-admin-page #adminModal .modal-close {
   flex-wrap: wrap;
 }
 
+.compact-tabs {
+  margin: 10px 0;
+}
+
 .help-panel {
   width: min(760px, 94vw);
 }
@@ -1902,6 +1906,57 @@ body.is-admin-page #adminModal .modal-close {
   gap: 10px;
 }
 
+.buyout-list {
+  display: grid;
+  gap: 10px;
+}
+
+.buyout-card {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.buyout-card > div:first-child {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: baseline;
+}
+
+.buyout-card span,
+.buyout-card small {
+  color: var(--muted);
+}
+
+.buyout-card-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.buyout-card-grid div {
+  display: grid;
+  gap: 3px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+.offer-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.offer-history {
+  display: grid;
+  gap: 4px;
+}
+
 .journal-entry {
   display: grid;
   gap: 7px;
@@ -1920,7 +1975,8 @@ body.is-admin-page #adminModal .modal-close {
 
 @media (max-width: 520px) {
   .dossier-grid,
-  .income-structure { grid-template-columns: 1fr; }
+  .income-structure,
+  .buyout-card-grid { grid-template-columns: 1fr; }
 }
 
 .asset-settings-card .settings-checkbox {

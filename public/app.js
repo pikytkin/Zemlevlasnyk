@@ -124,7 +124,9 @@ const helpSections = document.querySelector("#helpSections");
 const dossierModal = document.querySelector("#dossierModal");
 const dossierTitle = document.querySelector("#dossierTitle");
 const dossierOverview = document.querySelector("#dossierOverview");
+const dossierOffers = document.querySelector("#dossierOffers");
 const dossierJournal = document.querySelector("#dossierJournal");
+const buyoutBadge = document.querySelector("#buyoutBadge");
 const adminModal = document.querySelector("#adminModal");
 const profileForm = document.querySelector("#profileForm");
 const profileCompanyName = document.querySelector("#profileCompanyName");
@@ -207,6 +209,8 @@ document.addEventListener("click", (event) => {
 let player = null;
 let state = defaultGameState();
 let selectedCellId = null;
+let buyoutOffersCache = { incoming: [], outgoing: [], unread: 0, loaded: false };
+let activeBuyoutTab = "incoming";
 let saveTimer = null;
 let saveScope = null;
 let saveInFlight = null;
@@ -601,6 +605,7 @@ function startGame(nextPlayer, nextState) {
   render();
   showGameMessage("Карту володінь завантажено.");
   refreshMessageSummary();
+  loadBuyoutOffers(true);
   loadGameSettings().then(() => initMap().catch((error) => {
     console.error("initMap failed:", error);
     showGameMessage(error?.message || "Не вдалося завантажити карту.");
@@ -4539,6 +4544,161 @@ function formatJournalDate(value) {
     : "Невідомий час";
 }
 
+function activeOfferStatuses() {
+  return new Set(["pending", "countered"]);
+}
+
+async function loadBuyoutOffers(force = false) {
+  if (!player || player.isGuest) return buyoutOffersCache;
+  if (buyoutOffersCache.loaded && !force) return buyoutOffersCache;
+  try {
+    const payload = await requestJson("/api/offers");
+    buyoutOffersCache = {
+      incoming: Array.isArray(payload.incoming) ? payload.incoming : [],
+      outgoing: Array.isArray(payload.outgoing) ? payload.outgoing : [],
+      unread: Math.max(0, Number(payload.unread) || 0),
+      loaded: true
+    };
+    renderBuyoutBadge();
+  } catch (error) {
+    if (dossierOffers) dossierOffers.innerHTML = `<p class="muted-text">${escapeHtml(error.message)}</p>`;
+  }
+  return buyoutOffersCache;
+}
+
+function renderBuyoutBadge() {
+  if (!buyoutBadge) return;
+  buyoutBadge.textContent = buyoutOffersCache.unread || 0;
+  buyoutBadge.classList.toggle("is-hidden", !buyoutOffersCache.unread);
+}
+
+function buyoutOfferActions(offer, direction) {
+  const active = activeOfferStatuses().has(offer.status);
+  if (!active) return "";
+  const buttons = [];
+  if (direction === "incoming" && offer.status === "pending") {
+    buttons.push(`<button class="primary-action" type="button" data-offer-action="accept" data-offer-id="${escapeHtml(offer.id)}">Погодитися</button>`);
+    buttons.push(`<button class="secondary-action" type="button" data-offer-action="counter" data-offer-id="${escapeHtml(offer.id)}">Запропонувати свою ціну</button>`);
+    buttons.push(`<button class="secondary-action danger-action" type="button" data-offer-action="reject" data-offer-id="${escapeHtml(offer.id)}">Відхилити</button>`);
+  }
+  if (direction === "outgoing") {
+    if (offer.status === "countered") {
+      buttons.push(`<button class="primary-action" type="button" data-offer-action="accept" data-offer-id="${escapeHtml(offer.id)}">Погодитися</button>`);
+      buttons.push(`<button class="secondary-action" type="button" data-offer-action="counter" data-offer-id="${escapeHtml(offer.id)}">Запропонувати іншу ціну</button>`);
+      buttons.push(`<button class="secondary-action danger-action" type="button" data-offer-action="reject" data-offer-id="${escapeHtml(offer.id)}">Відхилити</button>`);
+    } else {
+      buttons.push(`<button class="secondary-action danger-action" type="button" data-offer-action="cancel" data-offer-id="${escapeHtml(offer.id)}">Скасувати пропозицію</button>`);
+    }
+  }
+  buttons.unshift(`<button class="secondary-action" type="button" data-offer-view="${escapeHtml(offer.id)}">Переглянути на карті</button>`);
+  return `<div class="offer-actions">${buttons.join("")}</div>`;
+}
+
+function renderBuyoutOfferCard(offer, direction) {
+  const amount = offer.status === "countered" && offer.counterAmount ? offer.counterAmount : offer.amount;
+  const feePercent = Number(offer.feePercent) || 0;
+  const fee = Math.floor((Number(amount) || 0) * feePercent / 100);
+  const history = Array.isArray(offer.history) && offer.history.length
+    ? `<div class="offer-history">${offer.history.slice(-4).map((item) => `<small>${formatJournalDate(item.at)} · ${escapeHtml(item.text || "")}</small>`).join("")}</div>`
+    : "";
+  return `
+    <article class="buyout-card" data-offer-card="${escapeHtml(offer.id)}">
+      <div>
+        <span>${formatJournalDate(offer.createdAt)}</span>
+        <strong>${direction === "incoming" ? escapeHtml(offer.buyerName) : escapeHtml(offer.sellerName)}</strong>
+      </div>
+      <div class="buyout-card-grid">
+        <div><span>Земель</span><strong>${offer.landCount || 0}</strong></div>
+        <div><span>Сума</span><strong>${money(amount || 0)}</strong></div>
+        <div><span>За ділянку</span><strong>${money(offer.pricePerCell || 0)}</strong></div>
+        <div><span>Статус</span><strong>${escapeHtml(offer.statusLabel)}</strong></div>
+        <div><span>Оцінка системи</span><strong>${money(offer.systemValue || 0)}</strong></div>
+        <div><span>Дохід</span><strong>${money(offer.income || 0)} / добу</strong></div>
+      </div>
+      ${offer.status === "countered" ? `<p class="muted-text">Власник пропонує: <strong>${money(offer.counterAmount || 0)}</strong></p>` : ""}
+      ${direction === "incoming" && feePercent ? `<p class="muted-text">Комісія: ${money(fee)} · ви отримаєте ${money(Math.max(0, (Number(amount) || 0) - fee))}</p>` : ""}
+      ${offer.invalidReason ? `<p class="muted-text">${escapeHtml(offer.invalidReason)}</p>` : ""}
+      <small class="muted-text">Оновлено: ${formatJournalDate(offer.updatedAt || offer.createdAt)}</small>
+      ${history}
+      ${buyoutOfferActions(offer, direction)}
+    </article>`;
+}
+
+function renderBuyoutOffers() {
+  if (!dossierOffers) return;
+  const rows = buyoutOffersCache[activeBuyoutTab] || [];
+  dossierOffers.innerHTML = `
+    <div class="dossier-tabs compact-tabs" role="tablist" aria-label="Запити на викуп">
+      <button class="secondary-action ${activeBuyoutTab === "incoming" ? "is-active" : ""}" type="button" data-buyout-tab="incoming">Вхідні (${buyoutOffersCache.incoming.length})</button>
+      <button class="secondary-action ${activeBuyoutTab === "outgoing" ? "is-active" : ""}" type="button" data-buyout-tab="outgoing">Вихідні (${buyoutOffersCache.outgoing.length})</button>
+    </div>
+    <div class="buyout-list">
+      ${rows.length ? rows.map((offer) => renderBuyoutOfferCard(offer, activeBuyoutTab)).join("") : `<p class="muted-text">${activeBuyoutTab === "incoming" ? "Вхідних пропозицій поки немає." : "Вихідних пропозицій поки немає."}</p>`}
+    </div>`;
+}
+
+async function refreshBuyoutOffers() {
+  await loadBuyoutOffers(true);
+  renderBuyoutOffers();
+}
+
+async function runBuyoutOfferAction(offerId, action) {
+  const offer = [...buyoutOffersCache.incoming, ...buyoutOffersCache.outgoing].find((item) => item.id === offerId);
+  if (!offer) return;
+  let body = {};
+  if (action === "counter") {
+    const current = offer.status === "countered" && offer.counterAmount ? offer.counterAmount : offer.amount;
+    const value = prompt("Вкажіть нову ціну пропозиції", String(current || 1));
+    if (value == null) return;
+    body.amount = Math.floor(Number(value) || 0);
+    if (body.amount < 1) {
+      showGameMessage("Вкажіть суму більше 0.");
+      return;
+    }
+  }
+  if (action === "accept") {
+    const amount = offer.status === "countered" && offer.counterAmount ? offer.counterAmount : offer.amount;
+    const text = activeBuyoutTab === "incoming"
+      ? `Продати ${offer.landCount} земель гравцю ${offer.buyerName} за ${money(amount)}?`
+      : `Придбати ${offer.landCount} земель за ${money(amount)}?`;
+    if (!confirm(text)) return;
+  }
+  if (action === "reject" && !confirm("Відхилити цю пропозицію?")) return;
+  if (action === "cancel" && !confirm("Скасувати вихідну пропозицію?")) return;
+  try {
+    const payload = await requestJson(`/api/offers/${encodeURIComponent(offerId)}/${action}`, {
+      method: "POST",
+      body: JSON.stringify(body)
+    });
+    if (payload.farm) {
+      state = normalizeState(payload.farm);
+      landMembershipRevision += 1;
+    }
+    if (Number.isFinite(payload.version)) marketVersion = payload.version;
+    await refreshBuyoutOffers();
+    refreshVisibleCellLayers(Array.isArray(offer.cellIds) ? offer.cellIds : []);
+    render();
+    showGameMessage(action === "accept" ? "Угоду завершено." : "Запит оновлено.");
+  } catch (error) {
+    showGameMessage(error.message);
+    await refreshBuyoutOffers();
+  }
+}
+
+function focusBuyoutOfferOnMap(offerId) {
+  const offer = [...buyoutOffersCache.incoming, ...buyoutOffersCache.outgoing].find((item) => item.id === offerId);
+  const ids = Array.isArray(offer?.cellIds) ? offer.cellIds : [];
+  if (!ids.length) return;
+  selectedCellIds = new Set(ids);
+  selectedCellId = ids[0];
+  closeModal(dossierModal);
+  const cell = getCell(ids[0]);
+  if (cell && map) map.setView([cell.lat, cell.lng], Math.max(map.getZoom(), detailZoomStart()));
+  refreshVisibleCellLayers(ids);
+  renderSelectedCell();
+  showGameMessage("Ділянки з пропозиції підсвічено на карті. Відкрийте Досьє, щоб повернутися до запиту.");
+}
+
 function renderDossier() {
   if (!dossierOverview || !dossierJournal) return;
   const ownedCount = Object.keys(state.land || {}).length;
@@ -4592,7 +4752,11 @@ function renderDossier() {
 function activateDossierTab(tab) {
   document.querySelectorAll("[data-dossier-tab]").forEach((button) => button.classList.toggle("is-active", button.dataset.dossierTab === tab));
   dossierOverview?.classList.toggle("is-hidden", tab !== "overview");
+  dossierOffers?.classList.toggle("is-hidden", tab !== "offers");
   dossierJournal?.classList.toggle("is-hidden", tab !== "journal");
+  if (tab === "offers") {
+    loadBuyoutOffers(true).then(renderBuyoutOffers);
+  }
 }
 
 function renderHelp() {
@@ -6001,6 +6165,8 @@ bindEvent(offerForm, "submit", async (event) => {
   try {
     const payload = await requestJson("/api/offers", { method: "POST", body: JSON.stringify({ cellIds, amount }) });
     state.coins = payload.coins;
+    buyoutOffersCache.loaded = false;
+    renderBuyoutBadge();
     closeModal(offerModal);
     render();
     showGameMessage("Пропозицію відправлено. Сума зарезервована.");
@@ -6014,6 +6180,17 @@ bindEvent(dossierButton, "click", () => {
 bindEvent(dossierModal, "click", (event) => {
   const tab = event.target.closest("[data-dossier-tab]");
   if (tab?.dataset.dossierTab) activateDossierTab(tab.dataset.dossierTab);
+  const buyoutTab = event.target.closest("[data-buyout-tab]");
+  if (buyoutTab?.dataset.buyoutTab) {
+    activeBuyoutTab = buyoutTab.dataset.buyoutTab;
+    renderBuyoutOffers();
+  }
+  const viewOffer = event.target.closest("[data-offer-view]");
+  if (viewOffer?.dataset.offerView) focusBuyoutOfferOnMap(viewOffer.dataset.offerView);
+  const offerAction = event.target.closest("[data-offer-action]");
+  if (offerAction?.dataset.offerAction && offerAction.dataset.offerId) {
+    runBuyoutOfferAction(offerAction.dataset.offerId, offerAction.dataset.offerAction);
+  }
 });
 bindEvent(helpButton, "click", () => {
   renderHelp();
@@ -6116,7 +6293,7 @@ document.addEventListener("click", (event) => {
 document.addEventListener("visibilitychange", () => {
   startBackgroundPolling();
   if (!document.hidden && player && window.location.pathname !== "/admin") {
-    Promise.allSettled([refreshGlobalMarket(), refreshLeaderboard(), refreshNews(), refreshMessageSummary()]);
+    Promise.allSettled([refreshGlobalMarket(), refreshLeaderboard(), refreshNews(), refreshMessageSummary(), loadBuyoutOffers(true)]);
   }
 });
 

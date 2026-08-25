@@ -1926,6 +1926,86 @@ function writeOffers(offers) {
   persistState("offers");
 }
 
+const BUYOUT_ACTIVE_STATUSES = new Set(["pending", "countered"]);
+
+function buyoutFeePercent(settings = readSettings()) {
+  return Math.max(0, Math.min(100, Number(settings.economy?.buyoutFeePercent) || 0));
+}
+
+function buyoutStatusLabel(status) {
+  return {
+    pending: "На розгляді",
+    countered: "Запропоновано іншу ціну",
+    rejected: "Відхилено",
+    cancelled: "Скасовано покупцем",
+    completed: "Угоду завершено",
+    invalid: "Недійсна",
+    expired: "Термін пропозиції минув"
+  }[status] || status || "На розгляді";
+}
+
+function offerReservedAmount(offer) {
+  return offer?.status === "pending" ? Math.max(0, Math.floor(Number(offer.amount) || 0)) : 0;
+}
+
+function releaseOfferReserve(users, offer, now = new Date().toISOString(), reason = "Резерв пропозиції викупу повернено") {
+  const reserved = offerReservedAmount(offer);
+  if (!reserved) return false;
+  const buyer = users.find((user) => user.id === offer.buyerId);
+  if (!buyer) return false;
+  const farm = sanitizeFarmState(buyer.farm);
+  farm.coins = Math.max(0, Math.floor((farm.coins || 0) + reserved));
+  farm.ledger = [{ type: "offer", text: reason, amount: reserved, balance: farm.coins, landDelta: 0, at: now }, ...(farm.ledger || [])].slice(0, 1000);
+  farm.events = [{ text: reason, at: now }, ...(farm.events || [])].slice(0, 30);
+  buyer.farm = sanitizeFarmState(farm);
+  buyer.updatedAt = now;
+  return true;
+}
+
+function publicBuyoutOffer(offer, users, market, settings = readSettings()) {
+  const buyer = users.find((user) => user.id === offer.buyerId);
+  const seller = users.find((user) => user.id === offer.sellerId);
+  const sellerFarm = sanitizeFarmState(seller?.farm);
+  const cells = (offer.cellIds || []).map((id) => sellerFarm.land?.[id]).filter(Boolean);
+  const currentAmount = offer.status === "countered" && offer.counterAmount ? Number(offer.counterAmount) : Number(offer.amount);
+  const systemValue = (offer.cellIds || []).reduce((sum, id) => sum + authoritativeLandPrice(id, market, settings), 0);
+  const income = (offer.cellIds || []).reduce((sum, id) => {
+    const cell = sellerFarm.land?.[id];
+    return sum + (cell ? incomeForLandIdServer(id, settings) * fertilizerMultiplier(cell.level || 1, settings) : incomeForLandIdServer(id, settings));
+  }, 0);
+  const buildings = cells.filter((cell) => cell.building || cell.buildingId).length;
+  const fertilized = cells.filter((cell) => (cell.level || 1) > 1).length;
+  return {
+    ...offer,
+    statusLabel: buyoutStatusLabel(offer.status),
+    buyerName: buyer ? userCompanyName(buyer) : "Гравець",
+    sellerName: seller ? userCompanyName(seller) : "Гравець",
+    landCount: Array.isArray(offer.cellIds) ? offer.cellIds.length : 0,
+    pricePerCell: Math.floor((currentAmount || 0) / Math.max(1, (offer.cellIds || []).length)),
+    systemValue,
+    income: Math.floor(income),
+    fertilized,
+    buildings,
+    feePercent: buyoutFeePercent(settings)
+  };
+}
+
+function invalidateOtherBuyoutOffers(offers, users, changedIds, completedOfferId = null, now = new Date().toISOString()) {
+  const changed = new Set(changedIds || []);
+  let touched = false;
+  offers.forEach((offer) => {
+    if (offer.id === completedOfferId || !BUYOUT_ACTIVE_STATUSES.has(offer.status)) return;
+    if (!(offer.cellIds || []).some((id) => changed.has(id))) return;
+    releaseOfferReserve(users, offer, now, "Резерв пропозиції викупу повернено: власник землі змінився.");
+    offer.status = "invalid";
+    offer.invalidReason = "Власник землі змінився";
+    offer.updatedAt = now;
+    offer.history = [...(offer.history || []), { at: now, text: "Пропозиція стала недійсною: власник землі змінився." }].slice(-30);
+    touched = true;
+  });
+  return touched;
+}
+
 function activeMachineryMap(inventory, currentDay = 1) {
   const batches = Array.isArray(inventory?.machineryBatches) ? inventory.machineryBatches : [];
   if (!batches.length) return inventory?.machinery || {};
@@ -2924,6 +3004,217 @@ async function handleApi(req, res) {
       return;
     }
 
+    if (req.method === "GET" && req.url === "/api/offers") {
+      const session = getSession(req);
+      if (!session || session.isGuest) {
+        sendJson(res, 401, { error: "Спочатку увійдіть у гру." });
+        return;
+      }
+      const users = readUsers();
+      const market = readMarket();
+      const settings = readSettings();
+      const rows = readOffers().filter((offer) => offer.buyerId === session.userId || offer.sellerId === session.userId);
+      const incoming = rows
+        .filter((offer) => offer.sellerId === session.userId)
+        .map((offer) => publicBuyoutOffer(offer, users, market, settings))
+        .sort((a, b) => new Date(b.updatedAt || b.createdAt) - new Date(a.updatedAt || a.createdAt));
+      const outgoing = rows
+        .filter((offer) => offer.buyerId === session.userId)
+        .map((offer) => publicBuyoutOffer(offer, users, market, settings))
+        .sort((a, b) => new Date(b.updatedAt || b.createdAt) - new Date(a.updatedAt || a.createdAt));
+      const unread = incoming.filter((offer) => BUYOUT_ACTIVE_STATUSES.has(offer.status) && !offer.sellerReadAt).length
+        + outgoing.filter((offer) => offer.status === "countered" && !offer.buyerReadAt).length;
+      sendJson(res, 200, { incoming, outgoing, unread });
+      return;
+    }
+
+    if (req.method === "POST" && req.url.startsWith("/api/offers/")) {
+      const session = getSession(req);
+      if (!session || session.isGuest) {
+        sendJson(res, 401, { error: "Спочатку увійдіть у гру." });
+        return;
+      }
+      const parts = req.url.split("/").filter(Boolean);
+      const offerId = parts[2];
+      const action = parts[3];
+      const body = await readBody(req);
+      const offers = readOffers();
+      const offer = offers.find((item) => item.id === offerId);
+      const users = readUsers();
+      const actor = users.find((user) => user.id === session.userId);
+      if (!offer || !actor || (offer.buyerId !== session.userId && offer.sellerId !== session.userId)) {
+        sendJson(res, 404, { error: "Пропозицію не знайдено." });
+        return;
+      }
+      const now = new Date().toISOString();
+      const market = readMarket();
+      const buyer = users.find((user) => user.id === offer.buyerId);
+      const seller = users.find((user) => user.id === offer.sellerId);
+      if (!buyer || !seller) {
+        offer.status = "invalid";
+        offer.invalidReason = "Гравця не знайдено";
+        offer.updatedAt = now;
+        writeOffers(offers);
+        sendJson(res, 409, { error: "Один з учасників угоди більше недоступний." });
+        return;
+      }
+      const buyerFarm = sanitizeFarmState(buyer.farm);
+      const sellerFarm = sanitizeFarmState(seller.farm);
+      const ownsAll = (offer.cellIds || []).length > 0
+        && (offer.cellIds || []).every((id) => sellerFarm.land[id] && market.land[id]?.ownerId === seller.id);
+
+      if (["accept", "counter"].includes(action) && !ownsAll) {
+        releaseOfferReserve(users, offer, now, "Резерв пропозиції викупу повернено: власник землі змінився.");
+        offer.status = "invalid";
+        offer.invalidReason = "Власник землі змінився";
+        offer.updatedAt = now;
+        offer.history = [...(offer.history || []), { at: now, text: "Пропозиція стала недійсною: власник землі змінився." }].slice(-30);
+        writeUsers(users);
+        writeOffers(offers);
+        sendJson(res, 409, { error: "Земля вже змінила власника." });
+        return;
+      }
+
+      if (action === "cancel") {
+        if (session.userId !== offer.buyerId || !BUYOUT_ACTIVE_STATUSES.has(offer.status)) {
+          sendJson(res, 400, { error: "Цю пропозицію вже не можна скасувати." });
+          return;
+        }
+        releaseOfferReserve(users, offer, now, "Резерв пропозиції викупу повернено після скасування.");
+        offer.status = "cancelled";
+        offer.updatedAt = now;
+        offer.history = [...(offer.history || []), { at: now, text: "Покупець скасував пропозицію." }].slice(-30);
+        writeUsers(users);
+        writeOffers(offers);
+        sendJson(res, 200, { ok: true, farm: sanitizeFarmState(actor.farm), offer: publicBuyoutOffer(offer, users, market) });
+        return;
+      }
+
+      if (action === "reject") {
+        if (!BUYOUT_ACTIVE_STATUSES.has(offer.status)) {
+          sendJson(res, 400, { error: "Цю пропозицію вже закрито." });
+          return;
+        }
+        releaseOfferReserve(users, offer, now, "Резерв пропозиції викупу повернено після відхилення.");
+        offer.status = "rejected";
+        offer.updatedAt = now;
+        offer.history = [...(offer.history || []), { at: now, text: session.userId === offer.sellerId ? "Власник відхилив пропозицію." : "Покупець відхилив зустрічну ціну." }].slice(-30);
+        writeUsers(users);
+        writeOffers(offers);
+        sendJson(res, 200, { ok: true, farm: sanitizeFarmState(actor.farm), offer: publicBuyoutOffer(offer, users, market) });
+        return;
+      }
+
+      if (action === "counter") {
+        const amount = Math.floor(Number(body.amount) || 0);
+        if (!BUYOUT_ACTIVE_STATUSES.has(offer.status) || amount < 1) {
+          sendJson(res, 400, { error: "Вкажіть коректну зустрічну ціну." });
+          return;
+        }
+        if (session.userId === offer.sellerId) {
+          releaseOfferReserve(users, offer, now, "Резерв пропозиції викупу повернено: власник запропонував іншу ціну.");
+          offer.status = "countered";
+          offer.counterAmount = amount;
+          offer.updatedAt = now;
+          offer.buyerReadAt = null;
+          offer.history = [...(offer.history || []), { at: now, text: `Власник запропонував ${amount} мон.` }].slice(-30);
+        } else if (session.userId === offer.buyerId) {
+          if (buyerFarm.coins < amount) {
+            sendJson(res, 400, { error: "Недостатньо доступних монет для резервування." });
+            return;
+          }
+          buyerFarm.coins -= amount;
+          buyerFarm.ledger = [{ type: "offer", text: `Новий резерв пропозиції викупу (${(offer.cellIds || []).length} земель)`, amount: -amount, balance: buyerFarm.coins, landDelta: 0, at: now }, ...(buyerFarm.ledger || [])].slice(0, 1000);
+          buyer.farm = sanitizeFarmState(buyerFarm);
+          buyer.updatedAt = now;
+          offer.status = "pending";
+          offer.amount = amount;
+          offer.counterAmount = null;
+          offer.updatedAt = now;
+          offer.sellerReadAt = null;
+          offer.history = [...(offer.history || []), { at: now, text: `Покупець запропонував ${amount} мон.` }].slice(-30);
+        }
+        writeUsers(users);
+        writeOffers(offers);
+        sendJson(res, 200, { ok: true, farm: sanitizeFarmState(actor.farm), offer: publicBuyoutOffer(offer, users, market) });
+        return;
+      }
+
+      if (action === "accept") {
+        if (!BUYOUT_ACTIVE_STATUSES.has(offer.status)) {
+          sendJson(res, 400, { error: "Цю пропозицію вже закрито." });
+          return;
+        }
+        const isSellerAcceptingReservedOffer = session.userId === offer.sellerId && offer.status === "pending";
+        const isBuyerAcceptingCounter = session.userId === offer.buyerId && offer.status === "countered";
+        if (!isSellerAcceptingReservedOffer && !isBuyerAcceptingCounter) {
+          sendJson(res, 400, { error: "Цю дію має виконати інша сторона угоди." });
+          return;
+        }
+        const finalAmount = isBuyerAcceptingCounter ? Math.floor(Number(offer.counterAmount) || 0) : Math.floor(Number(offer.amount) || 0);
+        if (finalAmount < 1) {
+          sendJson(res, 400, { error: "Сума угоди некоректна." });
+          return;
+        }
+        if (isBuyerAcceptingCounter) {
+          if (buyerFarm.coins < finalAmount) {
+            sendJson(res, 400, { error: "Недостатньо монет для прийняття зустрічної ціни." });
+            return;
+          }
+          buyerFarm.coins -= finalAmount;
+        }
+        const fee = Math.floor(finalAmount * buyoutFeePercent() / 100);
+        const sellerCredit = Math.max(0, finalAmount - fee);
+        const buyerLandBefore = Object.keys(buyerFarm.land || {}).length;
+        const sellerLandBefore = Object.keys(sellerFarm.land || {}).length;
+        (offer.cellIds || []).forEach((id) => {
+          const cell = sellerFarm.land[id];
+          buyerFarm.land[id] = { ...cell };
+          delete sellerFarm.land[id];
+          market.land[id] = marketEntryForCell(buyerFarm, buyer.id, userCompanyName(buyer), buyerFarm.land[id]);
+        });
+        sellerFarm.coins = Math.max(0, Math.floor((sellerFarm.coins || 0) + sellerCredit));
+        const landCount = (offer.cellIds || []).length;
+        buyerFarm.ledger = [{ type: "offer", text: `Придбано землю: ${landCount} ділянок`, amount: -finalAmount, balance: buyerFarm.coins, landDelta: landCount, at: now }, ...(buyerFarm.ledger || [])].slice(0, 1000);
+        sellerFarm.ledger = [{ type: "offer", text: `Продано землю: ${landCount} ділянок`, amount: sellerCredit, balance: sellerFarm.coins, landDelta: -landCount, at: now, details: { price: finalAmount, fee } }, ...(sellerFarm.ledger || [])].slice(0, 1000);
+        buyerFarm.events = [{ text: `Угоду завершено: придбано ${landCount} земель за ${finalAmount} мон.`, at: now }, ...(buyerFarm.events || [])].slice(0, 30);
+        sellerFarm.events = [{ text: `Угоду завершено: продано ${landCount} земель за ${finalAmount} мон.`, at: now }, ...(sellerFarm.events || [])].slice(0, 30);
+        buyer.farm = sanitizeFarmState(buyerFarm);
+        seller.farm = sanitizeFarmState(sellerFarm);
+        buyer.updatedAt = now;
+        seller.updatedAt = now;
+        offer.status = "completed";
+        offer.amount = finalAmount;
+        offer.fee = fee;
+        offer.updatedAt = now;
+        offer.completedAt = now;
+        offer.history = [...(offer.history || []), { at: now, text: `Угоду завершено за ${finalAmount} мон.` }].slice(-30);
+        invalidateOtherBuyoutOffers(offers, users, offer.cellIds || [], offer.id, now);
+        writeUsers(users);
+        writeMarket(market, { upsertIds: offer.cellIds || [] });
+        writeOffers(offers);
+        appendNewsEvent({
+          type: "sale",
+          title: "Прямий викуп землі",
+          text: `${userCompanyName(buyer)} придбала ${landCount} земель у ${userCompanyName(seller)}.`,
+          tone: "deal",
+          targetCellId: offer.cellIds?.[0] || null
+        });
+        sendJson(res, 200, {
+          ok: true,
+          buyerLandBefore,
+          sellerLandBefore,
+          farm: sanitizeFarmState(actor.id === buyer.id ? buyer.farm : seller.farm),
+          offer: publicBuyoutOffer(offer, users, market),
+          ...marketVersionPayload()
+        });
+        return;
+      }
+
+      sendJson(res, 404, { error: "Дію не знайдено." });
+      return;
+    }
+
     if (req.method === "POST" && req.url === "/api/claim") {
       const session = getSession(req);
       if (!session || session.isGuest) {
@@ -3117,6 +3408,10 @@ async function handleApi(req, res) {
       farm.coins = Math.max(0, Math.floor((farm.coins || 0) + totalRefund));
       user.farm = sanitizeFarmState(farm);
       user.updatedAt = new Date().toISOString();
+      const offers = readOffers();
+      if (invalidateOtherBuyoutOffers(offers, users, soldIds, null, user.updatedAt)) {
+        writeOffers(offers);
+      }
       writeUsers(users);
       writeMarket(market, { deleteIds: soldIds });
       if (sold) {
