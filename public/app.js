@@ -4501,7 +4501,9 @@ function renderDossier() {
     ["Бонус техніки", "Ефект активної техніки в межах її виробничої місткості.", latestIncome?.machineryBonus],
     ["Бонус господарств", "Приріст доходу від компактних суміжних земельних масивів.", latestIncome?.clusterBonus],
     ["Побудови", "Окремий дохід об'єктів; земля під ними не дає звичайного доходу.", latestIncome?.buildingIncome],
-    ["Податок", "Віднімається з валового доходу за ставкою поточного етапу розвитку.", latestIncome?.tax, true]
+    ["Валовий дохід", "Сума всіх доходів до утримання податку.", latestIncome?.grossIncome],
+    [`Податок ${latestIncome?.taxRate || taxRate}%`, "Віднімається з валового доходу за ставкою поточного етапу розвитку.", latestIncome?.tax, true],
+    ["Зараховано", "Чистий дохід після податку, зарахований на баланс компанії.", latestIncome ? latestIncome.grossIncome - latestIncome.tax : null]
   ];
   dossierTitle.textContent = state.companyName || player?.username || "Господарство";
   dossierOverview.innerHTML = `
@@ -4510,7 +4512,7 @@ function renderDossier() {
         .map(([label, value]) => `<div><span>${label}</span><strong>${escapeHtml(String(value))}</strong></div>`).join("")}
     </div>
     <section class="dossier-section">
-      <h4>Орієнтовна структура щоденних доходів / витрат</h4>
+      <h4>Орієнтовні щоденні доходи/витрати</h4>
       <p>Складові показані за останнім завершеним нарахуванням. Поточні значення можуть змінюватися після купівлі, продажу або інвестицій.</p>
       <div class="income-structure">
         ${incomeRows.map(([title, description, amount, isExpense]) => `<div><span>${escapeHtml(title)}</span><small>${escapeHtml(description)}</small><strong class="${isExpense ? "journal-negative" : ""}">${amount == null ? "Буде показано після нарахування" : `${isExpense ? "-" : "+"}${money(amount)}`}</strong></div>`).join("")}
