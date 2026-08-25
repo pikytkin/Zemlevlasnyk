@@ -107,6 +107,7 @@ const cellTitle = document.querySelector("#cellTitle");
 const cellDetails = document.querySelector("#cellDetails");
 const buyButton = document.querySelector("#buyButton");
 const contactOwnerButton = document.querySelector("#contactOwnerButton");
+const offerBuyoutButton = document.querySelector("#offerBuyoutButton");
 const upgradeButton = document.querySelector("#upgradeButton");
 const buildingButton = document.querySelector("#buildingButton");
 const machineryButton = document.querySelector("#machineryButton");
@@ -159,6 +160,11 @@ const imagePreviewPrev = document.querySelector("#imagePreviewPrev");
 const imagePreviewNext = document.querySelector("#imagePreviewNext");
 const imagePreviewCounter = document.querySelector("#imagePreviewCounter");
 const ownerModal = document.querySelector("#ownerModal");
+const offerModal = document.querySelector("#offerModal");
+const offerForm = document.querySelector("#offerForm");
+const offerDetails = document.querySelector("#offerDetails");
+const offerAmount = document.querySelector("#offerAmount");
+const offerBalance = document.querySelector("#offerBalance");
 const ownerInfo = document.querySelector("#ownerInfo");
 const adminSummary = document.querySelector("#adminSummary");
 const adminUsers = document.querySelector("#adminUsers");
@@ -4119,8 +4125,8 @@ function selectedBuildingInfo() {
   return { item, count: ids.length };
 }
 
-function setActionVisibility({ buy = false, contact = false, upgrade = false, building = false, machinery = false, sell = false } = {}) {
-  [[buyButton, buy], [contactOwnerButton, contact], [upgradeButton, upgrade], [buildingButton, building], [machineryButton, machinery], [sellButton, sell]]
+function setActionVisibility({ buy = false, contact = false, offer = false, upgrade = false, building = false, machinery = false, sell = false } = {}) {
+  [[buyButton, buy], [contactOwnerButton, contact], [offerBuyoutButton, offer], [upgradeButton, upgrade], [buildingButton, building], [machineryButton, machinery], [sellButton, sell]]
     .forEach(([button, visible]) => button?.classList.toggle("is-hidden", !visible));
 }
 
@@ -4178,6 +4184,8 @@ function renderSelectedCell() {
     const rivalCells = summary.rivalCount;
     const totalPrice = summary.totalPrice;
     const totalIncome = summary.totalIncome;
+    const selectedOwners = new Set([...selectedCellIds].map((id) => ownerIdForCell(id)).filter(Boolean));
+    const canOfferBuyout = summary.rivalCount === cells.length && selectedOwners.size === 1;
 
     const selectedBuilding = selectedBuildingInfo();
     cellTitle.textContent = selectedBuilding
@@ -4207,6 +4215,7 @@ function renderSelectedCell() {
     sellButton.disabled = !summary.ownedCount;
     setActionVisibility({
       buy: freeCells.length > 0,
+      offer: canOfferBuyout,
       upgrade: summary.canUpgrade,
       building: summary.buildableCount >= minBuildingCells() || builtCount > 0,
       machinery: summary.ownedCount > 0 && playerOwnedCellCount() > 0,
@@ -4277,6 +4286,7 @@ function renderSelectedCell() {
   setActionVisibility({
     buy: owner === "free",
     contact: owner === "rival" && Boolean(ownerIdForCell(selectedCellId)),
+    offer: owner === "rival" && Boolean(ownerIdForCell(selectedCellId)),
     upgrade: Boolean(owned && !owned.building && !owned.buildingId && owned.level < maxLandLevel()),
     building: Boolean(owned && ((owned.building || owned.buildingId) || buildableSelectedCells().length >= minBuildingCells())),
     machinery: Boolean(owned),
@@ -4486,6 +4496,31 @@ function renderProfileForm() {
     ["Побудов", buildingObjectCount()],
     ["Активна техніка", inventoryCount("machinery")]
   ].map(([key, value]) => `<div><span>${key}</span><strong>${value}</strong></div>`).join("");
+}
+
+function selectedBuyoutCellIds() {
+  return selectedCellIds.size ? [...selectedCellIds] : (selectedCellId ? [selectedCellId] : []);
+}
+
+function openBuyoutOffer() {
+  const cellIds = selectedBuyoutCellIds();
+  const ownerIds = new Set(cellIds.map((id) => ownerIdForCell(id)).filter(Boolean));
+  if (!cellIds.length || ownerIds.size !== 1) {
+    showGameMessage("Для пропозиції викупу виберіть землі одного власника.");
+    return;
+  }
+  const ownerId = [...ownerIds][0];
+  const cells = cellIds.map(getCell).filter(Boolean);
+  const systemValue = cells.reduce((sum, cell) => sum + (Number(cell.price) || 0), 0);
+  const income = cells.reduce((sum, cell) => sum + (Number(cell.income) || cellBaseIncome(cell)), 0);
+  const fertilized = cellIds.filter((id) => (state.land?.[id]?.level || 1) > 1).length;
+  const buildings = cellIds.filter((id) => state.land?.[id]?.building || state.land?.[id]?.buildingId).length;
+  offerDetails.innerHTML = [["Власник", rivalName(cellIds[0])], ["Земель", cellIds.length], ["Системна оцінка", money(systemValue)], ["Орієнтовний дохід", `${money(income)} / добу`], ["Добрива", `${fertilized} ділянок`], ["Побудови", `${buildings} ділянок`]].map(([key, value]) => `<div><span>${key}</span><strong>${escapeHtml(String(value))}</strong></div>`).join("");
+  offerModal.dataset.ownerId = ownerId;
+  offerModal.dataset.cellIds = JSON.stringify(cellIds);
+  offerAmount.value = systemValue || 1;
+  offerBalance.textContent = `Баланс: ${money(state.coins)} · Зарезервовано після відправлення: ${money(offerAmount.value)} · Доступно: ${money(state.coins - offerAmount.value)}`;
+  openModal(offerModal);
 }
 
 function buildingObjectCount() {
@@ -5953,6 +5988,23 @@ bindEvent(ownerInfo, "click", (event) => {
 bindEvent(profileButton, "click", () => {
   renderProfileForm();
   openModal(profileModal);
+});
+bindEvent(offerBuyoutButton, "click", openBuyoutOffer);
+bindEvent(offerAmount, "input", () => {
+  if (offerBalance) offerBalance.textContent = `Баланс: ${money(state.coins)} · Зарезервовано після відправлення: ${money(offerAmount.value)} · Доступно: ${money(Math.max(0, state.coins - Number(offerAmount.value || 0)))}`;
+});
+bindEvent(offerForm, "submit", async (event) => {
+  event.preventDefault();
+  const cellIds = JSON.parse(offerModal?.dataset.cellIds || "[]");
+  const amount = Math.floor(Number(offerAmount?.value) || 0);
+  if (!cellIds.length || amount < 1 || !confirm(`Ви пропонуєте ${money(amount)} за ${cellIds.length} земель.`)) return;
+  try {
+    const payload = await requestJson("/api/offers", { method: "POST", body: JSON.stringify({ cellIds, amount }) });
+    state.coins = payload.coins;
+    closeModal(offerModal);
+    render();
+    showGameMessage("Пропозицію відправлено. Сума зарезервована.");
+  } catch (error) { showGameMessage(error.message); }
 });
 bindEvent(dossierButton, "click", () => {
   renderDossier();

@@ -2870,6 +2870,60 @@ async function handleApi(req, res) {
       return;
     }
 
+    if (req.method === "POST" && req.url === "/api/offers") {
+      const session = getSession(req);
+      if (!session || session.isGuest) {
+        sendJson(res, 401, { error: "Спочатку увійдіть у гру." });
+        return;
+      }
+      const body = await readBody(req);
+      const cellIds = [...new Set((Array.isArray(body.cellIds) ? body.cellIds : []).filter(isPlayableLandId))].slice(0, 1000);
+      const amount = Math.floor(Number(body.amount) || 0);
+      const users = readUsers();
+      const buyer = users.find((item) => item.id === session.userId);
+      const market = readMarket();
+      if (!buyer || !cellIds.length || amount < 1) {
+        sendJson(res, 400, { error: "Вкажіть землі та суму пропозиції." });
+        return;
+      }
+      const ownerIds = new Set(cellIds.map((id) => market.land[id]?.ownerId).filter(Boolean));
+      if (ownerIds.size !== 1 || ownerIds.has(session.userId)) {
+        sendJson(res, 400, { error: "Для пропозиції виберіть землі одного іншого власника." });
+        return;
+      }
+      const seller = users.find((item) => item.id === [...ownerIds][0]);
+      const sellerFarm = sanitizeFarmState(seller?.farm);
+      if (!seller || !cellIds.every((id) => sellerFarm.land[id] && market.land[id]?.ownerId === seller.id)) {
+        sendJson(res, 409, { error: "Частина земель уже змінила власника." });
+        return;
+      }
+      const included = new Set(cellIds);
+      const partialBuilding = cellIds.some((id) => {
+        const group = sellerFarm.land[id]?.buildingGroupId;
+        return group && Object.entries(sellerFarm.land).some(([candidateId, cell]) => cell.buildingGroupId === group && !included.has(candidateId));
+      });
+      if (partialBuilding) {
+        sendJson(res, 400, { error: "Побудову можна викупити лише разом з усіма її ділянками." });
+        return;
+      }
+      const buyerFarm = sanitizeFarmState(buyer.farm);
+      if (buyerFarm.coins < amount) {
+        sendJson(res, 400, { error: "Недостатньо доступних монет для резервування." });
+        return;
+      }
+      buyerFarm.coins -= amount;
+      const now = new Date().toISOString();
+      const offer = { id: crypto.randomUUID(), buyerId: buyer.id, sellerId: seller.id, cellIds, amount, status: "pending", createdAt: now, updatedAt: now };
+      buyerFarm.events = [{ text: `Запропоновано викуп ${cellIds.length} земель: ${amount} мон. зарезервовано.`, at: now }, ...(buyerFarm.events || [])].slice(0, 30);
+      buyerFarm.ledger = [{ type: "offer", text: `Резерв пропозиції викупу (${cellIds.length} земель)`, amount: -amount, balance: buyerFarm.coins, landDelta: 0, at: now }, ...(buyerFarm.ledger || [])].slice(0, 1000);
+      buyer.farm = sanitizeFarmState(buyerFarm);
+      buyer.updatedAt = now;
+      writeUsers(users);
+      writeOffers([...readOffers(), offer]);
+      sendJson(res, 201, { ok: true, offer, coins: buyer.farm.coins, reserved: amount, available: buyer.farm.coins });
+      return;
+    }
+
     if (req.method === "POST" && req.url === "/api/claim") {
       const session = getSession(req);
       if (!session || session.isGuest) {
