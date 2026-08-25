@@ -3652,7 +3652,7 @@ function assetCharacteristics(item, kind) {
         ["Бонус", `+${item.incomeBonusPercent || 0}% до доходу землі`],
         ["Потрібно землі", `${Math.max(1, Number(item.minCells) || 1)} ділянок`],
         ["Термін дії", `${item.durationDays || 80} днів`],
-        ["Місткість", `до ${item.landCapacity || 25} земель на одиницю`]
+        ["Площа обробки", `до ${item.landCapacity || 25} земель на одиницю`]
       ];
   if (item.proOnly) rows.unshift(["Доступ", "🔒 Pro гравці"]);
   return rows.filter(Boolean).map(([key, value]) => `<div><span>${key}</span><strong>${value}</strong></div>`).join("");
