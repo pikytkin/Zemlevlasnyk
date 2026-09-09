@@ -1111,6 +1111,13 @@ function initSplashMap() {
   const splashMap = document.querySelector("#splashMap");
   if (!splashMap) return;
   drawStaticUkrainePreview(splashMap, fallbackUkrainePolygon);
+  fetch("/ukraine-boundary.geojson")
+    .then((response) => {
+      if (!response.ok) throw new Error("Boundary file is unavailable.");
+      return response.json();
+    })
+    .then((geojson) => drawStaticUkrainePreview(splashMap, extractPolygonsFromGeoJson(geojson)))
+    .catch(() => {});
 }
 
 function settlementWeightForType(type) {
@@ -1794,6 +1801,42 @@ function drawStaticUkrainePreview(container, polygons) {
   drawUkrainePolygons(context, polygons, canvas.width, canvas.height, mathBounds(MAP_BOUNDS), true);
 }
 
+function polygonLngLatBounds(polygons) {
+  let west = Infinity;
+  let east = -Infinity;
+  let south = Infinity;
+  let north = -Infinity;
+  (polygons || []).forEach((polygon) => {
+    (polygon || []).forEach((ring) => {
+      (ring || []).forEach(([lng, lat]) => {
+        if (!Number.isFinite(lng) || !Number.isFinite(lat)) return;
+        west = Math.min(west, lng);
+        east = Math.max(east, lng);
+        south = Math.min(south, lat);
+        north = Math.max(north, lat);
+      });
+    });
+  });
+  if (![west, east, south, north].every(Number.isFinite)) return MAP_BOUNDS;
+  return { west, east, south, north };
+}
+
+function staticPreviewProjector(polygons, width, height) {
+  const bounds = polygonLngLatBounds(polygons);
+  const padding = Math.max(18, Math.min(width, height) * 0.07);
+  const lngSpan = Math.max(0.0001, bounds.east - bounds.west);
+  const latSpan = Math.max(0.0001, bounds.north - bounds.south);
+  const scale = Math.min((width - padding * 2) / lngSpan, (height - padding * 2) / latSpan);
+  const drawnWidth = lngSpan * scale;
+  const drawnHeight = latSpan * scale;
+  const offsetX = (width - drawnWidth) / 2;
+  const offsetY = (height - drawnHeight) / 2;
+  return (lng, lat) => ({
+    x: offsetX + (lng - bounds.west) * scale,
+    y: offsetY + (bounds.north - lat) * scale
+  });
+}
+
 function requestMapBaseRender() {
   if (mapBaseRenderFrame) return;
   mapBaseRenderFrame = requestAnimationFrame(() => {
@@ -1805,13 +1848,11 @@ function drawUkrainePolygons(context, polygons, width, height, bounds, staticPre
   context.save();
   context.lineJoin = "round";
   context.lineCap = "round";
+  const staticProject = staticPreview ? staticPreviewProjector(polygons, width, height) : null;
   polygons.forEach((polygon) => {
     const rings = polygon.map((ring) => ring.map(([lng, lat]) => {
       if (staticPreview) {
-        return {
-          x: (lng - MAP_BOUNDS.west) / (MAP_BOUNDS.east - MAP_BOUNDS.west) * width,
-          y: (MAP_BOUNDS.north - lat) / (MAP_BOUNDS.north - MAP_BOUNDS.south) * height
-        };
+        return staticProject(lng, lat);
       }
       return map.latLngToContainerPoint([lat, lng]);
     }));

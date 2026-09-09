@@ -1484,7 +1484,8 @@ function mapOverviewTerritories(bounds, zoom, playerId = "") {
   const level = Math.min(3, chunkLevelForZoom(zoom));
   const preload = level <= 1 ? 36 : level === 2 ? 24 : 12;
 
-  const owners = new Map();
+  const ownerMeta = new Map();
+  const tiles = new Map();
   const overviewSpan = overviewGroupSpanForLevel(level);
   forEachMarketEntryInBounds(market, bounds, preload, ([id, entry]) => {
     if (!isPlayableLandId(id)) return true;
@@ -1493,38 +1494,34 @@ function mapOverviewTerritories(bounds, zoom, playerId = "") {
     if (!ownerId) return true;
     const ownerProfile = ownerProfiles.get(ownerId);
     const color = ownerProfile?.color || entry.ownerColor || "#ef7669";
-    const key = `${ownerId}:${color}`;
-    if (!owners.has(key)) {
-      owners.set(key, {
+    const ownerKey = `${ownerId}:${color}`;
+    if (!ownerMeta.has(ownerKey)) {
+      ownerMeta.set(ownerKey, {
         ownerId,
         ownerKind: playerId && ownerId === playerId ? "player" : "rival",
         color,
-        groupMap: new Map(),
         cellCount: 0
       });
     }
-    const owner = owners.get(key);
-    owner.cellCount += 1;
+    ownerMeta.get(ownerKey).cellCount += 1;
     const gq = Math.floor(q / overviewSpan);
     const gr = Math.floor(r / overviewSpan);
-    const groupId = `${gq}:${gr}`;
-    if (!owner.groupMap.has(groupId)) {
-      owner.groupMap.set(groupId, {
+    const tileKey = `${gq}:${gr}`;
+    if (!tiles.has(tileKey)) {
+      tiles.set(tileKey, {
         gq,
         gr,
-        cellCount: 0,
-        minQ: q,
-        maxQ: q,
-        minR: r,
-        maxR: r
+        owners: new Map()
       });
     }
-    const group = owner.groupMap.get(groupId);
-    group.cellCount += 1;
-    group.minQ = Math.min(group.minQ, q);
-    group.maxQ = Math.max(group.maxQ, q);
-    group.minR = Math.min(group.minR, r);
-    group.maxR = Math.max(group.maxR, r);
+    const tile = tiles.get(tileKey);
+    if (!tile.owners.has(ownerKey)) {
+      tile.owners.set(ownerKey, {
+        ownerKey,
+        cellCount: 0
+      });
+    }
+    tile.owners.get(ownerKey).cellCount += 1;
     return true;
   });
 
@@ -1541,51 +1538,6 @@ function mapOverviewTerritories(bounds, zoom, playerId = "") {
     };
   };
 
-  const buildComponentBoundary = (component) => {
-    let minQ = Infinity;
-    let maxQ = -Infinity;
-    let minR = Infinity;
-    let maxR = -Infinity;
-    component.forEach((group) => {
-      minQ = Math.min(minQ, group.minQ);
-      maxQ = Math.max(maxQ, group.maxQ);
-      minR = Math.min(minR, group.minR);
-      maxR = Math.max(maxR, group.maxR);
-    });
-    return rectBoundaryLatLngRangeServer(minQ, maxQ, minR, maxR);
-  };
-
-  const componentizeGroups = (groupMap) => {
-    const byKey = new Map([...groupMap.values()].map((group) => [`${group.gq}:${group.gr}`, group]));
-    const visited = new Set();
-    const components = [];
-    for (const group of groupMap.values()) {
-      const startKey = `${group.gq}:${group.gr}`;
-      if (visited.has(startKey)) continue;
-      const queue = [group];
-      const component = [];
-      visited.add(startKey);
-      while (queue.length) {
-        const current = queue.pop();
-        component.push(current);
-        [
-          [current.gq + 1, current.gr],
-          [current.gq - 1, current.gr],
-          [current.gq, current.gr + 1],
-          [current.gq, current.gr - 1]
-        ].forEach(([nq, nr]) => {
-          const key = `${nq}:${nr}`;
-          if (visited.has(key)) return;
-          if (!byKey.has(key)) return;
-          visited.add(key);
-          queue.push(byKey.get(key));
-        });
-      }
-      components.push(component);
-    }
-    return components;
-  };
-
   const territoryBounds = (ring) => {
     const lats = ring.map(([lat]) => lat);
     const lngs = ring.map(([, lng]) => lng);
@@ -1597,27 +1549,82 @@ function mapOverviewTerritories(bounds, zoom, playerId = "") {
     };
   };
 
-  const ownerComponentRows = [...owners.values()].map((owner) => ({
-    owner,
-    components: componentizeGroups(owner.groupMap).sort((a, b) => b.length - a.length),
+  const ownerRows = new Map();
+  for (const tile of tiles.values()) {
+    const winner = [...tile.owners.values()].sort((a, b) => {
+      const countDiff = b.cellCount - a.cellCount;
+      return countDiff || a.ownerKey.localeCompare(b.ownerKey);
+    })[0];
+    if (!winner) continue;
+    const owner = ownerMeta.get(winner.ownerKey);
+    if (!owner) continue;
+    if (!ownerRows.has(winner.ownerKey)) {
+      ownerRows.set(winner.ownerKey, {
+        owner,
+        winningCellCount: 0,
+        rowMap: new Map()
+      });
+    }
+    const row = ownerRows.get(winner.ownerKey);
+    row.winningCellCount += winner.cellCount;
+    if (!row.rowMap.has(tile.gr)) row.rowMap.set(tile.gr, []);
+    row.rowMap.get(tile.gr).push({
+      gq: tile.gq,
+      gr: tile.gr,
+      cellCount: winner.cellCount
+    });
+  }
+
+  const buildRunsForOwner = (row) => {
+    const runs = [];
+    [...row.rowMap.entries()]
+      .sort((a, b) => a[0] - b[0])
+      .forEach(([gr, rowTiles]) => {
+        const sortedTiles = rowTiles.sort((a, b) => a.gq - b.gq);
+        let current = null;
+        sortedTiles.forEach((tile) => {
+          if (!current || tile.gq !== current.maxGq + 1) {
+            current = {
+              gr,
+              minGq: tile.gq,
+              maxGq: tile.gq,
+              cellCount: tile.cellCount
+            };
+            runs.push(current);
+            return;
+          }
+          current.maxGq = tile.gq;
+          current.cellCount += tile.cellCount;
+        });
+      });
+    return runs.sort((a, b) => b.cellCount - a.cellCount);
+  };
+
+  const ownerRunRows = [...ownerRows.values()].map((row) => ({
+    owner: row.owner,
+    winningCellCount: row.winningCellCount,
+    runs: buildRunsForOwner(row),
     nextIndex: 0
   }));
   let overviewTruncated = false;
-  let hasRemainingComponents = true;
+  let hasRemainingRuns = true;
 
   // Round-robin owners instead of exhausting one owner first. With a global cap this keeps
   // every player represented even when the map becomes highly fragmented.
-  while (territories.length < maxTerritories && hasRemainingComponents) {
-    hasRemainingComponents = false;
-    for (const row of ownerComponentRows) {
+  while (territories.length < maxTerritories && hasRemainingRuns) {
+    hasRemainingRuns = false;
+    for (const row of ownerRunRows) {
       if (territories.length >= maxTerritories) break;
-      const componentIndex = row.nextIndex;
-      const component = row.components[componentIndex];
-      if (!component) continue;
-      hasRemainingComponents = true;
+      const runIndex = row.nextIndex;
+      const run = row.runs[runIndex];
+      if (!run) continue;
+      hasRemainingRuns = true;
       row.nextIndex += 1;
-      const componentCellCount = component.reduce((sum, group) => sum + (group.cellCount || 0), 0);
-      const boundary = buildComponentBoundary(component);
+      const minQ = run.minGq * overviewSpan;
+      const maxQ = (run.maxGq + 1) * overviewSpan - 1;
+      const minR = run.gr * overviewSpan;
+      const maxR = (run.gr + 1) * overviewSpan - 1;
+      const boundary = rectBoundaryLatLngRangeServer(minQ, maxQ, minR, maxR);
       const center = polygonToCenter(boundary);
       const box = territoryBounds(boundary);
       const intersectsViewport = box.east >= bounds.west
@@ -1632,11 +1639,11 @@ function mapOverviewTerritories(bounds, zoom, playerId = "") {
       territories.push({
         ownerId: row.owner.ownerId,
         ownerKind: row.owner.ownerKind,
-        chunkId: `z${level}:${row.owner.ownerId}:${componentIndex}`,
+        chunkId: `z${level}:${row.owner.ownerId}:${run.gr}:${run.minGq}:${run.maxGq}`,
         polygon: boundary,
         bbox: box,
-        cellCount: componentCellCount,
-        occupied: componentCellCount / Math.max(1, row.owner.cellCount),
+        cellCount: run.cellCount,
+        occupied: run.cellCount / Math.max(1, row.winningCellCount || row.owner.cellCount),
         color: row.owner.color,
         lat: center.lat,
         lng: center.lng
@@ -1644,7 +1651,7 @@ function mapOverviewTerritories(bounds, zoom, playerId = "") {
     }
   }
   if (!overviewTruncated && territories.length >= maxTerritories) {
-    overviewTruncated = ownerComponentRows.some((row) => row.nextIndex < row.components.length);
+    overviewTruncated = ownerRunRows.some((row) => row.nextIndex < row.runs.length);
   }
 
   const payload = { version: marketVersion, zoom, level, territories, truncated: overviewTruncated };
