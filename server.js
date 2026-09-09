@@ -1425,11 +1425,27 @@ function groupKeyForCell(q, r, span) {
   return `${Math.floor(q / span)}:${Math.floor(r / span)}`;
 }
 
-function connectedComponentsForGroups(groupMap) {
+function setsIntersect(a, b) {
+  if (!a || !b || !a.size || !b.size) return false;
+  const [small, large] = a.size <= b.size ? [a, b] : [b, a];
+  for (const value of small) {
+    if (large.has(value)) return true;
+  }
+  return false;
+}
+
+function connectedOverviewComponentsForGroups(groupMap) {
   const groups = [...groupMap.values()];
   const byKey = new Map(groups.map((group) => [`${group.gq}:${group.gr}`, group]));
   const visited = new Set();
   const components = [];
+  const touches = (current, neighbor, dx, dy) => {
+    if (dx === 1) return setsIntersect(current.edges?.right, neighbor.edges?.left);
+    if (dx === -1) return setsIntersect(current.edges?.left, neighbor.edges?.right);
+    if (dy === 1) return setsIntersect(current.edges?.bottom, neighbor.edges?.top);
+    if (dy === -1) return setsIntersect(current.edges?.top, neighbor.edges?.bottom);
+    return false;
+  };
 
   for (const group of groups) {
     const startKey = `${group.gq}:${group.gr}`;
@@ -1442,17 +1458,16 @@ function connectedComponentsForGroups(groupMap) {
       const current = queue.pop();
       component.groups.push(current);
       component.cellCount += current.cellCount || 0;
-      const neighbors = [
-        [current.gq + 1, current.gr],
-        [current.gq - 1, current.gr],
-        [current.gq, current.gr + 1],
-        [current.gq, current.gr - 1]
-      ];
-      neighbors.forEach(([nq, nr]) => {
+      [
+        [current.gq + 1, current.gr, 1, 0],
+        [current.gq - 1, current.gr, -1, 0],
+        [current.gq, current.gr + 1, 0, 1],
+        [current.gq, current.gr - 1, 0, -1]
+      ].forEach(([nq, nr, dx, dy]) => {
         const neighborKey = `${nq}:${nr}`;
         if (visited.has(neighborKey)) return;
         const neighbor = byKey.get(neighborKey);
-        if (!neighbor) return;
+        if (!neighbor || !touches(current, neighbor, dx, dy)) return;
         visited.add(neighborKey);
         queue.push(neighbor);
       });
@@ -1583,10 +1598,23 @@ function mapOverviewTerritories(bounds, zoom, playerId = "") {
     if (!tile.owners.has(ownerKey)) {
       tile.owners.set(ownerKey, {
         ownerKey,
-        cellCount: 0
+        cellCount: 0,
+        edges: {
+          top: new Set(),
+          right: new Set(),
+          bottom: new Set(),
+          left: new Set()
+        }
       });
     }
-    tile.owners.get(ownerKey).cellCount += 1;
+    const tileOwner = tile.owners.get(ownerKey);
+    tileOwner.cellCount += 1;
+    const localQ = q - gq * overviewSpan;
+    const localR = r - gr * overviewSpan;
+    if (localR === 0) tileOwner.edges.top.add(localQ);
+    if (localQ === overviewSpan - 1) tileOwner.edges.right.add(localR);
+    if (localR === overviewSpan - 1) tileOwner.edges.bottom.add(localQ);
+    if (localQ === 0) tileOwner.edges.left.add(localR);
     return true;
   });
 
@@ -1635,14 +1663,15 @@ function mapOverviewTerritories(bounds, zoom, playerId = "") {
     row.groupMap.set(`${tile.gq}:${tile.gr}`, {
       gq: tile.gq,
       gr: tile.gr,
-      cellCount: winner.cellCount
+      cellCount: winner.cellCount,
+      edges: winner.edges
     });
   }
 
   const ownerComponentRows = [...ownerRows.values()].map((row) => ({
     owner: row.owner,
     winningCellCount: row.winningCellCount,
-    components: connectedComponentsForGroups(row.groupMap).sort((a, b) => b.cellCount - a.cellCount),
+    components: connectedOverviewComponentsForGroups(row.groupMap).sort((a, b) => b.cellCount - a.cellCount),
     nextIndex: 0
   }));
   let overviewTruncated = false;
