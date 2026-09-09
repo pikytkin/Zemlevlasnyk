@@ -1326,14 +1326,14 @@ function edgeKey(from, to) {
   return `${from[0]}:${from[1]}|${to[0]}:${to[1]}`;
 }
 
-function tileComponentRingsServer(groups, overviewSpan) {
-  const occupied = new Set(groups.map((group) => pointKey(group.gq, group.gr)));
+function gridComponentRingsServer(cells) {
+  const occupied = new Set(cells.map((cell) => pointKey(cell.q, cell.r)));
   const edges = new Map();
   const addEdge = (from, to) => edges.set(edgeKey(from, to), { from, to });
 
-  groups.forEach((group) => {
-    const x = group.gq;
-    const y = group.gr;
+  cells.forEach((cell) => {
+    const x = cell.q;
+    const y = cell.r;
     if (!occupied.has(pointKey(x, y - 1))) addEdge([x, y], [x + 1, y]);
     if (!occupied.has(pointKey(x + 1, y))) addEdge([x + 1, y], [x + 1, y + 1]);
     if (!occupied.has(pointKey(x, y + 1))) addEdge([x + 1, y + 1], [x, y + 1]);
@@ -1370,9 +1370,9 @@ function tileComponentRingsServer(groups, overviewSpan) {
     }
 
     if (ring.length >= 4 && current[0] === start[0] && current[1] === start[1]) {
-      const latLngRing = ring.map(([gq, gr]) => {
-        const lng = MAP_BOUNDS.west + gq * overviewSpan * RECT_CELL_WIDTH_DEGREES;
-        const lat = MAP_BOUNDS.north - gr * overviewSpan * RECT_CELL_HEIGHT_DEGREES;
+      const latLngRing = ring.map(([q, r]) => {
+        const lng = MAP_BOUNDS.west + q * RECT_CELL_WIDTH_DEGREES;
+        const lat = MAP_BOUNDS.north - r * RECT_CELL_HEIGHT_DEGREES;
         return [lat, lng];
       });
       rings.push(latLngRing);
@@ -1414,60 +1414,33 @@ function chunkCellSpanForLevel(level) {
   return 32;
 }
 
-function overviewGroupSpanForLevel(level) {
-  if (level <= 1) return 8;
-  if (level === 2) return 4;
-  if (level === 3) return 2;
-  return 2;
-}
-
-function groupKeyForCell(q, r, span) {
-  return `${Math.floor(q / span)}:${Math.floor(r / span)}`;
-}
-
-function setsIntersect(a, b) {
-  if (!a || !b || !a.size || !b.size) return false;
-  const [small, large] = a.size <= b.size ? [a, b] : [b, a];
-  for (const value of small) {
-    if (large.has(value)) return true;
-  }
-  return false;
-}
-
-function connectedOverviewComponentsForGroups(groupMap) {
-  const groups = [...groupMap.values()];
-  const byKey = new Map(groups.map((group) => [`${group.gq}:${group.gr}`, group]));
+function connectedComponentsForGridCells(cellMap) {
+  const cells = [...cellMap.values()];
+  const byKey = new Map(cells.map((cell) => [pointKey(cell.q, cell.r), cell]));
   const visited = new Set();
   const components = [];
-  const touches = (current, neighbor, dx, dy) => {
-    if (dx === 1) return setsIntersect(current.edges?.right, neighbor.edges?.left);
-    if (dx === -1) return setsIntersect(current.edges?.left, neighbor.edges?.right);
-    if (dy === 1) return setsIntersect(current.edges?.bottom, neighbor.edges?.top);
-    if (dy === -1) return setsIntersect(current.edges?.top, neighbor.edges?.bottom);
-    return false;
-  };
 
-  for (const group of groups) {
-    const startKey = `${group.gq}:${group.gr}`;
+  for (const cell of cells) {
+    const startKey = pointKey(cell.q, cell.r);
     if (visited.has(startKey)) continue;
-    const queue = [group];
-    const component = { groups: [], cellCount: 0 };
+    const queue = [cell];
+    const component = { cells: [], cellCount: 0 };
     visited.add(startKey);
 
     while (queue.length) {
       const current = queue.pop();
-      component.groups.push(current);
-      component.cellCount += current.cellCount || 0;
+      component.cells.push(current);
+      component.cellCount += 1;
       [
-        [current.gq + 1, current.gr, 1, 0],
-        [current.gq - 1, current.gr, -1, 0],
-        [current.gq, current.gr + 1, 0, 1],
-        [current.gq, current.gr - 1, 0, -1]
-      ].forEach(([nq, nr, dx, dy]) => {
+        [current.q + 1, current.r],
+        [current.q - 1, current.r],
+        [current.q, current.r + 1],
+        [current.q, current.r - 1]
+      ].forEach(([nq, nr]) => {
         const neighborKey = `${nq}:${nr}`;
         if (visited.has(neighborKey)) return;
         const neighbor = byKey.get(neighborKey);
-        if (!neighbor || !touches(current, neighbor, dx, dy)) return;
+        if (!neighbor) return;
         visited.add(neighborKey);
         queue.push(neighbor);
       });
@@ -1564,9 +1537,7 @@ function mapOverviewTerritories(bounds, zoom, playerId = "") {
   const level = Math.min(3, chunkLevelForZoom(zoom));
   const preload = level <= 1 ? 36 : level === 2 ? 24 : 12;
 
-  const ownerMeta = new Map();
-  const tiles = new Map();
-  const overviewSpan = overviewGroupSpanForLevel(level);
+  const owners = new Map();
   forEachMarketEntryInBounds(market, bounds, preload, ([id, entry]) => {
     if (!isPlayableLandId(id)) return true;
     const { q, r } = parseCellGridId(id);
@@ -1575,46 +1546,18 @@ function mapOverviewTerritories(bounds, zoom, playerId = "") {
     const ownerProfile = ownerProfiles.get(ownerId);
     const color = ownerProfile?.color || entry.ownerColor || "#ef7669";
     const ownerKey = `${ownerId}:${color}`;
-    if (!ownerMeta.has(ownerKey)) {
-      ownerMeta.set(ownerKey, {
+    if (!owners.has(ownerKey)) {
+      owners.set(ownerKey, {
         ownerId,
         ownerKind: playerId && ownerId === playerId ? "player" : "rival",
         color,
-        cellCount: 0
-      });
-    }
-    ownerMeta.get(ownerKey).cellCount += 1;
-    const gq = Math.floor(q / overviewSpan);
-    const gr = Math.floor(r / overviewSpan);
-    const tileKey = `${gq}:${gr}`;
-    if (!tiles.has(tileKey)) {
-      tiles.set(tileKey, {
-        gq,
-        gr,
-        owners: new Map()
-      });
-    }
-    const tile = tiles.get(tileKey);
-    if (!tile.owners.has(ownerKey)) {
-      tile.owners.set(ownerKey, {
-        ownerKey,
         cellCount: 0,
-        edges: {
-          top: new Set(),
-          right: new Set(),
-          bottom: new Set(),
-          left: new Set()
-        }
+        cellMap: new Map()
       });
     }
-    const tileOwner = tile.owners.get(ownerKey);
-    tileOwner.cellCount += 1;
-    const localQ = q - gq * overviewSpan;
-    const localR = r - gr * overviewSpan;
-    if (localR === 0) tileOwner.edges.top.add(localQ);
-    if (localQ === overviewSpan - 1) tileOwner.edges.right.add(localR);
-    if (localR === overviewSpan - 1) tileOwner.edges.bottom.add(localQ);
-    if (localQ === 0) tileOwner.edges.left.add(localR);
+    const owner = owners.get(ownerKey);
+    owner.cellCount += 1;
+    owner.cellMap.set(pointKey(q, r), { q, r });
     return true;
   });
 
@@ -1642,36 +1585,9 @@ function mapOverviewTerritories(bounds, zoom, playerId = "") {
     };
   };
 
-  const ownerRows = new Map();
-  for (const tile of tiles.values()) {
-    const winner = [...tile.owners.values()].sort((a, b) => {
-      const countDiff = b.cellCount - a.cellCount;
-      return countDiff || a.ownerKey.localeCompare(b.ownerKey);
-    })[0];
-    if (!winner) continue;
-    const owner = ownerMeta.get(winner.ownerKey);
-    if (!owner) continue;
-    if (!ownerRows.has(winner.ownerKey)) {
-      ownerRows.set(winner.ownerKey, {
-        owner,
-        winningCellCount: 0,
-        groupMap: new Map()
-      });
-    }
-    const row = ownerRows.get(winner.ownerKey);
-    row.winningCellCount += winner.cellCount;
-    row.groupMap.set(`${tile.gq}:${tile.gr}`, {
-      gq: tile.gq,
-      gr: tile.gr,
-      cellCount: winner.cellCount,
-      edges: winner.edges
-    });
-  }
-
-  const ownerComponentRows = [...ownerRows.values()].map((row) => ({
-    owner: row.owner,
-    winningCellCount: row.winningCellCount,
-    components: connectedOverviewComponentsForGroups(row.groupMap).sort((a, b) => b.cellCount - a.cellCount),
+  const ownerComponentRows = [...owners.values()].map((owner) => ({
+    owner,
+    components: connectedComponentsForGridCells(owner.cellMap).sort((a, b) => b.cellCount - a.cellCount),
     nextIndex: 0
   }));
   let overviewTruncated = false;
@@ -1688,12 +1604,12 @@ function mapOverviewTerritories(bounds, zoom, playerId = "") {
       if (!component) continue;
       hasRemainingComponents = true;
       row.nextIndex += 1;
-      const rings = tileComponentRingsServer(component.groups, overviewSpan);
+      const rings = gridComponentRingsServer(component.cells);
       const boundary = rings[0] || rectBoundaryLatLngRangeServer(
-        Math.min(...component.groups.map((group) => group.gq)) * overviewSpan,
-        (Math.max(...component.groups.map((group) => group.gq)) + 1) * overviewSpan - 1,
-        Math.min(...component.groups.map((group) => group.gr)) * overviewSpan,
-        (Math.max(...component.groups.map((group) => group.gr)) + 1) * overviewSpan - 1
+        Math.min(...component.cells.map((cell) => cell.q)),
+        Math.max(...component.cells.map((cell) => cell.q)),
+        Math.min(...component.cells.map((cell) => cell.r)),
+        Math.max(...component.cells.map((cell) => cell.r))
       );
       const center = polygonToCenter(boundary);
       const box = territoryBounds(boundary);
@@ -1714,7 +1630,7 @@ function mapOverviewTerritories(bounds, zoom, playerId = "") {
         rings,
         bbox: box,
         cellCount: component.cellCount,
-        occupied: component.cellCount / Math.max(1, row.winningCellCount || row.owner.cellCount),
+        occupied: component.cellCount / Math.max(1, row.owner.cellCount),
         color: row.owner.color,
         lat: center.lat,
         lng: center.lng
