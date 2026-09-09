@@ -1146,6 +1146,7 @@ function initLandMapLayers() {
 function cellFeature(cell) {
   const parsed = parseHexId(cell.id);
   const boundary = cell.boundary || rectBoundaryLatLng(parsed.q, parsed.r);
+  const rings = Array.isArray(cell.rings) && cell.rings.length ? cell.rings : [boundary];
   const owner = cell.overviewOwner || getOwner(cell.id);
   const selected = selectedCellIds.has(cell.id) || selectedCellId === cell.id;
   const zoom = displayZoomForMapZoom(map.getZoom());
@@ -1163,7 +1164,16 @@ function cellFeature(cell) {
       strokeOpacity: selected ? 1 : cell.overviewOwner ? 0.65 : owner === "free" ? freeGridOpacity : 0.38,
       strokeWidth: selected ? 2 : cell.overviewOwner ? 1.2 : 0.75
     },
-    geometry: { type: "Polygon", coordinates: [[...boundary.map(([lat, lng]) => [lng, lat]), [boundary[0][1], boundary[0][0]]]] }
+    geometry: {
+      type: "Polygon",
+      coordinates: rings.map((ring) => {
+        const coordinates = ring.map(([lat, lng]) => [lng, lat]);
+        const first = coordinates[0];
+        const last = coordinates[coordinates.length - 1];
+        if (first && last && (first[0] !== last[0] || first[1] !== last[1])) coordinates.push([...first]);
+        return coordinates;
+      })
+    }
   };
 }
 
@@ -2339,7 +2349,8 @@ function overviewTerritoryCells() {
     overviewOwner: territory.ownerKind === "player" ? "player" : "rival",
     overviewColor: territory.color || "#ef7669",
     occupied: territory.occupied,
-    boundary: territory.polygon
+    boundary: territory.polygon,
+    rings: territory.rings
   }));
 
   return serverCells;

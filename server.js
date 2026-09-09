@@ -1318,6 +1318,71 @@ function ringToLatLngServer(ring) {
   return ring.map(([lng, lat]) => [lat, lng]);
 }
 
+function pointKey(x, y) {
+  return `${x}:${y}`;
+}
+
+function edgeKey(from, to) {
+  return `${from[0]}:${from[1]}|${to[0]}:${to[1]}`;
+}
+
+function tileComponentRingsServer(groups, overviewSpan) {
+  const occupied = new Set(groups.map((group) => pointKey(group.gq, group.gr)));
+  const edges = new Map();
+  const addEdge = (from, to) => edges.set(edgeKey(from, to), { from, to });
+
+  groups.forEach((group) => {
+    const x = group.gq;
+    const y = group.gr;
+    if (!occupied.has(pointKey(x, y - 1))) addEdge([x, y], [x + 1, y]);
+    if (!occupied.has(pointKey(x + 1, y))) addEdge([x + 1, y], [x + 1, y + 1]);
+    if (!occupied.has(pointKey(x, y + 1))) addEdge([x + 1, y + 1], [x, y + 1]);
+    if (!occupied.has(pointKey(x - 1, y))) addEdge([x, y + 1], [x, y]);
+  });
+
+  const outgoing = new Map();
+  for (const edge of edges.values()) {
+    const key = pointKey(edge.from[0], edge.from[1]);
+    if (!outgoing.has(key)) outgoing.set(key, []);
+    outgoing.get(key).push(edge.to);
+  }
+  for (const points of outgoing.values()) {
+    points.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  }
+
+  const rings = [];
+  while (edges.size) {
+    const first = edges.values().next().value;
+    const start = first.from;
+    const ring = [start];
+    let current = first.from;
+    let guard = edges.size + 8;
+
+    while (guard > 0) {
+      guard -= 1;
+      const candidates = outgoing.get(pointKey(current[0], current[1])) || [];
+      const next = candidates.find((point) => edges.has(edgeKey(current, point)));
+      if (!next) break;
+      edges.delete(edgeKey(current, next));
+      current = next;
+      if (current[0] === start[0] && current[1] === start[1]) break;
+      ring.push(current);
+    }
+
+    if (ring.length >= 4 && current[0] === start[0] && current[1] === start[1]) {
+      const latLngRing = ring.map(([gq, gr]) => {
+        const lng = MAP_BOUNDS.west + gq * overviewSpan * RECT_CELL_WIDTH_DEGREES;
+        const lat = MAP_BOUNDS.north - gr * overviewSpan * RECT_CELL_HEIGHT_DEGREES;
+        return [lat, lng];
+      });
+      rings.push(latLngRing);
+    }
+  }
+
+  return rings.sort((a, b) => Math.abs(polygonAreaSignedServer(b.map(([lat, lng]) => [lng, lat])))
+    - Math.abs(polygonAreaSignedServer(a.map(([lat, lng]) => [lng, lat]))));
+}
+
 function rectBoundaryLatLngRangeServer(minQ, maxQ, minR, maxR) {
   const west = MAP_BOUNDS.west + minQ * RECT_CELL_WIDTH_DEGREES;
   const east = MAP_BOUNDS.west + (maxQ + 1) * RECT_CELL_WIDTH_DEGREES;
@@ -1562,69 +1627,45 @@ function mapOverviewTerritories(bounds, zoom, playerId = "") {
       ownerRows.set(winner.ownerKey, {
         owner,
         winningCellCount: 0,
-        rowMap: new Map()
+        groupMap: new Map()
       });
     }
     const row = ownerRows.get(winner.ownerKey);
     row.winningCellCount += winner.cellCount;
-    if (!row.rowMap.has(tile.gr)) row.rowMap.set(tile.gr, []);
-    row.rowMap.get(tile.gr).push({
+    row.groupMap.set(`${tile.gq}:${tile.gr}`, {
       gq: tile.gq,
       gr: tile.gr,
       cellCount: winner.cellCount
     });
   }
 
-  const buildRunsForOwner = (row) => {
-    const runs = [];
-    [...row.rowMap.entries()]
-      .sort((a, b) => a[0] - b[0])
-      .forEach(([gr, rowTiles]) => {
-        const sortedTiles = rowTiles.sort((a, b) => a.gq - b.gq);
-        let current = null;
-        sortedTiles.forEach((tile) => {
-          if (!current || tile.gq !== current.maxGq + 1) {
-            current = {
-              gr,
-              minGq: tile.gq,
-              maxGq: tile.gq,
-              cellCount: tile.cellCount
-            };
-            runs.push(current);
-            return;
-          }
-          current.maxGq = tile.gq;
-          current.cellCount += tile.cellCount;
-        });
-      });
-    return runs.sort((a, b) => b.cellCount - a.cellCount);
-  };
-
-  const ownerRunRows = [...ownerRows.values()].map((row) => ({
+  const ownerComponentRows = [...ownerRows.values()].map((row) => ({
     owner: row.owner,
     winningCellCount: row.winningCellCount,
-    runs: buildRunsForOwner(row),
+    components: connectedComponentsForGroups(row.groupMap).sort((a, b) => b.cellCount - a.cellCount),
     nextIndex: 0
   }));
   let overviewTruncated = false;
-  let hasRemainingRuns = true;
+  let hasRemainingComponents = true;
 
   // Round-robin owners instead of exhausting one owner first. With a global cap this keeps
   // every player represented even when the map becomes highly fragmented.
-  while (territories.length < maxTerritories && hasRemainingRuns) {
-    hasRemainingRuns = false;
-    for (const row of ownerRunRows) {
+  while (territories.length < maxTerritories && hasRemainingComponents) {
+    hasRemainingComponents = false;
+    for (const row of ownerComponentRows) {
       if (territories.length >= maxTerritories) break;
-      const runIndex = row.nextIndex;
-      const run = row.runs[runIndex];
-      if (!run) continue;
-      hasRemainingRuns = true;
+      const componentIndex = row.nextIndex;
+      const component = row.components[componentIndex];
+      if (!component) continue;
+      hasRemainingComponents = true;
       row.nextIndex += 1;
-      const minQ = run.minGq * overviewSpan;
-      const maxQ = (run.maxGq + 1) * overviewSpan - 1;
-      const minR = run.gr * overviewSpan;
-      const maxR = (run.gr + 1) * overviewSpan - 1;
-      const boundary = rectBoundaryLatLngRangeServer(minQ, maxQ, minR, maxR);
+      const rings = tileComponentRingsServer(component.groups, overviewSpan);
+      const boundary = rings[0] || rectBoundaryLatLngRangeServer(
+        Math.min(...component.groups.map((group) => group.gq)) * overviewSpan,
+        (Math.max(...component.groups.map((group) => group.gq)) + 1) * overviewSpan - 1,
+        Math.min(...component.groups.map((group) => group.gr)) * overviewSpan,
+        (Math.max(...component.groups.map((group) => group.gr)) + 1) * overviewSpan - 1
+      );
       const center = polygonToCenter(boundary);
       const box = territoryBounds(boundary);
       const intersectsViewport = box.east >= bounds.west
@@ -1639,11 +1680,12 @@ function mapOverviewTerritories(bounds, zoom, playerId = "") {
       territories.push({
         ownerId: row.owner.ownerId,
         ownerKind: row.owner.ownerKind,
-        chunkId: `z${level}:${row.owner.ownerId}:${run.gr}:${run.minGq}:${run.maxGq}`,
+        chunkId: `z${level}:${row.owner.ownerId}:${componentIndex}`,
         polygon: boundary,
+        rings,
         bbox: box,
-        cellCount: run.cellCount,
-        occupied: run.cellCount / Math.max(1, row.winningCellCount || row.owner.cellCount),
+        cellCount: component.cellCount,
+        occupied: component.cellCount / Math.max(1, row.winningCellCount || row.owner.cellCount),
         color: row.owner.color,
         lat: center.lat,
         lng: center.lng
@@ -1651,7 +1693,7 @@ function mapOverviewTerritories(bounds, zoom, playerId = "") {
     }
   }
   if (!overviewTruncated && territories.length >= maxTerritories) {
-    overviewTruncated = ownerRunRows.some((row) => row.nextIndex < row.runs.length);
+    overviewTruncated = ownerComponentRows.some((row) => row.nextIndex < row.components.length);
   }
 
   const payload = { version: marketVersion, zoom, level, territories, truncated: overviewTruncated };
