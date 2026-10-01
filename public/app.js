@@ -298,6 +298,12 @@ let ownedCountCacheRevision = -1;
 let ownedCountCache = 0;
 let farmDerivedStatsCache = null;
 let awaitingInitialOverviewLand = false;
+let mapLibreLoadPromise = null;
+
+const MAPLIBRE_SCRIPT_SOURCES = [
+  "https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js",
+  "https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.js"
+];
 
 function defaultGameState() {
   return {
@@ -575,6 +581,22 @@ function normalizePlayableCellId(id) {
   return isRegularHexId(id) ? String(id) : null;
 }
 
+function renderInitialGameShell() {
+  renderPlayerHeader();
+  coinCount.textContent = money(state.coins);
+  dayCount.textContent = state.currentDay;
+  if (stageTitle) stageTitle.textContent = "Рахуємо показники...";
+  if (stageText) stageText.textContent = "Інтерфейс уже доступний, детальні метрики оновляться автоматично.";
+  if (leaderboard) leaderboard.innerHTML = "<li><span>Завантажуємо рейтинг...</span><strong></strong></li>";
+}
+
+function scheduleFullRender() {
+  requestIdleWork(() => {
+    if (!player || gameScreen?.classList.contains("is-hidden")) return;
+    render();
+  });
+}
+
 function startGame(nextPlayer, nextState) {
   player = nextPlayer;
   state = normalizeState(nextState);
@@ -599,6 +621,10 @@ function startGame(nextPlayer, nextState) {
   }
 
   awaitingInitialOverviewLand = true;
+  const slowMapNotice = window.setTimeout(() => {
+    if (map || gameScreen?.classList.contains("is-hidden")) return;
+    showGameMessage("Карта ще завантажується. Інтерфейс уже доступний, дані підтягнуться автоматично.");
+  }, 3500);
   window.setTimeout(() => {
     if (!awaitingInitialOverviewLand) return;
     console.warn("Initial land payload is still loading; showing the game shell.");
@@ -606,9 +632,10 @@ function startGame(nextPlayer, nextState) {
     finishBoot();
   }, 7000);
   gameScreen.classList.remove("is-hidden");
-  renderPlayerHeader();
-  render();
-  showGameMessage("Карту володінь завантажено.");
+  renderInitialGameShell();
+  window.requestAnimationFrame(finishBoot);
+  scheduleFullRender();
+  showGameMessage("Завантажуємо карту володінь...");
   refreshNotificationSummary();
   loadGameSettings().then(() => initMap().catch((error) => {
     console.error("initMap failed:", error);
@@ -617,7 +644,7 @@ function startGame(nextPlayer, nextState) {
       awaitingInitialOverviewLand = false;
       finishBoot();
     }
-  }));
+  })).finally(() => window.clearTimeout(slowMapNotice));
 }
 
 async function logoutPlayer() {
@@ -714,24 +741,76 @@ async function saveState() {
   }
 }
 
+function waitForExistingScript(script, timeoutMs = 2600) {
+  return new Promise((resolve) => {
+    if (!script || globalThis.maplibregl) {
+      resolve(Boolean(globalThis.maplibregl));
+      return;
+    }
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timeout);
+      script.removeEventListener("load", finish);
+      script.removeEventListener("error", finish);
+      resolve(Boolean(globalThis.maplibregl));
+    };
+    const timeout = window.setTimeout(finish, timeoutMs);
+    script.addEventListener("load", finish, { once: true });
+    script.addEventListener("error", finish, { once: true });
+  });
+}
+
+function loadMapLibreScript(src, timeoutMs = 4500) {
+  return new Promise((resolve) => {
+    if (globalThis.maplibregl) {
+      resolve(true);
+      return;
+    }
+    const script = document.createElement("script");
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timeout);
+      script.removeEventListener("load", finish);
+      script.removeEventListener("error", finish);
+      resolve(Boolean(globalThis.maplibregl));
+    };
+    const timeout = window.setTimeout(finish, timeoutMs);
+    script.async = true;
+    script.crossOrigin = "anonymous";
+    script.src = src;
+    script.addEventListener("load", finish, { once: true });
+    script.addEventListener("error", finish, { once: true });
+    document.head.appendChild(script);
+  });
+}
+
+async function ensureMapLibreLoaded() {
+  if (globalThis.maplibregl) return true;
+  if (mapLibreLoadPromise) return mapLibreLoadPromise;
+  mapLibreLoadPromise = (async () => {
+    const existing = document.querySelector('script[src*="maplibre-gl"]');
+    if (await waitForExistingScript(existing)) return true;
+    for (const src of MAPLIBRE_SCRIPT_SOURCES) {
+      if (globalThis.maplibregl) return true;
+      if (existing?.src === src && !existing.dataset.agroRetry) {
+        existing.dataset.agroRetry = "1";
+        continue;
+      }
+      if (await loadMapLibreScript(src)) return true;
+    }
+    return Boolean(globalThis.maplibregl);
+  })();
+  return mapLibreLoadPromise;
+}
+
 async function initMap() {
   if (map) return;
 
-  if (!globalThis.maplibregl) {
-    await new Promise((resolve) => {
-      const startedAt = Date.now();
-      const tick = () => {
-        if (globalThis.maplibregl || Date.now() - startedAt > 8000) {
-          resolve();
-          return;
-        }
-        window.setTimeout(tick, 120);
-      };
-      tick();
-    });
-  }
-
-  if (!globalThis.maplibregl) {
+  if (!await ensureMapLibreLoaded()) {
     showGameMessage("MapLibre GL JS не завантажився. Перевірте підключення до інтернету.");
     finishBoot();
     return;
@@ -1947,7 +2026,8 @@ function refreshCanvasMapLayers() {
 
 function syncGridGpuCanvas() {
   if (!gridCanvas || !mapBoard) return;
-  const ratio = Math.min(1.5, window.devicePixelRatio || 1);
+  const ratioCap = isLowPowerDevice() ? 1 : 1.5;
+  const ratio = Math.min(ratioCap, window.devicePixelRatio || 1);
   const rect = mapBoard.getBoundingClientRect();
   const width = Math.max(1, Math.round(rect.width * ratio));
   const height = Math.max(1, Math.round(rect.height * ratio));
@@ -2274,7 +2354,8 @@ function isTouchDevice() {
 function isLowPowerDevice() {
   return isTouchDevice()
     || window.innerWidth < 900
-    || (navigator.hardwareConcurrency && navigator.hardwareConcurrency <= 4);
+    || (navigator.hardwareConcurrency && navigator.hardwareConcurrency <= 4)
+    || (window.devicePixelRatio && window.devicePixelRatio >= 1.75);
 }
 
 function updateSettlementLabelVisibility() {
@@ -2599,7 +2680,9 @@ function isPlayableGridCell(q, r) {
 
 function gridCellLimitForZoom() {
   const preset = zoomPresetForMapZoom(map?.getZoom?.() ?? detailZoomStart());
-  return Math.min(MAX_VISIBLE_GRID_CELLS, Math.max(500, Number(preset?.maxVisibleCells) || MAX_VISIBLE_GRID_CELLS));
+  const configured = Math.min(MAX_VISIBLE_GRID_CELLS, Math.max(500, Number(preset?.maxVisibleCells) || MAX_VISIBLE_GRID_CELLS));
+  const deviceFactor = isLowPowerDevice() ? 0.55 : 1;
+  return Math.max(500, Math.floor(configured * deviceFactor));
 }
 
 function makeVisibleCell(id) {
@@ -2998,6 +3081,82 @@ function clusterByCell() {
   return mapByCell;
 }
 
+function farmDerivedSummary() {
+  const cached = farmDerivedStatsCache?.summary;
+  if (cached?.revision === landMembershipRevision && cached?.currentDay === state.currentDay) return cached;
+
+  const landEntries = Object.entries(state.land || {});
+  const ownedCount = landEntries.length;
+  const clusters = connectedClusters();
+  const clusterMap = clusterByCell();
+  expireMachinery(false);
+  const activeMachinery = activeMachineryMap();
+  const machineryCount = Object.values(activeMachinery).reduce((sum, qty) => sum + Math.max(0, Number(qty) || 0), 0);
+  const machineryCoverage = Math.min(ownedCount, Object.entries(activeMachinery).reduce((sum, [id, quantity]) => {
+    return sum + Math.max(0, Number(quantity) || 0) * Math.max(1, Number(machineryItemById(id)?.landCapacity) || 25);
+  }, 0));
+  const machineryPercent = assetBonusPercent("machineryItems", activeMachinery, ownedCount);
+  const countedBuildings = new Set();
+  let income = 0;
+  let assets = (gameSettings?.assets?.machineryItems || []).reduce((sum, item) => {
+    return sum + (activeMachinery?.[item.id] || 0) * (item.cost || 0);
+  }, 0);
+  let buildingIncome = 0;
+  let buildingCount = 0;
+  let fertilizedCount = 0;
+
+  landEntries.forEach(([id, ownership]) => {
+    const level = ownership?.level || 1;
+    if (level > 1) fertilizedCount += 1;
+    assets += (Number(ownership?.price) || 0) + fertilizerCostThroughLevel(level);
+
+    const buildingItem = buildingItemForCell(ownership);
+    if (buildingItem) {
+      const key = ownership.buildingGroupId || `${id}:${buildingItem.id}`;
+      if (!countedBuildings.has(key)) {
+        countedBuildings.add(key);
+        buildingCount += 1;
+        buildingIncome += buildingItem.incomePerDay || 0;
+        income += buildingItem.incomePerDay || 0;
+        assets += buildingCostForCell(ownership);
+      }
+      return;
+    }
+
+    const base = incomeForCellId(id);
+    const afterLand = base * fertilizerMultiplier(level);
+    const afterMachinery = afterLand + afterLand * machineryPercent / 100;
+    const cluster = clusterMap.get(id) || { bonus: 0 };
+    income += afterMachinery * (1 + cluster.bonus);
+  });
+
+  const summary = {
+    revision: landMembershipRevision,
+    currentDay: state.currentDay,
+    ownedCount,
+    clusters,
+    largestCluster: clusters[0]?.length || 0,
+    income: Math.max(0, Math.floor(income)),
+    assets,
+    buildingIncome,
+    buildingCount,
+    fertilizedCount,
+    unfertilizedCount: Math.max(0, ownedCount - fertilizedCount),
+    machineryCount,
+    machineryCoverage,
+    machineryPercent
+  };
+  farmDerivedStatsCache = {
+    ...(farmDerivedStatsCache || {}),
+    summary,
+    income: summary.income,
+    assets: summary.assets,
+    buildingIncome: summary.buildingIncome,
+    buildingCount: summary.buildingCount
+  };
+  return summary;
+}
+
 function ownedLandKey() {
   return landMembershipRevision;
 }
@@ -3127,18 +3286,7 @@ function buildingCostForCell(ownership) {
 }
 
 function buildingDailyIncome() {
-  if (Number.isFinite(farmDerivedStatsCache?.buildingIncome)) return farmDerivedStatsCache.buildingIncome;
-  const counted = new Set();
-  const value = Object.values(state.land || {}).reduce((sum, ownership) => {
-    const item = buildingItemForCell(ownership);
-    if (!item) return sum;
-    const key = ownership.buildingGroupId || `${ownership.id}:${item.id}`;
-    if (counted.has(key)) return sum;
-    counted.add(key);
-    return sum + (item.incomePerDay || 0);
-  }, 0);
-  farmDerivedStatsCache = { ...(farmDerivedStatsCache || {}), buildingIncome: value };
-  return value;
+  return farmDerivedSummary().buildingIncome;
 }
 
 function buildingCountByItem() {
@@ -3155,23 +3303,7 @@ function buildingCountByItem() {
 }
 
 function totalDailyIncome() {
-  if (Number.isFinite(farmDerivedStatsCache?.income)) return farmDerivedStatsCache.income;
-  const clusterMap = clusterByCell();
-  const countedBuildings = new Set();
-  const value = ownedCells().reduce((sum, cell) => {
-    const ownership = state.land[cell.id];
-    const item = buildingItemForCell(ownership);
-    if (item) {
-      const key = ownership.buildingGroupId || `${cell.id}:${item.id}`;
-      if (countedBuildings.has(key)) return sum;
-      countedBuildings.add(key);
-      return sum + (item.incomePerDay || 0);
-    }
-    return sum + cellDailyIncome(cell, ownership, clusterMap);
-  }, 0);
-  const rounded = Math.max(0, Math.floor(value));
-  farmDerivedStatsCache = { ...(farmDerivedStatsCache || {}), income: rounded };
-  return rounded;
+  return farmDerivedSummary().income;
 }
 
 function firstBuildingCellIdsForLand(land = state.land) {
@@ -3192,17 +3324,7 @@ function firstBuildingCellIdsForLand(land = state.land) {
 }
 
 function assetsValue() {
-  if (Number.isFinite(farmDerivedStatsCache?.assets)) return farmDerivedStatsCache.assets;
-  const firstBuildingCells = firstBuildingCellIdsForLand();
-  const value = ownedCells().reduce((sum, cell) => {
-    const owned = state.land[cell.id];
-    return sum
-      + owned.price
-      + fertilizerCostThroughLevel(owned.level || 1)
-      + (firstBuildingCells.has(cell.id) ? buildingCostForCell(owned) : 0);
-  }, inventoryValue());
-  farmDerivedStatsCache = { ...(farmDerivedStatsCache || {}), assets: value };
-  return value;
+  return farmDerivedSummary().assets;
 }
 
 function isFirstCellInBuildingGroup(cellId, ownership) {
@@ -4367,10 +4489,11 @@ function renderSelectedCell() {
 }
 
 function renderMetrics() {
-  const clusters = connectedClusters();
-  const ownedCount = Object.keys(state.land).length;
-  const income = totalDailyIncome();
-  const value = assetsValue();
+  const summary = farmDerivedSummary();
+  const clusters = summary.clusters;
+  const ownedCount = summary.ownedCount;
+  const income = summary.income;
+  const value = summary.assets;
   const currentStage = [...stageRules].reverse().find((stage) => ownedCount >= stage.min) || stageRules[0];
   const nextStage = stageRules.find((stage) => stage.min > ownedCount);
 
@@ -4379,7 +4502,7 @@ function renderMetrics() {
   if (ownedMetric) ownedMetric.textContent = ownedCount;
   if (largestClusterMetric) largestClusterMetric.textContent = clusters[0] ? clusters[0].length : 0;
   if (incomeMetric) incomeMetric.textContent = money(income);
-  if (assetMetric) assetMetric.innerHTML = `<span class="asset-metric-line">${inventoryCount("machinery")} тех. · ${money(buildingDailyIncome())}/добу побуд.</span><span class="asset-metric-line">${money(value)}</span>`;
+  if (assetMetric) assetMetric.innerHTML = `<span class="asset-metric-line">${summary.machineryCount} тех. · ${money(summary.buildingIncome)}/добу побуд.</span><span class="asset-metric-line">${money(value)}</span>`;
   stageTitle.textContent = currentStage.title;
   stageText.textContent = nextStage
     ? `${currentStage.text} До наступного етапу: ${nextStage.min - ownedCount} зем.`
@@ -4389,8 +4512,9 @@ function renderMetrics() {
 }
 
 function renderLeaderboard() {
-  const playerScore = assetsValue() + state.coins;
-  const playerLandCount = Object.keys(state.land).length;
+  const summary = farmDerivedSummary();
+  const playerScore = summary.assets + state.coins;
+  const playerLandCount = summary.ownedCount;
   const playerNameForList = state.companyName || "Ваше господарство";
   const fallbackRows = [
     { id: "local-player", name: playerNameForList, landCount: playerLandCount, cash: state.coins, score: playerScore }
@@ -4540,8 +4664,9 @@ function closeImagePreview() {
 }
 
 function renderProfileForm() {
-  const ownedCount = Object.keys(state.land || {}).length;
-  const clusters = connectedClusters();
+  const summary = farmDerivedSummary();
+  const ownedCount = summary.ownedCount;
+  const clusters = summary.clusters;
   const currentStage = [...stageRules].reverse().find((stage) => ownedCount >= stage.min) || stageRules[0];
   profileCompanyName.value = state.companyName || "";
   profileColor.value = state.color || "#35c982";
@@ -4554,17 +4679,17 @@ function renderProfileForm() {
     ["День гри", state.currentDay],
     ["Земельні ділянки", ownedCount],
     ["Найбільше господарство", clusters[0] ? clusters[0].length : 0],
-    ["Дохід за добу", money(totalDailyIncome())],
-    ["Інвестиції", money(assetsValue())],
-    ["Техніка", inventoryCount("machinery")],
+    ["Дохід за добу", money(summary.income)],
+    ["Інвестиції", money(summary.assets)],
+    ["Техніка", summary.machineryCount],
     ["Побудови", inventoryCount("elevators")],
-    ["Бонус техніки", `+${Math.round((inventoryIncomeMultiplier() - 1) * 100)}%`],
-    ["Дохід побудов", `${money(buildingDailyIncome())} / добу`],
+    ["Бонус техніки", `+${Math.round(summary.machineryPercent)}%`],
+    ["Дохід побудов", `${money(summary.buildingIncome)} / добу`],
     ["Зароблено всього", money(state.stats.earned || 0)],
     ["Куплено ділянок", state.stats.purchased || 0],
     ["Покращень", state.stats.upgraded || 0],
-    ["Побудов", buildingObjectCount()],
-    ["Активна техніка", inventoryCount("machinery")]
+    ["Побудов", summary.buildingCount],
+    ["Активна техніка", summary.machineryCount]
   ].map(([key, value]) => `<div><span>${key}</span><strong>${value}</strong></div>`).join("");
 }
 
@@ -4594,12 +4719,7 @@ function openBuyoutOffer() {
 }
 
 function buildingObjectCount() {
-  const groups = new Set();
-  Object.entries(state.land || {}).forEach(([id, ownership]) => {
-    const buildingId = ownership?.building || ownership?.buildingId;
-    if (buildingId) groups.add(ownership.buildingGroupId || `${id}:${buildingId}`);
-  });
-  return groups.size;
+  return farmDerivedSummary().buildingCount;
 }
 
 function formatJournalDate(value) {
@@ -4862,15 +4982,14 @@ function focusBuyoutOfferOnMap(offerId) {
 
 function renderDossier() {
   if (!dossierOverview || !dossierJournal) return;
-  const ownedCount = Object.keys(state.land || {}).length;
-  const clusters = connectedClusters();
+  const summary = farmDerivedSummary();
+  const ownedCount = summary.ownedCount;
+  const clusters = summary.clusters;
   const stage = [...stageRules].reverse().find((item) => ownedCount >= item.min) || stageRules[0];
-  const activeMachinery = inventoryCount("machinery");
-  const buildingCount = buildingObjectCount();
-  const machineryCoverage = Math.min(ownedCount, Object.entries(activeMachineryMap()).reduce((sum, [id, quantity]) => {
-    return sum + Math.max(0, Number(quantity) || 0) * Math.max(1, Number(machineryItemById(id)?.landCapacity) || 25);
-  }, 0));
-  const unfertilizedCount = Object.values(state.land || {}).filter((item) => (item.level || 1) <= 1).length;
+  const activeMachinery = summary.machineryCount;
+  const buildingCount = summary.buildingCount;
+  const machineryCoverage = summary.machineryCoverage;
+  const unfertilizedCount = summary.unfertilizedCount;
   const taxRate = Number(stage?.incomeTaxPercent) || 0;
   const latestIncome = (Array.isArray(state.ledger) ? state.ledger : []).find((entry) => entry?.type === "income" && entry?.details)?.details || null;
   const incomeRows = [
@@ -4886,7 +5005,7 @@ function renderDossier() {
   dossierTitle.textContent = state.companyName || player?.username || "Господарство";
   dossierOverview.innerHTML = `
     <div class="dossier-grid">
-      ${[["Етап розвитку", escapeHtml(stage.title)], ["Земельний банк", `${ownedCount} ділянок`], ["Найбільший кластер", `${clusters[0]?.length || 0} ділянок`], ["Баланс", money(state.coins)], ["Дохід за цикл", money(totalDailyIncome())], ["Податок", taxRate ? `${taxRate}%` : "не застосовується"], ["Активна техніка", `${activeMachinery} од.<br><small>Працюють на ${machineryCoverage} земельних ділянках<br>${Math.max(0, ownedCount - machineryCoverage)} ділянок без техніки</small>`], ["Побудови", `${buildingCount} об.`], ["Добрива", `${Object.values(state.land || {}).filter((item) => (item.level || 1) > 1).length} ділянок<br><small>${unfertilizedCount} ділянок без добрив</small>`], ["Інвестиції", money(assetsValue())]]
+      ${[["Етап розвитку", escapeHtml(stage.title)], ["Земельний банк", `${ownedCount} ділянок`], ["Найбільший кластер", `${clusters[0]?.length || 0} ділянок`], ["Баланс", money(state.coins)], ["Дохід за цикл", money(summary.income)], ["Податок", taxRate ? `${taxRate}%` : "не застосовується"], ["Активна техніка", `${activeMachinery} од.<br><small>Працюють на ${machineryCoverage} земельних ділянках<br>${Math.max(0, ownedCount - machineryCoverage)} ділянок без техніки</small>`], ["Побудови", `${buildingCount} об.`], ["Добрива", `${summary.fertilizedCount} ділянок<br><small>${unfertilizedCount} ділянок без добрив</small>`], ["Інвестиції", money(summary.assets)]]
         .map(([label, value]) => `<div><span>${label}</span><strong>${String(value)}</strong></div>`).join("")}
     </div>
     <section class="dossier-section">
